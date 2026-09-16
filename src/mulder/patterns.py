@@ -20,8 +20,16 @@ HASH_RE: re.Pattern[str] = re.compile(r"\b[a-f0-9]{32,64}\b")
 WIN_PATH_RE: re.Pattern[str] = re.compile(r"[A-Z]:\\[^\s,\"']+")
 
 UNIX_PATH_RE: re.Pattern[str] = re.compile(
-    r"/(?:usr|var|etc|home|tmp|opt|root|proc|sys|run|mnt|media)[^\s,\"']+"
+    r"/(?:usr|var|etc|home|tmp|opt|root|proc|sys|run|mnt|media)/[^\s,\"']+"
 )
+"""Absolute Unix paths under a known root directory.
+
+The ``/`` after the root name is load-bearing: without it the root is only a
+prefix, and ``/rootkit``, ``/etcetera``, ``/home.html`` and
+``/mediawiki/index.php`` all match as file paths. Requiring the root to be a
+complete path segment costs nothing real -- a bare ``/tmp`` with no child is
+not a file path worth extracting.
+"""
 
 PROCESS_RE: re.Pattern[str] = re.compile(
     r"\b(\w+\.exe|(?:sshd|cron|bash|sh|python[23]?|perl|ruby|java|node|nginx|"

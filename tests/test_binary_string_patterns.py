@@ -17,6 +17,13 @@ strings were dropped from the categorised output rather than surfaced as
 
 The IP copy was byte-identical to ``patterns.IP_RE``, so nothing changes there;
 it is removed because the next drift is the problem.
+
+Adopting the shared pattern also imported a false-positive class, since it
+matched the root name as a bare prefix: ``/rootkit``, ``/etcetera``,
+``/home.html`` and ``/mediawiki/index.php`` were all classified as file paths,
+none of which the local pattern accepted. ``patterns.UNIX_PATH_RE`` now
+requires a ``/`` after the root, so the root is a whole path segment, and
+``TestTheRootMustBeAWholeSegment`` below pins both directions.
 """
 
 from __future__ import annotations
@@ -102,3 +109,53 @@ class TestTheSharedPatternsAreTheOnesUsed:
         assert namespace["IP_RE"] is IP_RE
         assert namespace["WIN_PATH_RE"] is WIN_PATH_RE
         assert namespace["UNIX_PATH_RE"] is UNIX_PATH_RE
+
+
+class TestTheRootMustBeAWholeSegment:
+    """Adopting the shared pattern imported a false-positive class with it.
+
+    `UNIX_PATH_RE` matched the root name as a bare *prefix*, so any word that
+    merely started with one was categorised as a file path. The local pattern
+    this PR deletes did not have that problem -- it required a `/` after the
+    root -- so switching to the shared one would have been a regression in
+    exchange for the roots it adds. `patterns.py` now requires the same `/`.
+    """
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "GET /home.html HTTP/1.1",
+            "/rootkit",
+            "/mediawiki/index.php",
+            "/etcetera",
+            "/usrname",
+            "/optimise.dll",
+        ],
+    )
+    def test_a_root_name_used_as_a_prefix_is_not_a_path(self, value: str) -> None:
+        assert UNIX_PATH_RE.search(value) is None
+        assert _categorize_string(value) != "filepath"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "/root/.bash_history",
+            "/home/victim/.ssh/id_rsa",
+            "/etc/shadow",
+            "/tmp/.x11-unix/payload",
+            "/var/log/auth.log",
+            "/media/usb0/exfil.tar",
+        ],
+    )
+    def test_a_real_path_under_a_root_still_matches(self, value: str) -> None:
+        assert UNIX_PATH_RE.search(value) is not None
+        assert _categorize_string(value) == "filepath"
+
+    def test_the_two_roots_this_pr_adds_are_why_it_is_worth_switching(self) -> None:
+        """The original motivation, re-pinned after the tightening.
+
+        `/root` and `/home` were the roots the deleted local pattern lacked,
+        so these two strings were dropped from the categorised output.
+        """
+        for value in ("/root/.bash_history", "/home/victim/.ssh/id_rsa"):
+            assert _categorize_string(value) == "filepath"
