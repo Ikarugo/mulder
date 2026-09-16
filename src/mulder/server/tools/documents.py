@@ -35,6 +35,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _OLEVBA_TIMEOUT = 120
+_STDERR_PREVIEW_CHARS = 500
 _PDFID_TIMEOUT = 60
 _PDF_PARSER_TIMEOUT = 120
 
@@ -148,6 +149,11 @@ _SUSPICIOUS_JS_FUNCTIONS: list[str] = [
 #: Everything above it is banner/log noise.
 _MSODDE_LINK_MARKER = "DDE Links:"
 
+# pdfid keyword rows end in the total count, optionally followed by the
+# hex-obfuscated tally in parentheses: "1", or "1(1)" when the name was
+# written as e.g. /J#61vaScript.
+_PDFID_COUNT_RE = re.compile(r"^(?P<total>\d+)(?:\((?P<hexcode>\d+)\))?$")
+
 
 def _parse_msodde_output(stdout: str) -> list[dict[str, object]]:
     """Extract DDE links from msodde's output.
@@ -221,7 +227,9 @@ def _analyze_macros_olevba(
 
     Raises:
         subprocess.TimeoutExpired: If olevba exceeds the timeout.
-        OSError: If olevba cannot be executed or exits non-zero with no output.
+        OSError: If olevba cannot be executed, or exits non-zero without
+            producing a usable result -- no output at all, output that is not
+            JSON, or JSON whose only content is olevba's own error records.
     """
     # oletools is a mulder dependency, so its console scripts live in mulder's
     # own venv bin/ — which pipx does not link onto PATH.  Invoke the module.
@@ -249,6 +257,11 @@ def _analyze_macros_olevba(
     try:
         raw: Any = json.loads(output)
     except json.JSONDecodeError:
+        if proc.returncode != 0:
+            raise OSError(
+                f"olevba failed (exit {proc.returncode}) and its output was not JSON: "
+                f"{output[:_STDERR_PREVIEW_CHARS]}"
+            ) from None
         logger.warning("Failed to parse olevba JSON output for %s", file_path)
         return [], [], False
 
@@ -291,6 +304,17 @@ def _analyze_macros_olevba(
             )
             if indicator.get("type") in ("VBA", "AutoExec", "Suspicious"):
                 has_vba = True
+
+    # olevba reports its own failures as JSON records on stdout and still exits
+    # non-zero (5 for an unreadable file, 3 for a missing one), so the
+    # stdout-emptiness test above cannot catch them.  Without this, a document
+    # olevba could not open is returned as a clean, macro-free document.
+    errors = [r for r in results if r.get("type") == "error"]
+    if proc.returncode != 0 and errors and not macros and not indicators:
+        detail = "; ".join(
+            f"{e.get('error', 'error')}: {e.get('message', '')}".strip() for e in errors
+        )
+        raise OSError(f"olevba failed (exit {proc.returncode}): {detail[:_STDERR_PREVIEW_CHARS]}")
 
     return macros, indicators, has_vba
 
@@ -418,6 +442,12 @@ def _run_pdfid(file_path: Path) -> list[dict[str, object]]:
 def _extract_pdfid_count(line: str) -> int:
     """Extract the numeric count from a pdfid output line.
 
+    pdfid formats a keyword row as ``' %-16s %7d'`` and, when any occurrence
+    of the name was written with a hex-escaped character, appends the
+    hex-encoded tally as ``'(%d)'`` with no separating space -- so a name that
+    an attacker obfuscated arrives as ``/JavaScript            1(1)``. The
+    total count is the part before that suffix; it must not be discarded.
+
     Args:
         line: A single line from pdfid output.
 
@@ -425,12 +455,12 @@ def _extract_pdfid_count(line: str) -> int:
         Integer count value, or 0 if not parseable.
     """
     parts = line.rsplit(None, 1)
-    if len(parts) == 2:
-        try:
-            return int(parts[1])
-        except ValueError:
-            return 0
-    return 0
+    if len(parts) != 2:
+        return 0
+    match = _PDFID_COUNT_RE.match(parts[1])
+    if match is None:
+        return 0
+    return int(match.group("total"))
 
 
 def _extract_pdf_javascript(file_path: Path) -> list[dict[str, object]]:
@@ -673,6 +703,7 @@ def analyze_office_document(
             params,
             f"Failed to execute olevba: {exc}",
             (time.monotonic() - t0) * 1000,
+            error_type="tool_failed",
         )
 
     risk = _assess_office_risk(macros, has_vba)
@@ -688,20 +719,45 @@ def analyze_office_document(
                 timeout=_OLEVBA_TIMEOUT,
                 check=False,
             )
-            # DDE analysis is best-effort, but a broken msodde must not pass
-            # silently as "no DDE links found". msodde always prints its banner
-            # to stdout, so a stdout-emptiness test here would never fire.
-            if proc.returncode != 0:
-                logger.warning(
-                    "msodde failed for %s (exit %s): %s",
-                    file_path,
-                    proc.returncode,
-                    proc.stderr.strip()[:500] or proc.stdout.strip()[:500] or "no output",
-                )
-            else:
-                dde_links = _parse_msodde_output(proc.stdout)
-        except (subprocess.TimeoutExpired, OSError):
-            logger.debug("msodde analysis failed for %s", file_path)
+        except (subprocess.TimeoutExpired, OSError) as exc:
+            return error_response(
+                tc_id,
+                "analyze_office_document",
+                params,
+                f"msodde could not be run for {file_path}: {exc}",
+                (time.monotonic() - t0) * 1000,
+                error_type="tool_failed",
+                suggestion=(
+                    "Re-run with analyze_dde=False to get the macro analysis "
+                    "without the DDE check."
+                ),
+            )
+
+        # A broken msodde must not pass silently as "no DDE links found":
+        # DDEAUTO is a live code-execution vector, and an empty dde_links list
+        # is read as an authoritative all-clear. msodde always prints its
+        # banner to stdout, so a stdout-emptiness test here would never fire --
+        # the exit code is the only signal there is.
+        if proc.returncode != 0:
+            detail = (
+                proc.stderr.strip()[:_STDERR_PREVIEW_CHARS]
+                or proc.stdout.strip()[:_STDERR_PREVIEW_CHARS]
+                or "no output"
+            )
+            return error_response(
+                tc_id,
+                "analyze_office_document",
+                params,
+                f"msodde exited {proc.returncode}, so the DDE check did not run: {detail}",
+                (time.monotonic() - t0) * 1000,
+                error_type="tool_failed",
+                suggestion=(
+                    "Re-run with analyze_dde=False to get the macro analysis "
+                    "without the DDE check."
+                ),
+            )
+
+        dde_links = _parse_msodde_output(proc.stdout)
 
     index_parts: list[str] = [
         f"File: {file_path}",
