@@ -28,6 +28,7 @@ from mulder.server.helpers import (
     error_response,
     interpreter_candidates,
     make_tool_call_id,
+    readonly_sqlite_uri,
     require_binary,
     tool_response,
 )
@@ -72,7 +73,7 @@ def _carve_sqlite_databases(
                 db_path.write_bytes(mm[pos : pos + db_size])
 
                 try:
-                    conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                    conn = sqlite3.connect(readonly_sqlite_uri(db_path), uri=True)
                     tables = [
                         r[0]
                         for r in conn.execute(
@@ -269,7 +270,7 @@ _ANDROID_ARTIFACTS: dict[str, dict[str, object]] = {
 def _query_sqlite_safe(db_path: Path, query: str) -> list[str]:
     """Run a read-only query, returning formatted rows or empty list on error."""
     try:
-        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        conn = sqlite3.connect(readonly_sqlite_uri(db_path), uri=True)
         conn.row_factory = sqlite3.Row
         rows = conn.execute(query).fetchall()
         conn.close()
@@ -501,7 +502,7 @@ def _resolve_ios_manifest(backup_dir: Path) -> dict[str, Path]:
 
     mapping: dict[str, Path] = {}
     try:
-        conn = sqlite3.connect(f"file:{manifest}?mode=ro", uri=True)
+        conn = sqlite3.connect(readonly_sqlite_uri(manifest), uri=True)
         rows = conn.execute("SELECT fileID, relativePath, domain FROM Files").fetchall()
         conn.close()
     except sqlite3.Error:
@@ -791,7 +792,7 @@ def decrypt_app_data(
 
     for db_path in sqlite_files:
         try:
-            conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            conn = sqlite3.connect(readonly_sqlite_uri(db_path), uri=True)
             tables = [
                 r[0]
                 for r in conn.execute(
@@ -804,7 +805,7 @@ def decrypt_app_data(
                 lines.append(f"Tables: {', '.join(tables)}")
                 for table in tables[:5]:
                     try:
-                        c2 = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+                        c2 = sqlite3.connect(readonly_sqlite_uri(db_path), uri=True)
                         c2.row_factory = sqlite3.Row
                         rows = c2.execute(f"SELECT * FROM [{table}] LIMIT 10").fetchall()
                         c2.close()
@@ -1005,6 +1006,48 @@ def _parse_tsv_file(tsv_path: Path) -> list[dict[str, str]]:
     return records
 
 
+_LEAPP_TSV_DIRNAME = "_TSV Exports"
+
+
+def _find_leapp_tsv_dir(output_dir: Path) -> Path | None:
+    """Locate the directory ALEAPP/iLEAPP wrote their TSV exports into.
+
+    Both tools create a timestamped report folder under the ``-o`` path and
+    write every TSV into a ``_TSV Exports`` directory inside it, so the layout
+    is ``<output_dir>/<TOOL>_Output_<timestamp>/_TSV Exports/*.tsv``. Looking
+    directly under *output_dir* finds nothing at all.
+
+    Args:
+        output_dir: The directory passed to the tool as ``-o``.
+
+    Returns:
+        The directory holding the ``.tsv`` files, or None if there is none.
+    """
+    nested = sorted(
+        (d for d in output_dir.glob(f"*/{_LEAPP_TSV_DIRNAME}") if d.is_dir()),
+        key=lambda d: d.parent.name,
+    )
+    if nested:
+        # A fresh temporary directory holds one run, but sort by the report
+        # folder's timestamped name so the newest wins if a caller reuses one.
+        return nested[-1]
+
+    direct = output_dir / _LEAPP_TSV_DIRNAME
+    if direct.is_dir():
+        return direct
+
+    # Older layouts, and anything that drops the files straight in.
+    legacy = output_dir / "tsv"
+    if legacy.is_dir():
+        return legacy
+    for candidate in sorted(output_dir.iterdir()) if output_dir.is_dir() else []:
+        if candidate.is_dir() and (candidate / "tsv").is_dir():
+            return candidate / "tsv"
+    if output_dir.is_dir() and any(output_dir.glob("*.tsv")):
+        return output_dir
+    return None
+
+
 def _parse_leapp_output(
     output_dir: Path,
     platform: str,
@@ -1030,16 +1073,8 @@ def _parse_leapp_output(
     categories: dict[str, int] = {}
     total_records = 0
 
-    tsv_dir = output_dir / "tsv"
-    if not tsv_dir.exists():
-        for candidate in output_dir.iterdir():
-            if candidate.is_dir() and (candidate / "tsv").exists():
-                tsv_dir = candidate / "tsv"
-                break
-        else:
-            tsv_dir = output_dir
-
-    tsv_files = sorted(tsv_dir.glob("*.tsv")) if tsv_dir.exists() else []
+    tsv_dir = _find_leapp_tsv_dir(output_dir)
+    tsv_files = sorted(tsv_dir.glob("*.tsv")) if tsv_dir is not None else []
 
     for tsv_file in tsv_files:
         artifact_type = tsv_file.stem

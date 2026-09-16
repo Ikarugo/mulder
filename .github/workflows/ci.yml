@@ -135,25 +135,14 @@ jobs:
           cache-from: type=gha
           cache-to: ${{ github.ref == 'refs/heads/main' && 'type=gha,mode=max' || '' }}
 
-      # The image ships every asset already provisioned under /opt, so
-      # `setup --verify` must find all of them and exit 0. --user mulder,
-      # because entrypoint.sh ends `exec gosu mulder "$@"`: as root this would
-      # test a configuration no user ever gets.
-      - name: Smoke-test 'mulder setup --verify' inside the image
+      - name: Report container size and layers
         run: |
-          set -euo pipefail
-          docker run --rm --user mulder --entrypoint mulder mulder:ci-smoke \
-            setup --verify --json > verify.json
-          python3 - <<'PY'
-          import json
-          report = json.load(open("verify.json"))
-          assert report["root"] == "/opt", report["root"]
-          bad = [
-              a for a in report["assets"]
-              if a["selected"] and a["status"] not in ("up-to-date", "up-to-date (unmanaged)")
-          ]
-          assert not bad, bad
-          shadowed = [a for a in report["assets"] if a["shadowed_by"]]
-          assert not shadowed, shadowed
-          assert report["exit"] == 0, report["exit"]
-          PY
+          docker image inspect mulder:ci-smoke --format 'Image size (bytes): {{.Size}}'
+          docker history mulder:ci-smoke
+
+      # Use the normal entrypoint so checks run as the same non-root user as
+      # investigations. Synthetic evidence keeps the tests offline and small.
+      - name: Smoke-test container runtime
+        run: |
+          docker run --rm -i --pull=never --network none mulder:ci-smoke \
+            python3 - < scripts/container-smoke.py
