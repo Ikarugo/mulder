@@ -52,8 +52,11 @@ def _run(evidence: Path, mode: str, payload: list[dict[str, Any]]) -> tuple[str,
         out.write_text(json.dumps(payload))
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
+    mapping = evidence / "mapping.yml"
+    mapping.write_text("---\n")
     with (
         patch("mulder.server.tools.chainsaw._chainsaw_binary", return_value="/usr/bin/chainsaw"),
+        patch("mulder.server.tools.chainsaw._default_chainsaw_mapping", return_value=mapping),
         patch("mulder.server.tools.chainsaw.sources_already_indexed", return_value=[]),
         patch("mulder.server.tools.chainsaw.subprocess.run", side_effect=_write),
         patch("mulder.server.tools.chainsaw.extract_and_index", side_effect=_record),
@@ -151,8 +154,11 @@ def test_the_response_is_still_capped(evidence: Path) -> None:
         captured["results"] = results
         return {"status": "success"}
 
+    mapping = evidence / "mapping.yml"
+    mapping.write_text("---\n")
     with (
         patch("mulder.server.tools.chainsaw._chainsaw_binary", return_value="/usr/bin/chainsaw"),
+        patch("mulder.server.tools.chainsaw._default_chainsaw_mapping", return_value=mapping),
         patch("mulder.server.tools.chainsaw.sources_already_indexed", return_value=[]),
         patch("mulder.server.tools.chainsaw.subprocess.run", side_effect=_write),
         patch("mulder.server.tools.chainsaw.extract_and_index", side_effect=_record),
