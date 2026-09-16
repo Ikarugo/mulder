@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import time
@@ -33,6 +34,8 @@ logger = logging.getLogger(__name__)
 
 _CHAINSAW_TIMEOUT = 600
 _STDERR_PREVIEW_CHARS = 500
+_ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
+_BANNER_RE = re.compile(r"^[\u2550-\u257f\s]+$|^By WithSecure")
 
 
 def _chainsaw_binary() -> str | None:
@@ -299,6 +302,29 @@ def _run_chainsaw_timeline(
         check=False,
     )
     return output_file, proc
+
+
+def _chainsaw_error_detail(proc: subprocess.CompletedProcess[str]) -> str:
+    """Pull the reason out of Chainsaw's output, not its ASCII banner.
+
+    Chainsaw prints a nine-line logo to stderr before anything else, so the
+    first 500 characters of stderr are the logo and the actual message is cut
+    off. The reason is marked with ``[x]``, wrapped in an ANSI colour escape.
+
+    Args:
+        proc: The completed Chainsaw process.
+
+    Returns:
+        The error lines Chainsaw printed, or a trimmed tail of its output if
+        it did not mark any.
+    """
+    text = (proc.stderr or "") + "\n" + (proc.stdout or "")
+    lines = [_ANSI_RE.sub("", line).strip() for line in text.splitlines()]
+    lines = [line for line in lines if line and not _BANNER_RE.match(line)]
+
+    marked = [line for line in lines if line.startswith("[x]")]
+    chosen = marked or lines[-3:]
+    return "; ".join(chosen)[:_STDERR_PREVIEW_CHARS] or "no output"
 
 
 def _parse_chainsaw_hunt_results(results_path: Path) -> dict[str, Any]:
@@ -588,15 +614,19 @@ def run_chainsaw(
                 error_type="os_error",
             )
 
-        if proc.returncode != 0 and not results_path.exists():
-            detail = ((proc.stderr or "").strip() or (proc.stdout or "").strip())[
-                :_STDERR_PREVIEW_CHARS
-            ]
+        # The output file is not evidence that the run worked. Chainsaw opens
+        # it before it validates the evidence path, so a run that never
+        # scanned anything still leaves a zero-byte file behind, and the
+        # parsers read that as "no detections". Verified with Chainsaw 2.16.0:
+        # `search -e x /nonexistent` exits 1, creates the file, writes 0 bytes.
+        # A nonzero exit is the only signal there is, so it is the whole test.
+        if proc.returncode != 0:
+            detail = _chainsaw_error_detail(proc)
             return error_response(
                 tc_id,
                 "run_chainsaw",
                 params,
-                f"Chainsaw {mode} exited {proc.returncode} and wrote no results file: {detail}",
+                f"Chainsaw {mode} exited {proc.returncode}: {detail}",
                 (time.monotonic() - t0) * 1000,
                 error_type="tool_failed",
             )

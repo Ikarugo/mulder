@@ -2,10 +2,24 @@
 
 All four Chainsaw runners -- hunt, search, srum and timeline -- called
 ``subprocess.run(...)`` and returned only the output path, discarding the exit
-code. When Chainsaw failed it wrote no results file, and every
-``_parse_chainsaw_*_results`` answers a missing file with an empty result dict.
-``run_chainsaw`` then reported ``status: success`` with ``Total findings: 0``:
-a Sigma hunt that never executed looked exactly like a clean host.
+code. Every ``_parse_chainsaw_*_results`` answers a missing or unparseable
+file with an empty result dict, so ``run_chainsaw`` reported ``status:
+success`` with ``Total findings: 0``: a Sigma hunt that never executed looked
+exactly like a clean host.
+
+The first version of this fix guarded on ``returncode != 0 and not
+results_path.exists()``, on the assumption that a failed run leaves no file.
+That assumption is wrong, and Chainsaw is explicit about it -- it opens the
+output file before it validates the evidence path. Verified against Chainsaw
+2.16.0::
+
+    $ chainsaw search -e x /nonexistent/evidence --json --output out.json
+    [x] Specified event log path is invalid - /nonexistent/evidence
+    exit=1   out.json exists, 0 bytes
+
+So the file always exists, the conjunct is never true, and the guard never
+fired for the most common failure there is. A nonzero exit is the only signal
+available, and it is now the whole test.
 """
 
 from __future__ import annotations
@@ -113,29 +127,106 @@ def test_a_genuinely_quiet_host_is_still_a_success(
     assert indexed, "a successful quiet run must still be summarised"
 
 
+_CHAINSAW_BANNER = (
+    "\n ██████╗██╗  ██╗ █████╗ ██╗███╗   ██╗███████╗ █████╗ ██╗    ██╗\n"
+    "██╔════╝██║  ██║██╔══██╗██║████╗  ██║██╔════╝██╔══██╗██║    ██║\n"
+    "    By WithSecure Countercept (@FranticTyping, @AlexKornitzer)\n\n"
+)
+
+
 @pytest.mark.parametrize("mode", _MODES)
-def test_findings_written_before_a_non_zero_exit_are_kept(
+def test_a_zero_byte_output_file_does_not_rescue_a_failed_run(
     mode: str, evidence: Path, tmp_path: Path
 ) -> None:
-    """Chainsaw exits non-zero on one unreadable EVTX after matching others.
+    """The real Chainsaw behaviour: the file exists and is empty.
 
-    The guard is conjunctive -- non-zero *and* no results file -- so real
-    detections are never discarded because one input was corrupt.
+    Chainsaw opens `--output` before it validates the evidence path, so this
+    is what an invalid path actually leaves behind. The previous conjunctive
+    guard saw the file, concluded the run had produced results, and reported
+    a clean scan.
     """
     rules = tmp_path / "rules"
     rules.mkdir()
-    written: list[Path] = []
+    # Recorded inside the fake: run_chainsaw works in a TemporaryDirectory,
+    # so the file is gone by the time the assertions run.
+    written: list[tuple[bool, int]] = []
 
-    def _write_results(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+    def _touch_then_fail(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
         outfile = Path(cmd[cmd.index("--output") + 1])
-        outfile.write_text(json.dumps([]))
-        written.append(outfile)
+        outfile.write_bytes(b"")
+        written.append((outfile.exists(), outfile.stat().st_size))
         return subprocess.CompletedProcess(
-            args=cmd, returncode=1, stdout="", stderr="failed to parse one file"
+            args=cmd,
+            returncode=1,
+            stdout="",
+            stderr=(
+                _CHAINSAW_BANNER + "\x1b[38;5;9m[x] Specified event log path is invalid"
+                " - /nonexistent/evidence\x1b[0m\n"
+            ),
         )
 
-    result, indexed = _invoke(evidence, mode, _write_results, rules)
+    result, indexed = _invoke(evidence, mode, _touch_then_fail, rules)
 
-    assert written, "the fake Chainsaw never wrote its output file"
-    assert result["status"] == "success"
-    assert indexed
+    assert written == [(True, 0)], "the fake must reproduce Chainsaw's empty output file"
+    assert result["status"] == "error"
+    assert result["error_type"] == "tool_failed"
+    assert indexed == [], "a failed run must not be summarised into the case"
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_real_looking_findings_do_not_rescue_a_failed_run_either(
+    mode: str, evidence: Path, tmp_path: Path
+) -> None:
+    """Even a file with detections in it does not make a failed run a success.
+
+    A run that exited non-zero did not finish, so the detections in the file
+    are an unknown fraction of what the evidence holds. Reporting them as the
+    result is the same wrong answer in a quieter form -- the analyst cannot
+    tell a partial hunt from a complete one.
+    """
+    rules = tmp_path / "rules"
+    rules.mkdir()
+
+    def _write_findings(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        outfile = Path(cmd[cmd.index("--output") + 1])
+        outfile.write_text(
+            json.dumps([{"name": "Suspicious PowerShell", "level": "high", "timestamp": "t"}])
+        )
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=1, stdout="", stderr="[x] failed to parse Application.evtx"
+        )
+
+    result, indexed = _invoke(evidence, mode, _write_findings, rules)
+
+    assert result["status"] == "error"
+    assert result["error_type"] == "tool_failed"
+    assert "failed to parse Application.evtx" in str(result["error_message"])
+    assert indexed == []
+
+
+def test_the_error_message_is_the_reason_not_the_ascii_logo(
+    evidence: Path, tmp_path: Path
+) -> None:
+    """Chainsaw prints a nine-line logo before anything else.
+
+    Truncating the head of stderr would hand the agent ASCII art and cut off
+    the sentence that says what went wrong.
+    """
+    rules = tmp_path / "rules"
+    rules.mkdir()
+    proc = subprocess.CompletedProcess(
+        args=["chainsaw", "hunt"],
+        returncode=1,
+        stdout="",
+        stderr=(
+            _CHAINSAW_BANNER + "\x1b[38;5;9m[x] Specified event log path is invalid"
+            " - /nonexistent/evidence\x1b[0m\n"
+        ),
+    )
+
+    result, _indexed = _invoke(evidence, "hunt", proc, rules)
+
+    message = str(result["error_message"])
+    assert "Specified event log path is invalid" in message
+    assert "\u2588" not in message, "the banner leaked into the error message"
+    assert "\x1b[" not in message, "ANSI escapes leaked into the error message"
