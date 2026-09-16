@@ -186,3 +186,61 @@ class TestOpenCaseHonoursTheEnforcedCase:
         monkeypatch.delenv("MULDER_CASE_ID", raising=False)
         result = open_case.__wrapped__("CASE-B")  # type: ignore[attr-defined]
         assert result["error_type"] == "not_found"
+
+
+class TestLoadCaseIsTheChokePoint:
+    """`open_case` is not the only way into a case database.
+
+    `init_server(case_id=...)` and the orchestrator's `ServerBridge` both call
+    `load_case()` directly, so a check that lives only in the tool layer is not
+    a containment guarantee. `CaseDB.open()` requires the file to exist, so the
+    reachable case is not "create a database anywhere" but the worse-behaved
+    one: attach to an existing SQLite file outside `db_dir` and run the schema
+    migrations against it.
+    """
+
+    def test_load_case_refuses_a_traversal(self, tmp_path: Path) -> None:
+        from mulder.db import CaseDB
+        from mulder.server.app import init_server, load_case
+
+        db_dir = tmp_path / "cases"
+        db_dir.mkdir()
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        # A real, openable case database that load_case must refuse to reach.
+        CaseDB.create("evil", str(outside), outside).close()
+        assert (outside / "evil.db").exists()
+        before = sorted(p.name for p in outside.iterdir())
+
+        init_server(db_dir=db_dir)
+
+        with pytest.raises(ValueError, match="case_id"):
+            load_case("../outside/evil")
+
+        assert sorted(p.name for p in outside.iterdir()) == before, (
+            "load_case must not touch anything outside db_dir"
+        )
+
+    def test_load_case_still_opens_a_legitimate_case(self, tmp_path: Path) -> None:
+        """The guard must not break the ordinary path."""
+        from mulder.db import CaseDB
+        from mulder.server.app import init_server, load_case
+
+        db_dir = tmp_path / "cases"
+        db_dir.mkdir()
+        CaseDB.create("CASE-2024-007", str(tmp_path), db_dir).close()
+
+        init_server(db_dir=db_dir)
+        ctx = load_case("CASE-2024-007")
+
+        assert ctx.case_id == "CASE-2024-007"
+
+    def test_init_server_refuses_a_traversal_case_id(self, tmp_path: Path) -> None:
+        """init_server(case_id=...) reaches load_case without passing open_case."""
+        from mulder.server.app import init_server
+
+        db_dir = tmp_path / "cases"
+        db_dir.mkdir()
+
+        with pytest.raises(ValueError, match="case_id"):
+            init_server(db_dir=db_dir, case_id="../outside/evil")

@@ -420,7 +420,20 @@ def load_case(case_id: str) -> ServerContext:
     Delegates context construction to ``_build_context``, which sets
     the global ``_ctx`` atomically under ``_ctx_lock``.  The old
     database is closed *after* the new context is installed.
+
+    This is the choke point for the case-ID check, because it is the only
+    place every path into a case database passes through: ``open_case``
+    calls it, and so do ``init_server`` and the orchestrator's
+    ``ServerBridge``, neither of which goes near the tool layer.
+    ``open_case`` validates as well, but only so it can return a structured
+    ``invalid_input`` response instead of raising -- the guard here is what
+    makes the containment property hold for *every* caller.
+
+    Raises:
+        ValueError: If *case_id* is not a single path segment.
     """
+    validate_case_id(case_id)
+
     cfg = get_cfg()
     logger.info("Opening case database for '%s' ...", case_id)
 
