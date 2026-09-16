@@ -241,3 +241,91 @@ def test_a_fully_parsed_clean_binary_is_still_benign(sample: Path) -> None:
     verdict = computed[0]["triage_verdict"]
     assert verdict["classification"] == "benign_indicators"
     assert verdict["confidence"] == "medium"
+
+
+# ---------------------------------------------------------------------------
+# A clean exit is not a clean parse
+# ---------------------------------------------------------------------------
+
+
+_TRUNCATED_MACHO_STDERR = "ERROR: parsing symtab\nCannot initialize items\n"
+
+
+def test_a_parse_error_on_a_zero_exit_is_recorded() -> None:
+    """rabin2 reports a damaged container this way: ERROR on stderr, exit 0.
+
+    Reproduced with the official rabin2 5.9.8 against a truncated Mach-O: it
+    printed `ERROR: parsing symtab` and `Cannot initialize items`, returned 0,
+    and produced partial JSON. The exit code alone cannot see it.
+    """
+    proc = subprocess.CompletedProcess(
+        args=["rabin2", "-ij", "/evidence/truncated.macho"],
+        returncode=0,
+        stdout='{"imports": [{"name": "printf"}]}',
+        stderr=_TRUNCATED_MACHO_STDERR,
+    )
+    incomplete: list[str] = []
+
+    with patch("mulder.server.tools.binary.subprocess.run", return_value=proc):
+        result = _run_rabin2("i", Path("/evidence/truncated.macho"), incomplete)
+
+    assert result == {"imports": [{"name": "printf"}]}, "the partial data is still returned"
+    assert len(incomplete) == 1
+    assert "rabin2 -i" in incomplete[0]
+    assert "parsing symtab" in incomplete[0]
+
+
+def test_a_warning_on_a_zero_exit_is_not_a_parse_error() -> None:
+    """Narrowness: rabin2 warns routinely on perfectly healthy binaries.
+
+    Treating WARN as failure would make every stripped binary inconclusive.
+    """
+    proc = subprocess.CompletedProcess(
+        args=["rabin2", "-ij", "/evidence/stripped.elf"],
+        returncode=0,
+        stdout='{"imports": []}',
+        stderr="WARN: Cannot find symbol table\nwarning: stripped binary\n",
+    )
+    incomplete: list[str] = []
+
+    with patch("mulder.server.tools.binary.subprocess.run", return_value=proc):
+        _run_rabin2("i", Path("/evidence/stripped.elf"), incomplete)
+
+    assert incomplete == []
+
+
+def test_a_damaged_binary_that_exits_zero_is_not_benign(sample: Path) -> None:
+    """The regression the reviewer asked for, end to end.
+
+    Return code 0, valid JSON, and an `ERROR:` on stderr. Before this change
+    the condition accepted the output and `triage_binary` classified the
+    damaged file as `benign_indicators` with medium confidence.
+    """
+
+    def _damaged(cmd: list[str], **_: object) -> subprocess.CompletedProcess[str]:
+        if "-Ij" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd, returncode=0, stdout='{"info": {"arch": "x86"}}', stderr=""
+            )
+        if "-ij" in cmd:
+            return subprocess.CompletedProcess(
+                args=cmd,
+                returncode=0,
+                stdout='{"imports": [{"name": "printf"}]}',
+                stderr=_TRUNCATED_MACHO_STDERR,
+            )
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="{}", stderr="")
+
+    result, computed = _triage(sample, _damaged)
+
+    assert result["status"] == "success"
+    verdict = computed[0]["triage_verdict"]
+    assert verdict["classification"] == "inconclusive"
+    assert verdict["confidence"] == "none"
+    assert any("parsing symtab" in str(r) for r in verdict["reasons"])
+    # The partial data is retained -- it just cannot buy a clean verdict.
+    # The headers parsed fine and are still reported.
+    assert computed[0]["file_info"]["arch"] == "x86"
+    assert "rabin2 -i" in " ".join(str(r) for r in verdict["reasons"]), (
+        "the reason must name which step was incomplete"
+    )
