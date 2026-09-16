@@ -37,6 +37,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 _RABIN2_TIMEOUT = 60
+_STDERR_PREVIEW_CHARS = 500
 _CAPA_TIMEOUT = 300
 _FLOSS_TIMEOUT = 600
 _DIEC_TIMEOUT = 120
@@ -118,18 +119,49 @@ _RESOLVER_APIS = {"LoadLibraryA", "LoadLibraryW", "GetProcAddress"}
 # ---------------------------------------------------------------------------
 
 
-def _run_rabin2(flags: str, file_path: Path) -> dict[str, Any]:
+def _rabin2_parse_errors(stderr: str) -> list[str]:
+    """Return the ``ERROR:`` lines rabin2 wrote while parsing.
+
+    rabin2 reports a damaged or truncated container by printing ``ERROR:``
+    lines and **still exiting 0** with partial JSON on stdout, so the exit
+    code alone does not say whether the analysis is complete.
+
+    Only ``ERROR:`` counts. rabin2 prints ``WARN:`` routinely for healthy
+    binaries -- a stripped symbol table, an unknown section flag -- and
+    treating those as failure would make every ordinary triage inconclusive.
+
+    Args:
+        stderr: Captured standard error from a rabin2 invocation.
+
+    Returns:
+        The error lines, in order, with the ``ERROR:`` prefix retained.
+    """
+    return [line.strip() for line in stderr.splitlines() if line.strip().startswith("ERROR:")]
+
+
+def _run_rabin2(
+    flags: str, file_path: Path, incomplete: list[str] | None = None
+) -> dict[str, Any]:
     """Execute rabin2 with JSON output and return parsed result.
 
     Args:
         flags: rabin2 flag characters (e.g. "I", "i", "S").
         file_path: Path to the target binary.
+        incomplete: Collector for analysis steps that did not complete. When
+            rabin2 reports a parse error but exits 0 and returns partial JSON,
+            the data is returned *and* a note is appended here, so the caller
+            keeps the partial data without being able to call the file clean.
 
     Returns:
-        Parsed JSON output, or empty dict on failure.
+        Parsed JSON output. An empty dict means rabin2 ran successfully and
+        had nothing to report (a binary with no imports, say) -- never that
+        rabin2 failed, which raises or records instead.
 
     Raises:
         subprocess.TimeoutExpired: If rabin2 exceeds the timeout.
+        OSError: If rabin2 exits non-zero *and* produced no parseable output.
+            A non-zero exit that still yielded JSON is kept: rabin2 reports a
+            partial parse that way, and that data is real.
     """
     cmd = ["rabin2", f"-{flags}j", str(file_path)]
     proc = subprocess.run(
@@ -139,13 +171,28 @@ def _run_rabin2(flags: str, file_path: Path) -> dict[str, Any]:
         timeout=_RABIN2_TIMEOUT,
         check=False,
     )
-    if not proc.stdout.strip():
-        return {}
-    try:
-        loaded = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        logger.warning("Failed to parse rabin2 -%s JSON output", flags)
-        return {}
+    loaded: Any = None
+    if proc.stdout.strip():
+        try:
+            loaded = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            logger.warning("Failed to parse rabin2 -%s JSON output", flags)
+            loaded = None
+
+    if proc.returncode != 0 and loaded is None:
+        detail = (proc.stderr.strip() or proc.stdout.strip())[:_STDERR_PREVIEW_CHARS]
+        raise OSError(f"rabin2 -{flags} exited {proc.returncode} and produced no output: {detail}")
+
+    # A clean exit is not a clean parse. rabin2 exits 0 on a truncated Mach-O
+    # after printing "ERROR: parsing symtab", and the partial JSON that comes
+    # back has fewer imports than the real file -- which is exactly the shape
+    # of a benign binary.
+    errors = _rabin2_parse_errors(proc.stderr)
+    if errors and incomplete is not None:
+        detail = "; ".join(errors)[:_STDERR_PREVIEW_CHARS]
+        incomplete.append(f"rabin2 -{flags} reported a parse error: {detail}")
+        logger.warning("rabin2 -%s reported a parse error for %s: %s", flags, file_path, detail)
+
     if isinstance(loaded, dict):
         result: dict[str, Any] = loaded
         return result
@@ -461,6 +508,7 @@ def _compute_verdict(
     suspicious_imports: dict[str, list[str]],
     timestamp: dict[str, object],
     sections: list[dict[str, object]],
+    incomplete: list[str] | None = None,
 ) -> dict[str, object]:
     """Compute an overall triage verdict from analysis results.
 
@@ -473,6 +521,9 @@ def _compute_verdict(
         suspicious_imports: Imports grouped by threat category.
         timestamp: Timestamp validity assessment dict.
         sections: Section metadata with entropy and permissions.
+        incomplete: Descriptions of analysis steps that failed. A binary
+            whose analysis did not complete cannot be called benign, because
+            the absence of indicators may simply be the absence of data.
 
     Returns:
         Dict with classification, confidence, and reasons.
@@ -518,6 +569,15 @@ def _compute_verdict(
     else:
         classification = "benign_indicators"
         confidence = "medium"
+
+    if incomplete:
+        reasons.append("Analysis incomplete: " + "; ".join(incomplete))
+        # Indicators that *were* found are real evidence and are kept. What
+        # cannot survive a partial analysis is a clean bill of health: with
+        # data missing, "no indicators found" is not a finding.
+        if classification == "benign_indicators":
+            classification = "inconclusive"
+            confidence = "none"
 
     return {
         "classification": classification,
@@ -776,9 +836,10 @@ def triage_binary(
         )
 
     raw_parts: list[str] = []
+    incomplete: list[str] = []
 
     try:
-        info_raw = _run_rabin2("I", target)
+        info_raw = _run_rabin2("I", target, incomplete)
     except subprocess.TimeoutExpired:
         return error_response(
             tc_id,
@@ -795,6 +856,7 @@ def triage_binary(
             params,
             f"Failed to execute rabin2: {exc}",
             (time.monotonic() - t0) * 1000,
+            error_type="tool_failed",
         )
 
     file_info = _parse_file_info(info_raw)
@@ -807,28 +869,31 @@ def triage_binary(
 
     if depth in ("standard", "deep"):
         try:
-            imports_raw = _run_rabin2("i", target)
+            imports_raw = _run_rabin2("i", target, incomplete)
             imports = _parse_imports(imports_raw)
             raw_parts.append(json.dumps(imports_raw, indent=2, default=str))
 
-            sections_raw = _run_rabin2("S", target)
+            sections_raw = _run_rabin2("S", target, incomplete)
             sections = _parse_sections(sections_raw)
             raw_parts.append(json.dumps(sections_raw, indent=2, default=str))
 
-            strings_raw = _run_rabin2("z", target)
+            strings_raw = _run_rabin2("z", target, incomplete)
             strings_of_interest = _parse_strings(strings_raw)
             raw_parts.append(json.dumps(strings_raw, indent=2, default=str))
         except subprocess.TimeoutExpired:
             logger.warning("rabin2 timed out during standard analysis of %s", file_path)
-        except OSError:
+            incomplete.append(f"imports/sections/strings timed out after {_RABIN2_TIMEOUT}s")
+        except OSError as exc:
             logger.warning("Failed to run rabin2 standard analysis on %s", file_path)
+            incomplete.append(f"imports/sections/strings unavailable ({exc})")
 
     if depth == "deep":
         try:
-            libs_raw = _run_rabin2("l", target)
+            libs_raw = _run_rabin2("l", target, incomplete)
             raw_parts.append(json.dumps(libs_raw, indent=2, default=str))
-        except (subprocess.TimeoutExpired, OSError):
+        except (subprocess.TimeoutExpired, OSError) as exc:
             logger.warning("rabin2 library enumeration failed for %s", file_path)
+            incomplete.append(f"library enumeration unavailable ({exc})")
 
         if require_binary("rahash2"):
             try:
@@ -857,7 +922,9 @@ def triage_binary(
         raw_ts = None
     timestamp = _assess_timestamp(raw_ts, str(info_dict.get("bintype", "")))
 
-    verdict = _compute_verdict(packing_indicators, suspicious_imports, timestamp, sections)
+    verdict = _compute_verdict(
+        packing_indicators, suspicious_imports, timestamp, sections, incomplete
+    )
 
     combined_output = "\n\n".join(raw_parts)
     summary = extract_and_index(combined_output, "binary.triage", file_path, "rabin2")
