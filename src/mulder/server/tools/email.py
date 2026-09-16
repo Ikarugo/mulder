@@ -153,6 +153,7 @@ def _matches_search(
     body: str | None,
     recipients: list[str],
     search_term: str,
+    attachments: list[str] | None = None,
 ) -> bool:
     """Check whether an email matches the search keyword.
 
@@ -160,8 +161,12 @@ def _matches_search(
         subject: Email subject line.
         sender: Sender address.
         body: Plain text body (may be None).
-        recipients: List of recipient addresses.
+        recipients: Every recipient -- To, Cc *and* Bcc. Cc and Bcc were
+            parsed and then never searched, so a search naming a copied
+            recipient silently missed the message.
         search_term: Keyword to search for (case insensitive).
+        attachments: Attachment filenames, which is how an analyst looks
+            for a named payload.
 
     Returns:
         True if the term appears in any searchable field.
@@ -173,7 +178,9 @@ def _matches_search(
         return True
     if body and term in body.lower():
         return True
-    return any(term in r.lower() for r in recipients)
+    if any(term in r.lower() for r in recipients):
+        return True
+    return any(term in a.lower() for a in attachments or [])
 
 
 def _message_date(raw: str | None) -> datetime | None:
@@ -318,9 +325,14 @@ def _parse_extracted_emails(
             sender = str(parsed.get("sender", ""))
             body_val = parsed.get("body_text")
             body_str = str(body_val) if body_val is not None else None
-            to_val = parsed.get("recipients_to")
-            to_list = [str(r) for r in to_val] if isinstance(to_val, list) else []
-            if not _matches_search(subject, sender, body_str, to_list, search_term):
+            recipients: list[str] = []
+            for key in ("recipients_to", "recipients_cc"):
+                val = parsed.get(key)
+                if isinstance(val, list):
+                    recipients.extend(str(r) for r in val)
+            att_val_s = parsed.get("attachments")
+            att_names = [str(a) for a in att_val_s] if isinstance(att_val_s, list) else []
+            if not _matches_search(subject, sender, body_str, recipients, search_term, att_names):
                 continue
 
         if parsed.get("has_suspicious_attachment"):
