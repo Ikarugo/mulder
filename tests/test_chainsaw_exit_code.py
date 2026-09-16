@@ -52,9 +52,12 @@ def _invoke(evidence: Path, mode: str, run: Any, rules: Path) -> tuple[Any, list
         indexed.append(raw)
         return {}
 
+    mapping = rules / "mapping.yml"
+    mapping.write_text("---\n")
     kwargs = {"side_effect": run} if callable(run) else {"return_value": run}
     with (
         patch("mulder.server.tools.chainsaw._chainsaw_binary", return_value="/usr/bin/chainsaw"),
+        patch("mulder.server.tools.chainsaw._default_chainsaw_mapping", return_value=mapping),
         patch("mulder.server.tools.chainsaw.sources_already_indexed", return_value=[]),
         patch("mulder.server.tools.chainsaw.subprocess.run", **kwargs),
         patch("mulder.server.tools.chainsaw.extract_and_index", side_effect=_record),
