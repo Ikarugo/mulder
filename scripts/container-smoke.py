@@ -77,9 +77,18 @@ def main() -> None:
         ("capa", "--version"),
         ("floss", "--version"),
         ("guestmount", "--version"),
+        ("xmount", "--version"),
+        ("ntfs-3g", "--version"),
+        ("fuse2fs", "-V"),
         ("clamscan", "--version"),
     ):
         run(*command)
+    # The unprivileged mulder user can only mount NTFS through the source-built
+    # external-FUSE ntfs-3g; the distro binary (integrated FUSE) refuses.
+    ntfs_version = subprocess.run(["ntfs-3g", "--version"], capture_output=True, text=True).stderr
+    assert "external FUSE" in ntfs_version, (
+        f"ntfs-3g is not the external-FUSE build: {ntfs_version!r}"
+    )
     proxy = importlib.import_module("mulder.orchestrator.proxy")
     with proxy.ProxyManager(models=["ollama/smoke"]):
         print("PASS LiteLLM proxy startup and health", flush=True)

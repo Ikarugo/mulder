@@ -500,7 +500,7 @@ flowchart TB
     mulderUser --> mulderCLI
 ```
 
-The container runs with `--privileged` (or `--cap-add SYS_ADMIN`) to support disk image mounting via `ewfmount`, `guestmount`, and `mount`.
+The container runs with `--privileged` (or `--cap-add SYS_ADMIN --device /dev/fuse`) to support FUSE: `ewfmount`, `guestmount`, and the `xmount` + `ntfs-3g`/`fuse2fs` stack that `mount_disk_image()` uses. Mounting never uses the kernel `mount -o loop` path, so it works as the unprivileged `mulder` user and needs no loop devices.
 
 ## Evidence Reference Validation
 
