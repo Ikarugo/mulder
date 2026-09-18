@@ -201,21 +201,26 @@ def _trim_edge_markup_lines(text: str) -> str:
 
     The leak usually rides along with prose rather than arriving as its own
     block, e.g. ``"Now let me search the timeline.\n<｜DSML｜function_calls"``.
-    Leading and trailing lines that individually satisfy
-    :func:`_is_bare_markup_token` are removed; interior lines are untouched.
+    Leading and trailing lines that are blank or individually satisfy
+    :func:`_is_bare_markup_token` are removed, so a marker separated from
+    the edge only by whitespace still goes; interior lines are untouched.
 
     Args:
         text: Raw text block content.
 
     Returns:
-        The block with edge markup lines removed (may be empty).
+        The block with edge markup and blank lines removed (may be empty).
     """
     lines = text.splitlines()
-    while lines and _is_bare_markup_token(lines[0]):
+    while lines and _is_edge_trimmable(lines[0]):
         lines.pop(0)
-    while lines and _is_bare_markup_token(lines[-1]):
+    while lines and _is_edge_trimmable(lines[-1]):
         lines.pop()
     return "\n".join(lines)
+
+
+def _is_edge_trimmable(line: str) -> bool:
+    return not line.strip() or _is_bare_markup_token(line)
 
 
 _TASK_PANEL_SKIP: frozenset[str] = frozenset(
