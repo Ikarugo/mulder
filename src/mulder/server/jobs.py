@@ -16,6 +16,7 @@ Thread safety:
 from __future__ import annotations
 
 import contextvars
+import inspect
 import logging
 import threading
 import time
@@ -72,6 +73,33 @@ def _extract_error_detail(result: object, fallback: str = "unknown error") -> st
             if isinstance(val, str):
                 return val
     return fallback
+
+
+def validate_tool_args(fn: Callable[..., Any], args: dict[str, Any]) -> str | None:
+    """Return why *args* cannot be passed as ``fn(**args)``, or None if they can.
+
+    Planner-generated task args reach tool functions by name, so a wrong
+    keyword would otherwise surface as a bare ``TypeError`` in the worker.
+    The message names the accepted parameters so the caller can correct
+    the call instead of retrying it verbatim.
+    """
+    params = inspect.signature(fn).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return None
+    keyword_kinds = (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    accepted = [n for n, p in params.items() if p.kind in keyword_kinds]
+    unexpected = sorted(set(args) - set(accepted))
+    missing = [
+        n for n in accepted if params[n].default is inspect.Parameter.empty and n not in args
+    ]
+    if not unexpected and not missing:
+        return None
+    problems = []
+    if unexpected:
+        problems.append("unexpected parameter(s) " + ", ".join(repr(n) for n in unexpected))
+    if missing:
+        problems.append("missing required parameter(s) " + ", ".join(repr(n) for n in missing))
+    return "; ".join(problems) + "; accepted: " + ", ".join(accepted)
 
 
 class JobStore:
