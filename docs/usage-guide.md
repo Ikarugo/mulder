@@ -304,6 +304,7 @@ docker run -it --privileged \
   -e AWS_REGION=us-east-1 \
   -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
   -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
+  -v ~/.aws:/home/mulder/.aws \
   ghcr.io/calebevans/mulder:1.5.1
 ```
 
@@ -316,7 +317,7 @@ Model IDs are passed through to the SDK exactly as specified, with no automatic 
 | `AWS_ACCESS_KEY_ID` | AWS access key |
 | `AWS_SECRET_ACCESS_KEY` | AWS secret key |
 
-You can also mount `~/.aws/credentials` if you prefer file credentials over environment variables.
+If you prefer file-based credentials, mount your whole `~/.aws` directory read-write at `/home/mulder/.aws` (as in the example above) instead of passing keys. This works for both static profiles in `~/.aws/credentials` and `aws login` sessions from AWS CLI 2.36+: the login token cache lives under `~/.aws/login/cache`, so the mount must be writable for the container to refresh it. The same mount serves `bedrock/` models routed through the LiteLLM proxy (see [Using Non-Anthropic Models via LiteLLM](#using-non-anthropic-models-via-litellm)).
 
 ## Starting an Investigation
 

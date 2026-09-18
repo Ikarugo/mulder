@@ -539,7 +539,7 @@ RUN uv pip install --system --no-cache -e /app
 # mcp>=2.0 and rich>=15.0; litellm pins older versions of both).
 RUN python3 -m venv /opt/litellm \
     && find /opt/litellm -type d -name __pycache__ -prune -exec rm -rf {} + \
-    && /opt/litellm/bin/pip install --no-cache-dir --no-compile 'litellm[proxy]' pyyaml \
+    && /opt/litellm/bin/pip install --no-cache-dir --no-compile 'litellm[proxy]' pyyaml 'botocore[crt]' \
     && ln -s /opt/litellm/bin/litellm /usr/local/bin/litellm
 
 RUN mkdir -p /mulder-investigation \
