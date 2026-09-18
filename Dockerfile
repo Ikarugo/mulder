@@ -30,6 +30,23 @@ RUN curl -fsSL https://github.com/libyal/libewf/releases/download/20240506/libew
     && make -j"$(nproc)" \
     && make install
 
+# ntfs-3g: rebuild with external FUSE (libfuse2 -> setuid fusermount3) so the
+# unprivileged mulder user can mount NTFS image files. Ubuntu's package uses
+# integrated FUSE without setuid, which refuses every non-root mount; making it
+# setuid would parse hostile evidence with root privileges instead.
+# --disable-library links libntfs-3g statically so nothing shadows the distro
+# copy that libguestfs-tools depends on.
+FROM libewf-builder AS ntfs-3g-builder
+RUN curl -fsSL https://tuxera.com/opensource/ntfs-3g_ntfsprogs-2022.10.3.tgz \
+        -o /tmp/ntfs-3g.tgz \
+    && tar xzf /tmp/ntfs-3g.tgz -C /tmp \
+    && cd /tmp/ntfs-3g_ntfsprogs-2022.10.3 \
+    && ./configure --with-fuse=external \
+        --disable-library --disable-ntfsprogs \
+    && make -j"$(nproc)" \
+    && make install DESTDIR=/opt/ntfs-3g \
+    && strip --strip-debug /opt/ntfs-3g/bin/ntfs-3g
+
 # Keep headers/static libraries available to bulk-builder, but out of runtime.
 FROM libewf-builder AS libewf-runtime
 RUN strip --strip-debug /opt/libewf/bin/* /opt/libewf/lib/libewf.so.* \
@@ -360,6 +377,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libre2-9 \
         fuse3 \
         libfuse2 \
+        xmount \
+        fuse2fs \
         libffi8 \
         libsqlite3-0 \
         regripper \
@@ -403,6 +422,8 @@ RUN useradd -m -s /bin/bash mulder \
 
 COPY --from=bulk-builder /opt/bulk_extractor /usr/local
 COPY --from=libewf-runtime /opt/libewf /usr/local
+# /usr/local/bin precedes /usr/bin, so this shadows the distro ntfs-3g binary.
+COPY --from=ntfs-3g-builder /opt/ntfs-3g/bin/ntfs-3g /usr/local/bin/ntfs-3g
 COPY --from=eztools-fetch /opt/dotnet /usr/local/share/dotnet
 COPY --from=eztools-fetch /opt/zimmermantools /opt/zimmermantools
 COPY --from=symbols-fetch --chown=mulder:mulder /opt/vol-symbols/windows.zip /home/mulder/.cache/volatility3/symbols/windows.zip
@@ -551,8 +572,11 @@ RUN chown -R mulder:mulder /mulder-investigation
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# NOTE: disk image mount operations (mount, ewfmount) require
-# --privileged or --cap-add SYS_ADMIN when running this container.
+# NOTE: disk image mounting is pure FUSE (xmount + ntfs-3g/fuse2fs, see
+# src/mulder/extractors/disk.py) and needs --privileged or
+# --cap-add SYS_ADMIN --device /dev/fuse when running this container. No loop
+# devices and no root: the kernel `mount -o loop` path was removed because a
+# --cap-add container exposes no loop device even to root.
 # The container runs as non-root user 'mulder'; the entrypoint handles
 # credential setup and permission fixups before dropping to that user.
 

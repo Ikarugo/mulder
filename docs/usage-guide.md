@@ -238,7 +238,7 @@ mkdir -p ~/mulder-cases
 
 ### Privileged Access
 
-The `--privileged` flag is required for FUSE operations that several forensic tools depend on (`ewfmount` for E01 images, `guestmount` for VM disk images, etc.).
+The `--privileged` flag is required for FUSE operations that several forensic tools depend on (`ewfmount` for E01 images, `guestmount` for VM disk images, and the `xmount` + `ntfs-3g`/`fuse2fs` stack that mounts disk images for the MFT, prefetch, Amcache, Shimcache and registry parsers). Mounting is entirely user-space FUSE: it runs as the unprivileged `mulder` user and needs no loop devices.
 
 If `--privileged` is too permissive for your environment, use the narrower capability grant instead:
 
