@@ -25,7 +25,6 @@ from mulder.orchestrator.types import (
     Plan,
     extract_executor_results,
     extract_follow_up_request,
-    extract_json_from_text,
     extract_json_plan,
 )
 
@@ -487,9 +486,9 @@ class RoleRunner:
     ) -> dict[str, Any] | None:
         """Attempt to repair malformed JSON from planner output.
 
-        Tries deterministic extraction first (regex + brace matching via
-        ``extract_json_from_text``). Falls back to an LLM utility session
-        only when deterministic parsing fails.
+        Tries deterministic extraction and task validation first via
+        ``extract_json_plan``. Falls back to an LLM utility session
+        when deterministic parsing or validation fails.
 
         Args:
             messages: Raw text messages from the planner session.
@@ -502,8 +501,8 @@ class RoleRunner:
         if not raw_text.strip():
             return None
 
-        deterministic = extract_json_from_text(raw_text)
-        if deterministic and "tasks" in deterministic:
+        deterministic = extract_json_plan([raw_text])
+        if deterministic is not None:
             logger.info("[%s] Deterministic JSON extraction succeeded", phase_name)
             self._dashboard.log_info("JSON repair succeeded (deterministic)")
             return deterministic
@@ -515,7 +514,9 @@ class RoleRunner:
             "The following text contains a JSON plan that may have syntax errors, "
             "be wrapped in markdown fences, or have extra text around it. "
             "Extract and fix the JSON so it is valid. Return ONLY the corrected "
-            "JSON object with keys: tasks, investigation_questions, expected_sources.\n\n"
+            "JSON object with keys: tasks, investigation_questions, expected_sources. "
+            "tasks must be a non-empty array of objects with tool, args, and purpose keys, "
+            "not strings.\n\n"
             f"TEXT:\n{raw_text}"
         )
 
