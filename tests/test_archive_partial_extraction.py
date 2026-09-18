@@ -57,8 +57,8 @@ def test_a_partial_extraction_is_retried_not_reported_complete(
     cases_dir: Path, archive: Path, tmp_path: Path
 ) -> None:
     """The debris of a killed run must not satisfy the idempotency check."""
-    dest = tmp_path / "partial"
-    dest.mkdir()
+    dest = cases_dir / "extracted" / "partial"
+    dest.mkdir(parents=True)
     (dest / "one.txt").write_bytes(b"1")  # a crash left exactly one file
 
     result = _invoke(cases_dir, archive, extract_to=dest)
@@ -74,7 +74,7 @@ def test_a_finished_extraction_is_still_idempotent(
     cases_dir: Path, archive: Path, tmp_path: Path
 ) -> None:
     """Pins narrowness: the idempotency behaviour itself must survive."""
-    dest = tmp_path / "done"
+    dest = cases_dir / "extracted" / "done"
 
     first = _invoke(cases_dir, archive, extract_to=dest)
     second = _invoke(cases_dir, archive, extract_to=dest)
@@ -88,7 +88,7 @@ def test_the_marker_is_not_reported_as_evidence(
     cases_dir: Path, archive: Path, tmp_path: Path
 ) -> None:
     """mulder's own bookkeeping file must never appear in a file list."""
-    dest = tmp_path / "done"
+    dest = cases_dir / "extracted" / "done"
 
     first = _invoke(cases_dir, archive, extract_to=dest)
     second = _invoke(cases_dir, archive, extract_to=dest)
@@ -101,7 +101,7 @@ def test_a_marker_from_a_different_archive_does_not_count(
     cases_dir: Path, archive: Path, tmp_path: Path
 ) -> None:
     """A slot reused by another archive must not inherit its completion."""
-    dest = tmp_path / "shared"
+    dest = cases_dir / "extracted" / "shared"
     _invoke(cases_dir, archive, extract_to=dest)
 
     other = tmp_path / "other.zip"
