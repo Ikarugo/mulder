@@ -114,7 +114,7 @@ flowchart TD
     catalog["Phase 1: Catalog\n(Planner model, single agent)"]
     catalog --> catalogGate{"Catalog Gate\nCase created?"}
     catalogGate -->|"Pass"| identifySystems["Identify Systems\nfrom Catalog Output"]
-    catalogGate -->|"Fail"| retryC["Retry (1.5x turn limit)"]
+    catalogGate -->|"Fail"| retryC["Retry (1.5x cost budget)"]
     retryC --> catalog
 
     identifySystems --> extraction
@@ -129,7 +129,7 @@ flowchart TD
 
     extraction --> extractionGate{"Extraction Gate\nSources indexed?"}
     extractionGate -->|"Pass"| crossSystem
-    extractionGate -->|"Fail"| retryE["Retry (1.5x turn limit)"]
+    extractionGate -->|"Fail"| retryE["Retry phase"]
     retryE --> extraction
 
     subgraph crossSystem [Phase 3: Cross-System Analysis + TI Enrichment]
@@ -139,7 +139,7 @@ flowchart TD
 
     crossSystem --> crossGate{"Cross-System Gate\nFindings + MITRE?"}
     crossGate -->|"Pass"| altNarrative
-    crossGate -->|"Fail"| retryCS["Retry (1.5x turn limit)"]
+    crossGate -->|"Fail"| retryCS["Retry phase"]
     retryCS --> crossSystem
 
     subgraph altNarrative [Phase 4: Alternative Narrative + Audit]
@@ -149,13 +149,13 @@ flowchart TD
 
     altNarrative --> narrativeGate{"Narrative Gate\nAll finalize gates pass?"}
     narrativeGate -->|"Pass"| report
-    narrativeGate -->|"Fail"| retryN["Retry (1.5x turn limit)"]
+    narrativeGate -->|"Fail"| retryN["Retry phase"]
     retryN --> altNarrative
 
     report["Phase 5: Report\n(Analyst model, single agent)"]
     report --> reportGate{"Report Gate\nfinalize_report called?"}
     reportGate -->|"Pass"| done["Investigation Complete"]
-    reportGate -->|"Fail"| retryR["Retry (1.5x turn limit)"]
+    reportGate -->|"Fail"| retryR["Retry (1.5x cost budget)"]
     retryR --> report
 ```
 
@@ -172,14 +172,24 @@ Each phase is defined by a `PhaseConfig` dataclass specifying:
 - **Follow-up limit**: Maximum planner/executor cycles the analyst can request before being capped
 - **Workers**: Configurable via `--workers` for concurrent extraction sessions
 - **Auto-compaction**: When context is exhausted mid-phase, the orchestrator restarts with a compact prompt that recovers state from the database
-- **Retry policy**: Maximum retries with 1.5x turn limit multiplier on each retry (applied in single-mode phases only; split-mode phases retry without the budget multiplier)
+- **Retry policy**: Maximum retries with a 1.5x cost-budget multiplier on each retry (applied in single-mode phases only; split-mode phases retry without the multiplier)
+
+### Planner Output Validation
+
+Plans must contain a non-empty `tasks` array of objects. String tasks and mixed
+object/string arrays are rejected before executor tool allowlists are built.
+Deterministic JSON repair uses the same validation; if that fails, one utility
+model request attempts to repair the plan. If the repaired output is still
+invalid, the phase fails cleanly. A rejected plan does not trigger the separate
+phase-gate retry loop. Dashboard rendering tolerates malformed task entries so
+they can reach validation without interrupting the session.
 
 ### Deferred Retry System
 
 When a quality gate fails after a phase completes, the orchestrator retries with escalating budgets:
 
-1. **Budget multiplier**: In single-mode phases, each retry gets 1.5x the previous attempt's turn limit (`_RETRY_BUDGET_MULTIPLIER`). Split-mode phases retry without this multiplier.
-2. **Gap-specific remediation**: The gate reports specific gaps (e.g., "no sources indexed", "no MITRE mappings"), which are prepended to the retry prompt so the agent focuses on what's missing
+1. **Budget multiplier**: In single-mode phases, each retry gets 1.5x the previous attempt's cost budget (`_RETRY_BUDGET_MULTIPLIER`); turn limits stay unchanged. Split-mode phases retry without this multiplier.
+2. **Gap-specific remediation**: Single-mode retries include the gate's reported gaps in the next prompt. Split-mode retries start a new planner/executor/analyst cycle.
 3. **Follow-up cycles**: Within a single attempt, the analyst can request additional planner/executor iterations (capped at `max_follow_ups`) when it identifies gaps that need more tool execution
 4. **Auto-compaction on exhaustion**: If context is exhausted mid-phase, the orchestrator restarts with a compact prompt that preserves state via the database rather than failing immediately
 
@@ -187,7 +197,9 @@ The retry system is bounded: each phase allows up to 2 retries (configurable), a
 
 ### Phase Gates
 
-Gates read the database directly to validate phase outcomes, avoiding LLM utility queries for validation checks.
+Extraction, cross-system, and narrative gates read the database directly.
+The catalog gate validates the final JSON's structure, and the report gate checks
+the recorded tool names. Gate validation does not require an LLM utility query.
 
 ```mermaid
 flowchart LR
@@ -207,8 +219,8 @@ flowchart LR
 ```
 
 When a gate fails, the orchestrator retries the phase with:
-- 1.5x the original turn limit
-- Gap-specific instructions prepended to the prompt (e.g., "No sources indexed after extraction")
+- 1.5x the previous cost budget in single-mode phases; turn limits stay unchanged
+- Gap-specific instructions in single-mode retry prompts
 - Up to 2 retries per phase (configurable)
 - Consecutive failure tracking prevents indefinite silent auto-passes
 
@@ -501,6 +513,9 @@ Several enrichment tools are available for agents to call during relevant phases
 
 The MCP server exposes only typed tool functions. Shell, Bash, and arbitrary command execution are explicitly blocked in both the MCP server permissions and in each phase's `disallowed_tools` list. All evidence access goes through audited MCP tools.
 
+`run_radare2` also enables radare2's own sandbox before executing the requested
+command batch, blocking shell escapes, writes, and opening additional files.
+
 ### Read-Only SQLite Authorizer
 
 The `query_sqlite_from_image` tool allows SQL queries against SQLite databases found in evidence. A custom authorizer callback restricts the connection to read-only operations, blocking `INSERT`, `UPDATE`, `DELETE`, `DROP`, `ALTER`, `ATTACH`, `DETACH`, `CREATE`, and `load_extension` at the SQLite engine level.
@@ -513,13 +528,19 @@ When the agent calls `submit_finding`, every entry in `evidence_refs` is validat
 
 `read_evidence_file` and `list_directory` validate that requested paths resolve to allowed roots using `Path.resolve()` for symlink canonicalization. Archive extraction filters prevent Zip Slip and tar traversal attacks.
 
+Case IDs are validated as a single path segment without separators or control
+characters before opening a case database. Explicit archive destinations must
+resolve under `<db-dir>/extracted`, including when symlinks are present.
+
 ### FTS5 Query Sanitization
 
 Full-text search queries are sanitized before execution. Special characters with FTS5 syntax meaning are escaped, and pipe-separated terms (common LLM mistakes) are converted to proper `OR` operators.
 
 ### Non-Root Container
 
-All processes run as the `mulder` user via `gosu`. The entrypoint handles credential copying and ownership fixups before dropping privileges.
+The entrypoint handles credential copying and ownership fixups before running
+the requested command as the `mulder` user via `gosu`. `docker exec` bypasses the
+entrypoint; use `docker exec -u mulder` for investigations in an existing container.
 
 ## Per-Model Token Tracking
 
@@ -535,6 +556,18 @@ The orchestrator uses a planner/executor/analyst role system for model assignmen
 Single-mode phases map to roles: catalog uses the planner model, report uses the analyst model. Per-phase overrides can be specified in a YAML config file via `--config`.
 
 All roles inherit from `--model` if not specified individually. Model IDs are passed through to the SDK exactly as specified, with no automatic translation between provider formats. Vertex users must include the `@version` suffix (e.g. `claude-opus-4-6@20250514`) and Bedrock users must include the `us.anthropic.` prefix (e.g. `us.anthropic.claude-opus-4-6`).
+
+For auto-generated LiteLLM configurations, the public `ollama/<model>` name is
+preserved while the internal provider route uses `ollama_chat/<model>`, whose
+native chat API carries structured streaming tool calls. Custom proxy YAML is
+used as supplied.
+
+`--no-thinking` applies to both phase and utility sessions. It sends the SDK's
+explicit disabled-thinking configuration and omits effort settings; without
+the flag, existing thinking defaults and effort settings are preserved.
+`--show-cli-stderr` independently enables subprocess diagnostics in the dashboard
+and `orchestrator.log`, with per-query labels and ANSI controls stripped. CLI
+stderr stays suppressed by default.
 
 ## Audit and Provenance
 
