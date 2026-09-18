@@ -172,7 +172,7 @@ CROSS_SYSTEM: PhaseConfig = PhaseConfig(
         "{case_briefing}Review all findings and sources. Plan cross-system correlation queries."
     ),
     planner_allowed_tools=get_tools_for_role(Role.CROSS_PLANNER),
-    planner_max_turns=10,
+    planner_max_turns=15,
     executor_system_prompt=CROSS_SYSTEM_EXECUTOR_PROMPT,
     executor_prompt_template=_EXECUTOR_CASE_ID_PREFIX + "{plan}",
     executor_allowed_tools=get_tools_for_role(Role.CROSS_EXECUTOR),
@@ -198,7 +198,7 @@ ALTERNATIVE_NARRATIVE: PhaseConfig = PhaseConfig(
         "{case_briefing}Review current findings and plan counter-analysis.\n\n{consistency_report}"
     ),
     planner_allowed_tools=get_tools_for_role(Role.NARRATIVE_PLANNER),
-    planner_max_turns=10,
+    planner_max_turns=15,
     executor_system_prompt=NARRATIVE_EXECUTOR_PROMPT,
     executor_prompt_template=_EXECUTOR_CASE_ID_PREFIX + "{plan}",
     executor_allowed_tools=get_tools_for_role(Role.NARRATIVE_EXECUTOR),
