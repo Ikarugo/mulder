@@ -34,7 +34,7 @@ async def test_cli_stderr_on_failure(
             result = await orchestrator._session.execute_utility("wait", [], "wait_all")
             assert result is None
         else:
-            phase = await orchestrator._session.execute("test", "test", "test-model", [], [], 1, 1)
+            phase = await orchestrator._session.execute("test", "test", "test-model", [], [], 1)
             assert not phase.success
 
     label = "utility: wait_all" if utility else "test-model"
@@ -68,7 +68,7 @@ async def test_concurrent_stderr_keeps_worker_labels() -> None:
     with patch("mulder.orchestrator.session.query", interleaved_query):
         await asyncio.gather(
             *(
-                orchestrator._session.execute("test", host, "test-model", [], [], 1, 1, host)
+                orchestrator._session.execute("test", host, "test-model", [], [], 1, host)
                 for host in ("host-a", "host-b")
             )
         )

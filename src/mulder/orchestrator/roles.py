@@ -158,7 +158,6 @@ class RoleRunner:
             allowed_tools=phase.planner_allowed_tools,
             disallowed_tools=phase.disallowed_tools,
             max_turns=phase.planner_max_turns,
-            max_budget=phase.planner_max_budget_usd,
             log_prefix=log_prefix,
         )
 
@@ -218,7 +217,6 @@ class RoleRunner:
             allowed_tools=allowed_tools,
             disallowed_tools=phase.disallowed_tools,
             max_turns=phase.executor_max_turns,
-            max_budget=phase.executor_max_budget_usd,
             log_prefix=log_prefix,
             task_system=task_system,
         )
@@ -230,7 +228,6 @@ class RoleRunner:
             allowed_tools=allowed_tools,
             disallowed_tools=phase.disallowed_tools,
             max_turns=phase.executor_max_turns,
-            max_budget=phase.executor_max_budget_usd,
             continuation_prompt=(
                 "CONTINUATION: The previous executor session exhausted its "
                 "context window. All tool results have been saved. Continue "
@@ -328,7 +325,6 @@ class RoleRunner:
             allowed_tools=phase.analyst_allowed_tools,
             disallowed_tools=phase.disallowed_tools,
             max_turns=phase.analyst_max_turns,
-            max_budget=phase.analyst_max_budget_usd,
             log_prefix=log_prefix,
             task_system=task_system,
         )
@@ -340,7 +336,6 @@ class RoleRunner:
             allowed_tools=phase.analyst_allowed_tools,
             disallowed_tools=phase.disallowed_tools,
             max_turns=phase.analyst_max_turns,
-            max_budget=phase.analyst_max_budget_usd,
             continuation_prompt=(
                 "CONTINUATION: The previous analyst session exhausted its "
                 "context window. All submitted findings are saved. Review "
@@ -405,7 +400,6 @@ class RoleRunner:
             ],
             label="wait_all_batches",
             max_turns=5,
-            budget=1.50,
         )
 
         if result and result.get("all_done"):
@@ -426,7 +420,6 @@ class RoleRunner:
         allowed_tools: list[str],
         disallowed_tools: list[str],
         max_turns: int,
-        max_budget: float,
         continuation_prompt: str,
         role_label: str = "",
         log_prefix: str = "",
@@ -445,7 +438,6 @@ class RoleRunner:
             allowed_tools: Tool whitelist.
             disallowed_tools: Tool blocklist.
             max_turns: Maximum tool-use turns per continuation.
-            max_budget: Spend cap per continuation in USD.
             continuation_prompt: Prompt for the continuation session.
             role_label: Role name for dashboard messages (e.g. "Executor").
             log_prefix: Prefix for SDK query log lines.
@@ -468,7 +460,6 @@ class RoleRunner:
                 allowed_tools=allowed_tools,
                 disallowed_tools=disallowed_tools,
                 max_turns=max_turns,
-                max_budget=max_budget,
                 log_prefix=log_prefix,
                 task_system=task_system,
             )
@@ -528,7 +519,6 @@ class RoleRunner:
             allowed_tools=[],
             disallowed_tools=["Bash", "Shell"],
             max_turns=1,
-            max_budget=0.50,
         )
 
         repaired = extract_json_plan(repair_result.messages)

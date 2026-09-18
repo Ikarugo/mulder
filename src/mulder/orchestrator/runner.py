@@ -4,7 +4,7 @@ Decomposes forensic investigations into programmatic phases with hard
 quality gates between them. Split-mode phases use a planner/executor/analyst
 pipeline where each role runs in a fresh SDK session. Single-mode phases
 (catalog, report) run one agent. The orchestrator retries failed phases
-with increased budgets and gap-specific instructions.
+with gap-specific instructions.
 """
 
 from __future__ import annotations
@@ -54,7 +54,6 @@ from mulder.patterns import (
 
 logger = logging.getLogger(__name__)
 
-_RETRY_BUDGET_MULTIPLIER: float = 1.5
 _MAX_COMPACTIONS: int = 3
 
 
@@ -64,8 +63,7 @@ class Orchestrator:
     The orchestrator executes a fixed sequence of investigation phases,
     validating each phase's output before proceeding. Split-mode phases
     decompose work across planner, executor, and analyst agents. Failed
-    phases are retried with increased budgets and targeted remediation
-    prompts.
+    phases are retried with targeted remediation prompts.
     """
 
     def __init__(
@@ -458,7 +456,6 @@ class Orchestrator:
             prompt = phase.single_prompt_template.format(**effective_vars)
 
         model = self.model_config.resolve(phase.name, phase.single_role)
-        budget = phase.single_max_budget_usd
         accumulated_turns = 0
         last_result: PhaseResult | None = None
 
@@ -473,7 +470,6 @@ class Orchestrator:
 
         for attempt in range(1 + phase.max_retries):
             if attempt > 0:
-                budget = budget * _RETRY_BUDGET_MULTIPLIER
                 gap_info = ""
                 if last_result and last_result.gate_result:
                     gap_info = " Gaps from previous attempt: " + "; ".join(
@@ -502,7 +498,6 @@ class Orchestrator:
                     allowed_tools=phase.single_allowed_tools,
                     disallowed_tools=phase.disallowed_tools,
                     max_turns=phase.single_max_turns,
-                    max_budget=budget,
                 )
             except (AuthenticationError, ModelNotAvailableError) as exc:
                 self.dashboard.log_gate_fail(str(exc))
@@ -525,7 +520,6 @@ class Orchestrator:
                     allowed_tools=phase.single_allowed_tools,
                     disallowed_tools=phase.disallowed_tools,
                     max_turns=phase.single_max_turns,
-                    max_budget=budget,
                 )
                 accumulated_turns += continuation.turns_used
                 phase_result.messages.extend(continuation.messages)
