@@ -403,7 +403,10 @@ class SessionExecutor:
                         try:
                             parsed = json.loads(stripped)
                             if "tasks" in parsed:
-                                task_names = [t.get("tool", "?") for t in parsed["tasks"][:5]]
+                                task_names = [
+                                    t.get("tool", "?") if isinstance(t, dict) else "?"
+                                    for t in parsed["tasks"][:5]
+                                ]
                                 summary = ", ".join(task_names)
                                 extra = (
                                     f" +{len(parsed['tasks']) - 5} more"
