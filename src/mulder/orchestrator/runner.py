@@ -48,13 +48,12 @@ from mulder.orchestrator.types import (
 )
 from mulder.patterns import (
     DB_DIR_ENV_VAR,
+    DEFAULT_MAX_COMPACTIONS,
     DEFAULT_WORKSPACE_DIR,
     resolve_db_dir,
 )
 
 logger = logging.getLogger(__name__)
-
-_MAX_COMPACTIONS: int = 3
 
 
 class Orchestrator:
@@ -79,6 +78,7 @@ class Orchestrator:
         db_dir: str | Path = "",
         no_thinking: bool = False,
         show_cli_stderr: bool = False,
+        max_compactions: int = DEFAULT_MAX_COMPACTIONS,
     ) -> None:
         """Initialize the orchestrator.
 
@@ -101,6 +101,8 @@ class Orchestrator:
                 ``$MULDER_DB_DIR`` and then the default when not given.
             no_thinking: Disable extended thinking for all queries, ignoring effort.
             show_cli_stderr: Stream agent CLI diagnostics to the dashboard and log.
+            max_compactions: Continuation sessions allowed per role session
+                after context exhaustion; ``0`` disables continuations.
         """
         self.evidence_path = evidence_path
         self.cwd = str(cwd)
@@ -116,6 +118,7 @@ class Orchestrator:
             self.env["MULDER_CASE_ID"] = self._case_id
         self._last_session_id: str = ""
         self._parallel_extractions = max(1, parallel_extractions)
+        self._max_compactions = max_compactions
         self._phase_counter = 0
         self._total_phases = 0
         self._case_briefing: str = ""
@@ -143,6 +146,7 @@ class Orchestrator:
             case_id=self._case_id,
             env=self.env,
             cwd=self.cwd,
+            max_compactions=max_compactions,
         )
         self._evidence = EvidenceContext(evidence_path=evidence_path)
         self._server = ServerBridge(case_id=self._case_id, db_dir=self._db_dir)
@@ -506,11 +510,11 @@ class Orchestrator:
 
             # Auto-compaction for context exhaustion
             compaction_count = 0
-            while phase_result.context_exhausted and compaction_count < _MAX_COMPACTIONS:
+            while phase_result.context_exhausted and compaction_count < self._max_compactions:
                 compaction_count += 1
                 self.dashboard.log_info(
                     f"Auto-compacting: restarting with DB state "
-                    f"(compaction #{compaction_count}/{_MAX_COMPACTIONS})"
+                    f"(compaction #{compaction_count}/{self._max_compactions})"
                 )
                 compact_prompt = self._build_compaction_prompt(phase, effective_vars)
                 continuation = await self._session.execute(
