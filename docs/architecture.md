@@ -114,7 +114,7 @@ flowchart TD
     catalog["Phase 1: Catalog\n(Planner model, single agent)"]
     catalog --> catalogGate{"Catalog Gate\nCase created?"}
     catalogGate -->|"Pass"| identifySystems["Identify Systems\nfrom Catalog Output"]
-    catalogGate -->|"Fail"| retryC["Retry (1.5x cost budget)"]
+    catalogGate -->|"Fail"| retryC["Retry (gap-specific prompt)"]
     retryC --> catalog
 
     identifySystems --> extraction
@@ -155,7 +155,7 @@ flowchart TD
     report["Phase 5: Report\n(Analyst model, single agent)"]
     report --> reportGate{"Report Gate\nfinalize_report called?"}
     reportGate -->|"Pass"| done["Investigation Complete"]
-    reportGate -->|"Fail"| retryR["Retry (1.5x cost budget)"]
+    reportGate -->|"Fail"| retryR["Retry (gap-specific prompt)"]
     retryR --> report
 ```
 
@@ -172,7 +172,7 @@ Each phase is defined by a `PhaseConfig` dataclass specifying:
 - **Follow-up limit**: Maximum planner/executor cycles the analyst can request before being capped
 - **Workers**: Configurable via `--workers` for concurrent extraction sessions
 - **Auto-compaction**: When context is exhausted mid-phase, the orchestrator restarts with a compact prompt that recovers state from the database
-- **Retry policy**: Maximum retries with a 1.5x cost-budget multiplier on each retry (applied in single-mode phases only; split-mode phases retry without the multiplier)
+- **Retry policy**: Maximum retries per phase; turn limits stay unchanged on retry
 
 ### Planner Output Validation
 
@@ -186,12 +186,11 @@ they can reach validation without interrupting the session.
 
 ### Deferred Retry System
 
-When a quality gate fails after a phase completes, the orchestrator retries with escalating budgets:
+When a quality gate fails after a phase completes, the orchestrator retries with the same turn limits:
 
-1. **Budget multiplier**: In single-mode phases, each retry gets 1.5x the previous attempt's cost budget (`_RETRY_BUDGET_MULTIPLIER`); turn limits stay unchanged. Split-mode phases retry without this multiplier.
-2. **Gap-specific remediation**: Single-mode retries include the gate's reported gaps in the next prompt. Split-mode retries start a new planner/executor/analyst cycle.
-3. **Follow-up cycles**: Within a single attempt, the analyst can request additional planner/executor iterations (capped at `max_follow_ups`) when it identifies gaps that need more tool execution
-4. **Auto-compaction on exhaustion**: If context is exhausted mid-phase, the orchestrator restarts with a compact prompt that preserves state via the database rather than failing immediately
+1. **Gap-specific remediation**: Single-mode retries include the gate's reported gaps in the next prompt. Split-mode retries start a new planner/executor/analyst cycle.
+2. **Follow-up cycles**: Within a single attempt, the analyst can request additional planner/executor iterations (capped at `max_follow_ups`) when it identifies gaps that need more tool execution
+3. **Auto-compaction on exhaustion**: If context is exhausted mid-phase, the orchestrator restarts with a compact prompt that preserves state via the database rather than failing immediately
 
 The retry system is bounded: each phase allows up to 2 retries (configurable), after which it reports failure and the investigation proceeds with partial results.
 
@@ -219,7 +218,7 @@ flowchart LR
 ```
 
 When a gate fails, the orchestrator retries the phase with:
-- 1.5x the previous cost budget in single-mode phases; turn limits stay unchanged
+- The same turn limits as the original attempt
 - Gap-specific instructions in single-mode retry prompts
 - Up to 2 retries per phase (configurable)
 - Consecutive failure tracking prevents indefinite silent auto-passes

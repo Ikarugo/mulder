@@ -202,7 +202,6 @@ class SessionExecutor:
         allowed_tools: list[str],
         disallowed_tools: list[str],
         max_turns: int,
-        max_budget: float,
         log_prefix: str = "",
         task_system: str = "",
     ) -> PhaseResult:
@@ -220,7 +219,6 @@ class SessionExecutor:
             allowed_tools: Tool whitelist.
             disallowed_tools: Tool blocklist.
             max_turns: Maximum tool-use turns.
-            max_budget: Spend cap in USD.
             log_prefix: Optional prefix for dashboard log lines.
             task_system: When non-empty, tool use blocks update the
                 dashboard task panel for this system name.
@@ -232,7 +230,6 @@ class SessionExecutor:
             system_prompt=system_prompt,
             model=model,
             max_turns=max_turns,
-            max_budget_usd=max_budget,
             allowed_tools=allowed_tools,
             disallowed_tools=disallowed_tools,
             permission_mode="bypassPermissions",
@@ -251,10 +248,9 @@ class SessionExecutor:
         session_id = ""
 
         logger.info(
-            "Starting query (model=%s, max_turns=%d, budget=$%.2f)",
+            "Starting query (model=%s, max_turns=%d)",
             model,
             max_turns,
-            max_budget,
         )
 
         tool_count = 0
@@ -599,7 +595,6 @@ class SessionExecutor:
         allowed_tools: list[str],
         label: str,
         max_turns: int = 5,
-        budget: float = 1.50,
     ) -> dict[str, Any] | None:
         """Run a lightweight utility query against the MCP server.
 
@@ -612,7 +607,6 @@ class SessionExecutor:
             allowed_tools: Tool names auto-approved for this query.
             label: Human-readable label for logging.
             max_turns: Maximum tool-use turns.
-            budget: Spending cap in USD.
 
         Returns:
             Parsed JSON dictionary, or None if the query failed.
@@ -622,7 +616,6 @@ class SessionExecutor:
         options = ClaudeAgentOptions(
             model=utility_model,
             max_turns=max_turns,
-            max_budget_usd=budget,
             allowed_tools=allowed_tools,
             permission_mode="bypassPermissions",
             cwd=self._cwd,

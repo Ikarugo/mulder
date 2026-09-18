@@ -46,7 +46,6 @@ async def test_thinking_options_reach_both_queries(
             allowed_tools=[],
             disallowed_tools=[],
             max_turns=1,
-            max_budget=1.0,
         )
         result = await orchestrator._session.execute_utility(
             prompt="test", allowed_tools=[], label="test"
