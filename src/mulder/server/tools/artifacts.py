@@ -160,7 +160,9 @@ def _find_inodes_by_path(path_pattern: str) -> list[tuple[str, str, int]]:
 
 
 @mcp.tool()
-@tool_access(Role.EXTRACT_ANALYST | Role.CROSS_EXECUTOR | Role.CROSS_ANALYST)
+@tool_access(
+    Role.EXTRACT_EXECUTOR | Role.EXTRACT_ANALYST | Role.CROSS_EXECUTOR | Role.CROSS_ANALYST
+)
 def parse_browser_history() -> dict[str, object]:
     """Extract browser history from Chrome, Firefox, and Safari databases.
 

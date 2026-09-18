@@ -74,10 +74,8 @@ ADDITIONAL TOOLS (include when relevant):
   carve_sqlite_from_raw
 - Network: run_tcpflow (TCP stream reconstruction),
   run_tcpxtract (file extraction from PCAPs)
-- Memory (advanced): yara_scan_with_volatility (per-process YARA),
-  scan_files_in_memory, scan_hidden_processes, scan_kernel_modules
-- Filesystem: run_fsstat, run_mactime, extract_mft_timeline,
-  parse_mft, parse_usn_journal, parse_prefetch
+- Memory (advanced): yara_scan_with_volatility (per-process YARA)
+- Filesystem: run_fsstat, run_mactime
 - Timeline: run_plaso (super-timeline generation)
 - Mobile (direct): parse_android_artifacts, parse_ios_artifacts,
   parse_plist
