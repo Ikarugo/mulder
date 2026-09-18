@@ -30,8 +30,6 @@ from mulder.orchestrator.types import (
 
 logger = logging.getLogger(__name__)
 
-_MAX_COMPACTIONS: int = 3
-
 _BATCH_ID_RE: re.Pattern[str] = re.compile(r"\bbg_[a-f0-9]{8}\b")
 
 _EXECUTOR_CONTROL_TOOLS: frozenset[str] = frozenset(
@@ -86,6 +84,7 @@ class RoleRunner:
         case_id: str,
         env: dict[str, str],
         cwd: str,
+        max_compactions: int,
     ) -> None:
         """Initialize the role runner.
 
@@ -96,6 +95,8 @@ class RoleRunner:
             case_id: Case identifier for plan IDs and utility queries.
             env: Environment variables for agent sessions.
             cwd: Working directory for agent sessions.
+            max_compactions: Continuation sessions allowed per role session
+                after context exhaustion.
         """
         self._session = session
         self._dashboard = dashboard
@@ -103,6 +104,7 @@ class RoleRunner:
         self._case_id = case_id
         self._env = env
         self._cwd = cwd
+        self._max_compactions = max_compactions
 
     async def run_planner(
         self,
@@ -428,7 +430,7 @@ class RoleRunner:
         """Run compaction retries when a session exhausts its context window.
 
         Spawns continuation sessions until context is no longer exhausted
-        or ``_MAX_COMPACTIONS`` is reached. Continuation messages, tool names,
+        or ``max_compactions`` is reached. Continuation messages, tool names,
         and batch IDs are merged back into *result* in place.
 
         Args:
@@ -448,10 +450,10 @@ class RoleRunner:
         """
         compaction_count = 0
         additional_turns = 0
-        while result.context_exhausted and compaction_count < _MAX_COMPACTIONS:
+        while result.context_exhausted and compaction_count < self._max_compactions:
             compaction_count += 1
             self._dashboard.log_info(
-                f"{role_label} auto-compacting (#{compaction_count}/{_MAX_COMPACTIONS})"
+                f"{role_label} auto-compacting (#{compaction_count}/{self._max_compactions})"
             )
             continuation = await self._session.execute(
                 system_prompt=system_prompt,

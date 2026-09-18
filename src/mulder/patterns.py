@@ -86,6 +86,13 @@ Mirrors DEFAULT_DB_DIR's ``~/.mulder/…`` convention. The container overrides
 this with the MULDER_CWD environment variable (see Dockerfile).
 """
 
+DEFAULT_MAX_COMPACTIONS: int = 3
+"""Continuation sessions allowed per role session after context exhaustion.
+
+Overridden by ``mulder investigate --max-compactions`` or
+``$MULDER_MAX_COMPACTIONS``; ``0`` disables continuations.
+"""
+
 SUSPICIOUS_PATHS: tuple[str, ...] = (
     "\\temp\\",
     "\\tmp\\",

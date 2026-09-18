@@ -171,7 +171,7 @@ Each phase is defined by a `PhaseConfig` dataclass specifying:
 - **Turn limit**: Maximum tool-use round trips per role session
 - **Follow-up limit**: Maximum planner/executor cycles the analyst can request before being capped
 - **Workers**: Configurable via `--workers` for concurrent extraction sessions
-- **Auto-compaction**: When context is exhausted mid-phase, the orchestrator restarts with a compact prompt that recovers state from the database
+- **Auto-compaction**: When context is exhausted mid-phase, the orchestrator restarts with a compact prompt that recovers state from the database. Continuations per role session are capped by `--max-compactions` / `MULDER_MAX_COMPACTIONS` (default 3; `0` disables)
 - **Retry policy**: Maximum retries per phase; turn limits stay unchanged on retry
 
 ### Planner Output Validation
@@ -190,7 +190,7 @@ When a quality gate fails after a phase completes, the orchestrator retries with
 
 1. **Gap-specific remediation**: Single-mode retries include the gate's reported gaps in the next prompt. Split-mode retries start a new planner/executor/analyst cycle.
 2. **Follow-up cycles**: Within a single attempt, the analyst can request additional planner/executor iterations (capped at `max_follow_ups`) when it identifies gaps that need more tool execution
-3. **Auto-compaction on exhaustion**: If context is exhausted mid-phase, the orchestrator restarts with a compact prompt that preserves state via the database rather than failing immediately
+3. **Auto-compaction on exhaustion**: If context is exhausted mid-phase, the orchestrator restarts with a compact prompt that preserves state via the database rather than failing immediately, up to `--max-compactions` times per role session
 
 The retry system is bounded: each phase allows up to 2 retries (configurable), after which it reports failure and the investigation proceeds with partial results.
 

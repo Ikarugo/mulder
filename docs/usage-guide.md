@@ -479,6 +479,7 @@ Runs a full multi-phase forensic investigation.
 | `--effort` | `max` | Effort level (`max`, `xhigh`, `high`) |
 | `--no-thinking` | off | Disable extended thinking for all queries; overrides `--effort` |
 | `--workers` | `3` | Max concurrent extraction sessions |
+| `--max-compactions` | `3` | Continuation sessions allowed per role session after context exhaustion; `0` disables. Also settable via `MULDER_MAX_COMPACTIONS` (the flag wins) |
 | `--db-dir` | `~/.mulder/cases` | Case database directory |
 | `--cwd` | `~/.mulder/workspace` | Working directory for agent sessions. Also settable via `MULDER_CWD`; the container sets it to `/mulder-investigation`. Created on first use, along with a default `.mcp.json` |
 | `--proxy-config` | None | LiteLLM config YAML for custom model routing |

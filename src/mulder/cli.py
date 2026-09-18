@@ -13,6 +13,7 @@ from mulder import __version__
 from mulder.patterns import (
     DB_DIR_ENV_VAR,
     DEFAULT_DB_DIR,
+    DEFAULT_MAX_COMPACTIONS,
     DEFAULT_WORKSPACE_DIR,
     resolve_db_dir,
 )
@@ -285,6 +286,15 @@ def report(case_id: str, db_dir: str) -> None:
     help="Max parallel extraction sessions.",
 )
 @click.option(
+    "--max-compactions",
+    default=DEFAULT_MAX_COMPACTIONS,
+    envvar="MULDER_MAX_COMPACTIONS",
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Continuation sessions allowed after context exhaustion; 0 disables "
+    "(env: MULDER_MAX_COMPACTIONS).",
+)
+@click.option(
     "--proxy-config",
     default=None,
     type=click.Path(exists=True),
@@ -307,6 +317,7 @@ def investigate(
     db_dir: str,
     cwd: str,
     workers: int,
+    max_compactions: int,
     proxy_config: str | None,
     no_thinking: bool,
     show_cli_stderr: bool,
@@ -402,6 +413,7 @@ def investigate(
         db_dir=log_dir,
         no_thinking=no_thinking,
         show_cli_stderr=show_cli_stderr,
+        max_compactions=max_compactions,
     )
 
     from mulder.orchestrator.errors import (
