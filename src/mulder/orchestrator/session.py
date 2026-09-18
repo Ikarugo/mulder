@@ -157,6 +157,11 @@ _TASK_PANEL_SKIP: frozenset[str] = frozenset(
 
 _MAX_BUFFER_SIZE_BYTES: int = 50 * 1024 * 1024  # 50 MB
 
+# Claude Code auto-titles every session with an extra model request that
+# mulder never reads. This env var suppresses it in headless/SDK sessions
+# (Claude Code changelog 2.1.110). Caller env still wins.
+_NO_SESSION_TITLE: dict[str, str] = {"CLAUDE_CODE_DISABLE_TERMINAL_TITLE": "1"}
+
 
 class SessionExecutor:
     """Executes Claude Agent SDK query sessions and processes streamed messages.
@@ -256,7 +261,7 @@ class SessionExecutor:
             cwd=self._cwd,
             effort=None if self._no_thinking else self._effort,
             thinking={"type": "disabled"} if self._no_thinking else None,
-            env=self._env,
+            env={**_NO_SESSION_TITLE, **self._env},
             stderr=self._stderr_callback(log_prefix or task_system or model),
             max_buffer_size=_MAX_BUFFER_SIZE_BYTES,
         )
@@ -644,7 +649,7 @@ class SessionExecutor:
             cwd=self._cwd,
             effort=None if self._no_thinking else "low",
             thinking={"type": "disabled"} if self._no_thinking else None,
-            env=self._env,
+            env={**_NO_SESSION_TITLE, **self._env},
             stderr=self._stderr_callback(f"utility: {label}"),
         )
 
