@@ -232,7 +232,15 @@ class RoleRunner:
             ExecutionResults with tool outputs and status.
         """
         model = self._model_config.resolve(phase.name, "executor")
-        plan_text = json.dumps({"tasks": plan.tasks}, indent=2)
+        tasks, dropped = self._executable_tasks(plan, phase.executor_allowed_tools)
+        if dropped:
+            msg = (
+                f"Plan names tools the {phase.name} executor role may not call; "
+                f"dropped from the plan: {', '.join(dropped)}"
+            )
+            logger.warning("[%s] %s", phase.name, msg)
+            self._dashboard.log_info(msg)
+        plan_text = json.dumps({"tasks": tasks}, indent=2)
 
         try:
             prompt = phase.executor_prompt_template.format(plan=plan_text, case_id=self._case_id)
@@ -610,6 +618,36 @@ class RoleRunner:
         else:
             logger.warning("[%s] JSON repair failed", phase_name)
         return repaired
+
+    @staticmethod
+    def _executable_tasks(
+        plan: Plan,
+        executor_allowed: list[str],
+    ) -> tuple[list[dict[str, Any]], list[str]]:
+        """Split plan tasks into those the executor role may run and the rest.
+
+        A task whose tool is off the role allowlist would only ever fail
+        with "Tool not available", so it is removed from the plan handed
+        to the executor and its tool name reported for logging.
+
+        Args:
+            plan: Structured plan from the planner.
+            executor_allowed: Full phase-level executor allowlist.
+
+        Returns:
+            ``(tasks, dropped)``: executable tasks in plan order, and the
+            sorted unique tool names that were dropped.
+        """
+        allowed_set = frozenset(executor_allowed)
+        tasks: list[dict[str, Any]] = []
+        dropped: set[str] = set()
+        for task in plan.tasks:
+            tool = task.get("tool")
+            if tool and f"mcp__mulder__{tool}" not in allowed_set:
+                dropped.add(str(tool))
+            else:
+                tasks.append(task)
+        return tasks, sorted(dropped)
 
     @staticmethod
     def _build_dynamic_allowlist(
