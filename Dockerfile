@@ -430,6 +430,8 @@ COPY --from=symbols-fetch --chown=mulder:mulder /opt/vol-symbols/windows.zip /ho
 COPY --from=symbols-fetch --chown=mulder:mulder /opt/vol-symbols/linux.zip /home/mulder/.cache/volatility3/symbols/linux.zip
 COPY --from=stegdetect-builder /opt/stegdetect/bin/stegdetect /usr/local/bin/stegdetect
 COPY --from=stegdetect-builder /opt/stegdetect/bin/stegbreak /usr/local/bin/stegbreak
+# Deliberately root-owned: the server (running as mulder) sees a read-only clone
+# and uses the pinned rules instead of pulling at scan time.
 COPY --from=yara-fetch /opt/signature-base /opt/signature-base
 COPY --from=attack-fetch /opt/attack/enterprise-attack.json /opt/attack/enterprise-attack.json
 COPY --from=attack-fetch /opt/attack/ics-attack.json /opt/attack/ics-attack.json
