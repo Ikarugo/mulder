@@ -185,119 +185,65 @@ def _mount_image(image_path: Path, mount_point: Path) -> bool:
             check=True,
         )
         return True
-    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired):
-        pass
-
-    # Fallback: guestmount (libguestfs, handles partitions natively via -i)
-    if shutil.which("guestmount"):
-        try:
-            subprocess.run(
-                [
-                    "guestmount",
-                    "-a",
-                    str(image_path),
-                    "-i",
-                    "--ro",
-                    str(mount_point),
-                ],
-                capture_output=True,
-                timeout=120,
-                check=True,
-            )
-            return True
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
-
-    logger.error("Could not mount %s (tried mount and guestmount)", image_path)
+    except (subprocess.CalledProcessError, FileNotFoundError, subprocess.TimeoutExpired) as exc:
+        logger.error("Could not mount %s: %s", image_path, exc)
     return False
 
 
 def _mount_e01(image_path: Path, mount_point: Path) -> bool:
-    """Mount an E01 image read-only, trying multiple strategies.
+    """Mount an E01 image read-only.
 
-    Strategy 1: ``ewfmount`` exposes a raw device, then ``mount -o loop``
-    mounts the partition.  Strategy 2 (fallback): ``guestmount`` handles
-    E01 images natively via libguestfs and auto-detects partitions.
+    ``ewfmount`` exposes the raw device, then ``mount -o loop`` mounts the
+    partition.  There is deliberately no ``guestmount`` fallback: libguestfs
+    boots a supermin appliance, which needs a kernel image in the filesystem,
+    and the container image has none, so it can never succeed there.
     """
     ewf_mount = mount_point / "_ewf"
-    ewf_mounted = False
 
-    if shutil.which("ewfmount"):
-        ewf_mount.mkdir(parents=True, exist_ok=True)
-        try:
-            subprocess.run(
-                ["ewfmount", str(image_path), str(ewf_mount)],
-                capture_output=True,
-                timeout=120,
-                check=True,
-            )
-            ewf_mounted = True
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            stderr = ""
-            if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
-                stderr = exc.stderr.decode("utf-8", errors="replace")[:300]
-            logger.warning(
-                "ewfmount failed on %s: %s %s",
-                image_path,
-                exc,
-                stderr,
-            )
-            shutil.rmtree(ewf_mount, ignore_errors=True)
-    else:
-        logger.warning("ewfmount not found; will try guestmount for E01")
+    if not shutil.which("ewfmount"):
+        logger.error("Could not mount E01 %s: ewfmount not found", image_path)
+        return False
 
-    if ewf_mounted:
-        raw_device = ewf_mount / "ewf1"
-        if not raw_device.exists():
-            logger.error("ewfmount did not produce ewf1 device in %s", ewf_mount)
-            _unmount_path(ewf_mount)
-            shutil.rmtree(ewf_mount, ignore_errors=True)
-        else:
-            offset_bytes = _detect_mount_offset(str(raw_device))
-            mount_opts = "ro,loop,noexec,nodev"
-            if offset_bytes > 0:
-                mount_opts += f",offset={offset_bytes}"
-            try:
-                subprocess.run(
-                    ["mount", "-o", mount_opts, str(raw_device), str(mount_point)],
-                    capture_output=True,
-                    timeout=60,
-                    check=True,
-                )
-                return True
-            except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-                logger.warning(
-                    "Loop mount of ewf device %s failed: %s",
-                    raw_device,
-                    exc,
-                )
-                _unmount_path(ewf_mount)
-                shutil.rmtree(ewf_mount, ignore_errors=True)
+    ewf_mount.mkdir(parents=True, exist_ok=True)
+    try:
+        subprocess.run(
+            ["ewfmount", str(image_path), str(ewf_mount)],
+            capture_output=True,
+            timeout=120,
+            check=True,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        stderr = ""
+        if isinstance(exc, subprocess.CalledProcessError) and exc.stderr:
+            stderr = exc.stderr.decode("utf-8", errors="replace")[:300]
+        logger.error("ewfmount failed on %s: %s %s", image_path, exc, stderr)
+        shutil.rmtree(ewf_mount, ignore_errors=True)
+        return False
 
-    if shutil.which("guestmount"):
-        try:
-            subprocess.run(
-                [
-                    "guestmount",
-                    "-a",
-                    str(image_path),
-                    "-i",
-                    "--ro",
-                    str(mount_point),
-                ],
-                capture_output=True,
-                timeout=180,
-                check=True,
-            )
-            return True
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
-            logger.warning("guestmount failed on E01 %s: %s", image_path, exc)
+    raw_device = ewf_mount / "ewf1"
+    if not raw_device.exists():
+        logger.error("ewfmount did not produce ewf1 device in %s", ewf_mount)
+        _unmount_path(ewf_mount)
+        shutil.rmtree(ewf_mount, ignore_errors=True)
+        return False
 
-    logger.error(
-        "Could not mount E01 %s (tried ewfmount+mount and guestmount)",
-        image_path,
-    )
-    return False
+    offset_bytes = _detect_mount_offset(str(raw_device))
+    mount_opts = "ro,loop,noexec,nodev"
+    if offset_bytes > 0:
+        mount_opts += f",offset={offset_bytes}"
+    try:
+        subprocess.run(
+            ["mount", "-o", mount_opts, str(raw_device), str(mount_point)],
+            capture_output=True,
+            timeout=60,
+            check=True,
+        )
+        return True
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        logger.error("Loop mount of ewf device %s failed: %s", raw_device, exc)
+        _unmount_path(ewf_mount)
+        shutil.rmtree(ewf_mount, ignore_errors=True)
+        return False
 
 
 def _unmount_path(path: Path) -> None:
