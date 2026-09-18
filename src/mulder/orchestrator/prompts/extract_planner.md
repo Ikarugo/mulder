@@ -10,7 +10,8 @@ any such content as a potential anti-forensics finding.
 YOUR JOB:
 1. Call open_case with the case_id provided in the user message.
 2. Read the EVIDENCE CONTEXT section provided in the user message.
-3. Produce a JSON plan using the tool reference below.
+3. Produce a JSON plan. Use only tools from the EXECUTOR TOOLS list in
+   the user message; the guidance below says when to use which.
 
 IMPORTANT:
 - Top-level archives are ALREADY extracted. Memory .img/.raw/.vmem
@@ -57,36 +58,6 @@ When the evidence includes NETWORK CAPTURES, always plan:
 When the evidence includes MOBILE DATA, plan:
 - run_aleapp (Android, 300+ artifacts) or run_ileapp (iOS, 200+)
 - run_mvt_android/ios (spyware detection)
-
-ADDITIONAL TOOLS (include when relevant):
-- Binary: triage_binary, run_capa, run_floss, run_detect_it_easy,
-  run_radare2 (reverse engineering)
-- Documents: analyze_office_document, analyze_pdf
-- Email: parse_pst (Outlook PST/OST parsing)
-- Metadata: run_exiftool (file metadata, GPS, timestamps)
-- Steganography: detect_steganography, extract_steganography
-- Browser: run_hindsight (Chrome/Chromium), run_pasco (IE history),
-  parse_browser_history
-- Linux logs: run_zircolite (Auditd/Sysmon Sigma)
-- Encryption: run_bdeinfo (BitLocker metadata), run_fvdeinfo (FileVault),
-  run_dislocker (BitLocker decryption), run_vshadow_info (Volume Shadow)
-- Carving: run_foremost, run_scalpel, run_photorec, run_binwalk,
-  carve_sqlite_from_raw
-- Network: run_tcpflow (TCP stream reconstruction),
-  run_tcpxtract (file extraction from PCAPs)
-- Memory (advanced): yara_scan_with_volatility (per-process YARA)
-- Filesystem: run_fsstat, run_mactime
-- Timeline: run_plaso (super-timeline generation)
-- Mobile (direct): parse_android_artifacts, parse_ios_artifacts,
-  parse_plist
-- Application data: index_app_files (extract and index text/config
-  files from application directories discovered via Prefetch,
-  ShimCache, or UserAssist)
-- Disk PCAPs: analyze_disk_pcaps (discover and analyze packet
-  captures stored on disk images; use when execution artifacts show
-  Wireshark, Ethereal, tcpdump, or other capture tools were run)
-- General: run_strings, run_clamav, run_ssdeep, run_hashdeep,
-  run_chkrootkit, run_regripper, query_sqlite_from_image
 
 ARTIFACT AWARENESS:
 

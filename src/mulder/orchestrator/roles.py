@@ -65,6 +65,33 @@ _EXECUTOR_CONTROL_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+_EXECUTOR_TOOLS_SECTION: str = (
+    "\n\nEXECUTOR TOOLS: the {phase} executor can call exactly these tools; "
+    "a task naming any other tool is dropped from the plan:\n{tools}"
+)
+
+
+def executor_tools_section(phase: PhaseConfig) -> str:
+    """Render the tools a planner may put in its plan for *phase*.
+
+    Built from the executor role allowlist so the prompt cannot drift from
+    what the executor is actually permitted to call. Executor control
+    tools (open_case, batch management) are omitted: they are not
+    something to plan.
+
+    Args:
+        phase: Split-mode phase configuration.
+
+    Returns:
+        Prompt suffix listing the plannable tool names, prefix stripped.
+    """
+    names = sorted(
+        t.removeprefix("mcp__mulder__")
+        for t in phase.executor_allowed_tools
+        if t not in _EXECUTOR_CONTROL_TOOLS
+    )
+    return _EXECUTOR_TOOLS_SECTION.format(phase=phase.name, tools=", ".join(names))
+
 
 def _sanitize_for_prompt(text: str, max_len: int = 200) -> str:
     """Strip control characters and cap length for prompt-safe content.
@@ -169,6 +196,8 @@ class RoleRunner:
                 if fname not in effective_vars:
                     effective_vars[fname] = ""
             prompt = phase.planner_prompt_template.format(**effective_vars)
+
+        prompt += executor_tools_section(phase)
 
         if follow_up_context:
             prompt += f"\n\nFOLLOW-UP REQUEST:\n{follow_up_context}"

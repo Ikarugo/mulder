@@ -1,15 +1,17 @@
-"""Planner prompts only advertise tools the phase's executor may run, and a
-plan that names an off-role tool is trimmed and logged (issue #175)."""
+"""Planner prompts list exactly the tools the phase's executor may run (rendered
+from the allowlist), hand-written prose never names an off-role tool, and a
+plan that names one anyway is trimmed and logged (issue #175)."""
 
 from __future__ import annotations
 
 import logging
 import re
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from mulder.orchestrator.phases import ALTERNATIVE_NARRATIVE, CROSS_SYSTEM, EXTRACTION, PhaseConfig
+from mulder.orchestrator.roles import _EXECUTOR_CONTROL_TOOLS, executor_tools_section
 from mulder.orchestrator.runner import Orchestrator
 from mulder.orchestrator.types import PhaseResult, Plan
 from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
@@ -35,6 +37,18 @@ PLANNER_OWN_TOOLS = frozenset(
 )
 
 
+PLANNER_VARS = {
+    "case_id": "case",
+    "system_name": "host",
+    "evidence_path": "/evidence",
+    "evidence_context": "",
+    "case_briefing": "",
+    "consistency_report": "",
+}
+
+PLAN = '{"tasks": [{"tool": "search", "args": {"query": "x"}, "purpose": "p"}]}'
+
+
 def _advertised(phase: PhaseConfig) -> set[str]:
     mentioned = set(re.findall(r"\b[a-z][a-z0-9_]*\b", phase.planner_system_prompt)) & REGISTERED
     return mentioned - PLANNER_OWN_TOOLS
@@ -49,6 +63,44 @@ def test_planner_prompt_only_advertises_executor_tools(phase: PhaseConfig) -> No
         f"{phase.name} planner prompt advertises tools its executor cannot run: "
         f"{sorted(advertised - executor)}"
     )
+
+
+@pytest.mark.parametrize("phase", SPLIT_PHASES, ids=lambda p: p.name)
+def test_rendered_section_is_executor_allowlist_minus_control_tools(phase: PhaseConfig) -> None:
+    section = executor_tools_section(phase)
+    header, _, listing = section.partition(":\n")
+    assert header.endswith("dropped from the plan") and phase.name in header
+    rendered = listing.split(", ")
+    expected = sorted(
+        t.removeprefix("mcp__mulder__")
+        for t in phase.executor_allowed_tools
+        if t not in _EXECUTOR_CONTROL_TOOLS
+    )
+    assert rendered == expected
+    assert "mcp__mulder__" not in listing
+    assert not {"open_case", "start_extraction_batch", "wait_all"} & set(rendered)
+
+
+@pytest.mark.asyncio()
+@pytest.mark.parametrize("phase", SPLIT_PHASES, ids=lambda p: p.name)
+async def test_planner_prompt_renders_allowlist_without_prompt_edit(
+    phase: PhaseConfig, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        phase,
+        "executor_allowed_tools",
+        [*phase.executor_allowed_tools, "mcp__mulder__brand_new_tool"],
+    )
+    with patch("mulder.orchestrator.runner.InvestigationDashboard"):
+        orch = Orchestrator("/evidence")
+    execute = AsyncMock(return_value=PhaseResult(phase_name="x", messages=[PLAN]))
+    with patch.object(orch._session, "execute", new=execute):
+        assert await orch._roles.run_planner(phase, PLANNER_VARS) is not None
+    prompt = execute.call_args.kwargs["prompt"]
+    assert executor_tools_section(phase) in prompt
+    assert "brand_new_tool" in prompt
+    assert "brand_new_tool" not in phase.planner_system_prompt
+    assert prompt.index("EXECUTOR TOOLS:") < prompt.index("TURN BUDGET:")
 
 
 @pytest.mark.asyncio()

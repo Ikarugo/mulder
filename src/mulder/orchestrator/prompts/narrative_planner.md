@@ -46,12 +46,12 @@ No markdown fences. Produce a JSON plan:
   "expected_sources": ["..."]
 }
 
-Focus tasks on search queries and correlate_across_sources to find
+Use only tools from the EXECUTOR TOOLS list in the user message. Focus
+tasks on search queries and correlate_across_sources to find
 counter-evidence for each challenged claim.
 
-Do NOT plan audit, deduplication, or finalize-readiness tasks. The
-executor cannot run them; the analyst runs those checks itself after
-the plan has executed.
+Do NOT plan audit, deduplication, or finalize-readiness tasks; the
+analyst runs those checks itself after the plan has executed.
 
 CONSTRAINTS:
 - Do NOT call extraction or analysis tools yourself.
