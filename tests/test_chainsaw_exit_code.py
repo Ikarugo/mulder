@@ -54,6 +54,10 @@ def _invoke(evidence: Path, mode: str, run: Any, rules: Path) -> tuple[Any, list
 
     mapping = rules / "mapping.yml"
     mapping.write_text("---\n")
+    # ``analyse srum`` needs the SOFTWARE hive to resolve its GUID tables, so
+    # the srum runs must supply one before they reach Chainsaw at all.
+    hive = rules / "SOFTWARE"
+    hive.write_bytes(b"regf")
     kwargs = {"side_effect": run} if callable(run) else {"return_value": run}
     with (
         patch("mulder.server.tools.chainsaw._chainsaw_binary", return_value="/usr/bin/chainsaw"),
@@ -67,6 +71,7 @@ def _invoke(evidence: Path, mode: str, run: Any, rules: Path) -> tuple[Any, list
             mode=mode,
             sigma_rules_path=str(rules),
             search_term="powershell",
+            software_hive_path=str(hive) if mode == "srum" else "",
         )
     return result, indexed
 
