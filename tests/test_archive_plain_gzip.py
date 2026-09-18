@@ -52,7 +52,7 @@ def test_a_gzipped_disk_image_is_actually_decompressed(cases_dir: Path, tmp_path
     """The headline case: evidence.dd.gz must produce evidence.dd."""
     archive = tmp_path / "evidence.dd.gz"
     archive.write_bytes(gzip.compress(_IMAGE))
-    dest = tmp_path / "out"
+    dest = cases_dir / "extracted" / "out"
 
     result = _invoke(cases_dir, archive, dest)
 
@@ -64,7 +64,7 @@ def test_a_gzipped_disk_image_is_actually_decompressed(cases_dir: Path, tmp_path
 def test_a_bzipped_image_is_decompressed(cases_dir: Path, tmp_path: Path) -> None:
     archive = tmp_path / "memory.raw.bz2"
     archive.write_bytes(bz2.compress(_IMAGE))
-    dest = tmp_path / "out"
+    dest = cases_dir / "extracted" / "out"
 
     result = _invoke(cases_dir, archive, dest)
 
@@ -79,7 +79,7 @@ def test_a_tar_gz_still_goes_to_the_tar_extractor(cases_dir: Path, tmp_path: Pat
     tar_gz = tmp_path / "bundle.tar.gz"
     with tarfile.open(tar_gz, "w:gz") as tf:
         tf.add(inner, arcname="one.txt")
-    dest = tmp_path / "out"
+    dest = cases_dir / "extracted" / "out"
 
     result = _invoke(cases_dir, tar_gz, dest)
 
@@ -100,7 +100,7 @@ def test_a_tar_misnamed_as_plain_gz_is_still_untarred(cases_dir: Path, tmp_path:
         tf.add(inner, arcname="two.txt")
     misnamed = tmp_path / "bundle.gz"
     misnamed.write_bytes(gzip.compress(real_tar.read_bytes()))
-    dest = tmp_path / "out"
+    dest = cases_dir / "extracted" / "out"
 
     result = _invoke(cases_dir, misnamed, dest)
 

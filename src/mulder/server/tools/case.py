@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import bz2
 import gzip
+import hashlib
 import logging
 import os
 import shutil
@@ -16,6 +17,7 @@ import time
 import zipfile
 from pathlib import Path
 
+from mulder.path_policy import PathPolicyError, resolve_allowed_path
 from mulder.server.app import (
     create_case,
     get_cfg,
@@ -24,6 +26,7 @@ from mulder.server.app import (
     load_case,
     mcp,
     slugify,
+    validate_case_id,
 )
 from mulder.server.helpers import error_response, hash_output, make_tool_call_id
 from mulder.server.tool_access import ALL_ROLES, Role, tool_access
@@ -89,6 +92,20 @@ def scan_evidence(
         case_id = enforced_id
     elif case_id is None:
         case_id = slugify(ev_path.name)
+
+    # slugify guarantees a safe path segment, but only for IDs mulder derives.
+    # One supplied by an agent has to be checked before it becomes a path.
+    try:
+        validate_case_id(case_id)
+    except ValueError as exc:
+        return error_response(
+            tc_id,
+            "scan_evidence",
+            params,
+            str(exc),
+            (time.monotonic() - t0) * 1000,
+            error_type="invalid_input",
+        )
 
     try:
         result = _scan_evidence_inner(ev_path, case_id, replace)
@@ -258,9 +275,14 @@ def list_cases() -> dict[str, object]:
         try:
             from mulder.db import CaseDB
 
-            db = CaseDB.open(cid, cfg.db_dir)
-            meta = db.get_case_metadata()
-            count = db.get_source_count()
+            # ``with``, not a trailing close(): CaseDB.open starts a writer
+            # thread and holds an engine, and if get_case_metadata() raises --
+            # a corrupt file, a schema older than the migrations -- the close()
+            # below it never runs. Listing a directory of such cases leaked one
+            # thread per case, and list_cases is called repeatedly.
+            with CaseDB.open(cid, cfg.db_dir) as db:
+                meta = db.get_case_metadata()
+                count = db.get_source_count()
             cases.append(
                 {
                     "case_id": cid,
@@ -269,7 +291,6 @@ def list_cases() -> dict[str, object]:
                     "ingested_at": meta.ingested_at,
                 }
             )
-            db.close()
         except Exception as exc:
             logger.warning("Failed to read case '%s': %s", cid, exc)
             cases.append({"case_id": cid, "error": str(exc)})
@@ -312,6 +333,32 @@ def open_case(case_id: str) -> dict[str, object]:
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
     params: dict[str, object] = {"case_id": case_id}
+
+    try:
+        validate_case_id(case_id)
+    except ValueError as exc:
+        return error_response(
+            tc_id,
+            "open_case",
+            params,
+            str(exc),
+            (time.monotonic() - t0) * 1000,
+            error_type="invalid_input",
+        )
+
+    # scan_evidence and create_case both honour MULDER_CASE_ID; open_case did
+    # not, so an agent pinned to one case could attach to another and every
+    # later finding, note and export would be written there instead.
+    enforced_id = os.environ.get("MULDER_CASE_ID", "")
+    if enforced_id and case_id != enforced_id:
+        return error_response(
+            tc_id,
+            "open_case",
+            params,
+            f"MULDER_CASE_ID enforces case '{enforced_id}'; refusing to open '{case_id}'.",
+            (time.monotonic() - t0) * 1000,
+            error_type="forbidden",
+        )
 
     cfg = get_cfg()
     db_path = cfg.db_dir / f"{case_id}.db"
@@ -482,6 +529,19 @@ def _extract_7z(archive: Path, dest: Path) -> list[str]:
     return [str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()]
 
 
+def _archive_slot(archive: Path) -> str:
+    """Return a per-archive directory name that cannot collide.
+
+    ``archive.stem`` alone is ambiguous: two unrelated archives called
+    ``evidence.zip`` collect in the same slot, and the second call then takes
+    the "already extracted" path and reports the *first* archive's files as
+    its own.  Appending a digest of the resolved source path keeps the name
+    readable while making it unique to one archive on disk.
+    """
+    digest = hashlib.blake2b(str(archive).encode(), digest_size=6).hexdigest()
+    return f"{archive.stem}-{digest}"
+
+
 @mcp.tool()
 @tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR)
 def extract_archive(
@@ -519,11 +579,23 @@ def extract_archive(
             error_type="file_not_found",
         )
 
+    cfg = get_cfg()
+    extract_root = Path(cfg.db_dir) / "extracted"
+
     if extract_to:
-        dest = Path(extract_to).expanduser().resolve()
+        try:
+            dest = resolve_allowed_path(Path(extract_to).expanduser(), [extract_root])
+        except PathPolicyError as exc:
+            return error_response(
+                tc_id,
+                "extract_archive",
+                params,
+                f"{exc}: extract_to must stay under {extract_root}",
+                (time.monotonic() - t0) * 1000,
+                error_type="invalid_input",
+            )
     else:
-        cfg = get_cfg()
-        dest = cfg.db_dir / "extracted" / archive.stem
+        dest = extract_root / _archive_slot(archive)
 
     # Idempotent: if already extracted, return the existing files
     if dest.exists() and any(dest.iterdir()):
