@@ -135,6 +135,14 @@ PROSE = (
         (PROSE, PROSE),
         ("", ""),
         (DEEPSEEK_LEAK + "\n" + PLAN, PLAN),
+        ("prose\n<｜DSML｜function_calls\n", "prose"),
+        ("prose\n<｜DSML｜function_calls\n\n", "prose"),
+        ("prose\n<｜DSML｜function_calls\n \n", "prose"),
+        ("prose\n\n<｜DSML｜function_calls", "prose"),
+        (DEEPSEEK_LEAK + "\n\n" + PROSE, PROSE),
+        (PROSE + "\n\n" + DEEPSEEK_LEAK + "\n\n", PROSE),
+        ("\n" + PROSE + "\n\n", PROSE),
+        ("First.\n\nSecond.", "First.\n\nSecond."),
     ],
     ids=[
         "trailing_marker",
@@ -147,6 +155,14 @@ PROSE = (
         "prose_untouched",
         "empty",
         "marker_then_json",
+        "trailing_marker_newline",
+        "trailing_marker_blank_line",
+        "trailing_marker_whitespace_line",
+        "blank_then_trailing_marker",
+        "leading_marker_then_blank",
+        "blank_marker_blank_both_sides",
+        "prose_blank_edges_only",
+        "interior_blank_kept",
     ],
 )
 def test_trim_edge_markup_lines(text: str, expected: str) -> None:
@@ -171,6 +187,23 @@ def test_session_drops_bare_marker_but_keeps_prose_and_plan(tmp_path: Path) -> N
     )
     orch._session._process_assistant_message(message, "", set(), messages)
     assert messages == ["Now I'll examine the sources.", PLAN]
+
+
+def test_session_drops_block_of_only_blanks_and_markers(tmp_path: Path) -> None:
+    """The smoke-run case: marker followed by a blank line survived the edge trim."""
+    orch = _make_orchestrator(tmp_path)
+    messages: list[str] = []
+    message = AssistantMessage(
+        content=[
+            TextBlock(text=PROSE + "\n" + DEEPSEEK_LEAK + "\n\n"),
+            TextBlock(text="\n" + DEEPSEEK_LEAK + "\n \n" + DEEPSEEK_LEAK + "\n"),
+        ],
+        model="test-model",
+    )
+    orch._session._process_assistant_message(message, "", set(), messages)
+    assert messages == [PROSE]
+    dashboard = cast(MagicMock, orch._session._dashboard)
+    assert [c.args[0] for c in dashboard.log.call_args_list] == [PROSE]
 
 
 def test_session_trims_marker_from_prose_edges_and_still_parses_json(tmp_path: Path) -> None:
