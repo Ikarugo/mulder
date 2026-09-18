@@ -70,6 +70,8 @@ Nothing else. The image ships every tool and data set a native install obtains t
 Running `mulder setup` *inside* the container therefore exits 1 by design: `/opt` is root-owned
 and the process runs as the unprivileged `mulder` user, and there is nothing for it to do.
 `mulder setup --verify` works normally there, since it only reads.
+The same applies to the YARA rules: the image pins `/opt/signature-base` to a commit, and the
+server logs once per session that it is using that checkout rather than pulling newer rules.
 
 ### Native Install
 
