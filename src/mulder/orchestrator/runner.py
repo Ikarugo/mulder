@@ -80,6 +80,7 @@ class Orchestrator:
         case_id: str = "",
         db_dir: str | Path = "",
         no_thinking: bool = False,
+        show_cli_stderr: bool = False,
     ) -> None:
         """Initialize the orchestrator.
 
@@ -101,6 +102,7 @@ class Orchestrator:
                 MCP servers they spawn write to the same place. Falls back to
                 ``$MULDER_DB_DIR`` and then the default when not given.
             no_thinking: Disable extended thinking for all queries, ignoring effort.
+            show_cli_stderr: Stream agent CLI diagnostics to the dashboard and log.
         """
         self.evidence_path = evidence_path
         self.cwd = str(cwd)
@@ -134,6 +136,7 @@ class Orchestrator:
             effort=self.effort,
             using_proxy=self._using_proxy,
             no_thinking=no_thinking,
+            show_cli_stderr=show_cli_stderr,
         )
         self._roles = RoleRunner(
             session=self._session,

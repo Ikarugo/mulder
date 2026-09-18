@@ -290,6 +290,11 @@ def report(case_id: str, db_dir: str) -> None:
     type=click.Path(exists=True),
     help="LiteLLM config YAML for custom model routing.",
 )
+@click.option(
+    "--show-cli-stderr",
+    is_flag=True,
+    help="Stream agent CLI diagnostics to the dashboard and orchestrator.log.",
+)
 def investigate(
     evidence_path: str,
     case_id: str,
@@ -304,6 +309,7 @@ def investigate(
     workers: int,
     proxy_config: str | None,
     no_thinking: bool,
+    show_cli_stderr: bool,
 ) -> None:
     """Run a full multi-pass forensic investigation.
 
@@ -395,6 +401,7 @@ def investigate(
         case_id=case_id,
         db_dir=log_dir,
         no_thinking=no_thinking,
+        show_cli_stderr=show_cli_stderr,
     )
 
     from mulder.orchestrator.errors import (
