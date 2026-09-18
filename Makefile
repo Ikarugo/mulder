@@ -61,7 +61,7 @@ dist-check: build
 	uvx twine check --strict dist/*
 
 container-build:
-	$(CONTAINER_ENGINE) build -t $(IMAGE_NAME):$(IMAGE_TAG) .
+	DOCKER_BUILDKIT=1 $(CONTAINER_ENGINE) build -t $(IMAGE_NAME):$(IMAGE_TAG) .
 
 container-run:
 	$(CONTAINER_ENGINE) run -it --privileged \

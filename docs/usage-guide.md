@@ -616,6 +616,13 @@ cd mulder
 docker build -t mulder:dev .
 ```
 
+The `Dockerfile` requires BuildKit. Docker Desktop and docker-ce use it by
+default. On Debian/Ubuntu with the distro `docker.io` package, install the
+`docker-buildx` plugin (`sudo apt-get install docker-buildx`); if the build
+still prints legacy `Step N/M` output, set `DOCKER_BUILDKIT=1 docker build ...`.
+Without BuildKit the build fails with
+`failed to parse platform : "" is an invalid OS component of ""`.
+
 Then run with the same volume mounts, substituting `mulder:dev` for the registry image:
 
 ```bash
