@@ -79,6 +79,7 @@ class Orchestrator:
         proxy_config: str | None = None,
         case_id: str = "",
         db_dir: str | Path = "",
+        show_cli_stderr: bool = False,
     ) -> None:
         """Initialize the orchestrator.
 
@@ -99,6 +100,7 @@ class Orchestrator:
                 the run's sidecar files. Exported to agent sessions so the
                 MCP servers they spawn write to the same place. Falls back to
                 ``$MULDER_DB_DIR`` and then the default when not given.
+            show_cli_stderr: Stream agent CLI diagnostics to the dashboard and log.
         """
         self.evidence_path = evidence_path
         self.cwd = str(cwd)
@@ -131,6 +133,7 @@ class Orchestrator:
             env=self.env,
             effort=self.effort,
             using_proxy=self._using_proxy,
+            show_cli_stderr=show_cli_stderr,
         )
         self._roles = RoleRunner(
             session=self._session,

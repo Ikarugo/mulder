@@ -463,6 +463,12 @@ Runs a full multi-phase forensic investigation.
 | `--db-dir` | `~/.mulder/cases` | Case database directory |
 | `--cwd` | `~/.mulder/workspace` | Working directory for agent sessions. Also settable via `MULDER_CWD`; the container sets it to `/mulder-investigation`. Created on first use, along with a default `.mcp.json` |
 | `--proxy-config` | None | LiteLLM config YAML for custom model routing |
+| `--show-cli-stderr` | off | Stream agent CLI diagnostics to the dashboard and `orchestrator.log` |
+
+For subprocess failures that say "Check stderr output for details", rerun with
+`--show-cli-stderr`. This displays diagnostics as they arrive for both investigation
+and utility sessions, labeled by worker, model, or utility operation. The same lines
+are saved in `<db-dir>/orchestrator.log`. Without the flag, CLI stderr remains suppressed.
 
 ### `mulder setup`
 

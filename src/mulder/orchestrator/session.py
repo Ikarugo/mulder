@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, query
@@ -20,6 +21,7 @@ from claude_agent_sdk.types import (
     TextBlock,
     ToolUseBlock,
 )
+from rich.text import Text
 
 from mulder.orchestrator.display import InvestigationDashboard
 from mulder.orchestrator.errors import AuthenticationError, ModelNotAvailableError
@@ -155,6 +157,7 @@ class SessionExecutor:
         env: dict[str, str],
         effort: EffortLevel,
         using_proxy: bool = False,
+        show_cli_stderr: bool = False,
     ) -> None:
         """Initialize the session executor.
 
@@ -166,6 +169,7 @@ class SessionExecutor:
             effort: Effort level for agent sessions (max, xhigh, high, low).
             using_proxy: Whether a LiteLLM proxy is active (disables
                 per-message token tracking to avoid double counting).
+            show_cli_stderr: Stream agent CLI diagnostics to the dashboard and log.
         """
         self._dashboard = dashboard
         self._model_config = model_config
@@ -173,6 +177,19 @@ class SessionExecutor:
         self._env = env
         self._effort = effort
         self._using_proxy = using_proxy
+        self._show_cli_stderr = show_cli_stderr
+
+    def _stderr_callback(self, label: str) -> Callable[[str], None]:
+        """Keep diagnostics scoped to their query and inside the live dashboard."""
+        if not self._show_cli_stderr:
+            return self._dashboard.suppress_stderr
+
+        def log_stderr(line: str) -> None:
+            for text in Text.from_ansi(line).plain.splitlines():
+                if text.strip():
+                    self._dashboard.log(f"[{label}] CLI stderr: {text}")
+
+        return log_stderr
 
     async def execute(
         self,
@@ -219,7 +236,7 @@ class SessionExecutor:
             cwd=self._cwd,
             effort=self._effort,
             env=self._env,
-            stderr=self._dashboard.suppress_stderr,
+            stderr=self._stderr_callback(log_prefix or task_system or model),
             max_buffer_size=_MAX_BUFFER_SIZE_BYTES,
         )
 
@@ -604,7 +621,7 @@ class SessionExecutor:
             cwd=self._cwd,
             effort="low",
             env=self._env,
-            stderr=self._dashboard.suppress_stderr,
+            stderr=self._stderr_callback(f"utility: {label}"),
         )
 
         collected_text: list[str] = []
