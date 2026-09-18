@@ -5,13 +5,14 @@ from __future__ import annotations
 import email as email_lib
 import email.parser
 import logging
+import re
 import subprocess
 import tempfile
 import time
 from datetime import datetime, timezone
 from email.errors import HeaderParseError
 from email.header import decode_header, make_header
-from email.utils import parsedate_to_datetime
+from email.utils import getaddresses, parsedate_to_datetime
 from pathlib import Path
 
 from mulder.server.app import mcp
@@ -59,6 +60,10 @@ _SUSPICIOUS_EXTENSIONS: set[str] = {
 
 _VALID_PST_SUFFIXES: set[str] = {".pst", ".ost"}
 
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_WS_RE = re.compile(r"[ \t]*\n[ \t]*")
+_SCRIPT_STYLE_RE = re.compile(r"(?is)<(script|style).*?</\1>")
+
 
 # ---------------------------------------------------------------------------
 # Parsing helpers
@@ -85,17 +90,34 @@ def _decode_header_value(raw: str | None) -> str:
 
 
 def _parse_recipients(raw: str) -> list[str]:
-    """Parse a comma-separated recipient string into individual addresses.
+    """Parse a To/Cc header into individual addresses.
+
+    Splitting on "," is wrong, because a display name may legitimately
+    contain one. ``"Doe, John" <john@example.com>, jane@example.com`` split
+    that way yields ``'"Doe'``, ``'John" <john@example.com>'`` and
+    ``'jane@example.com'`` -- the first is not an address at all and the
+    second is mangled, so recipient search and address extraction both miss
+    them. RFC 5322 quoting is what ``email.utils.getaddresses`` exists for.
 
     Args:
-        raw: Raw To/CC header value.
+        raw: Raw To/Cc header value.
 
     Returns:
-        List of individual email addresses or display names.
+        One entry per recipient: ``Display Name <addr>`` when a name is
+        present, the bare address otherwise.
     """
     if not raw:
         return []
-    return [r.strip() for r in raw.split(",") if r.strip()]
+    out: list[str] = []
+    for name, addr in getaddresses([raw]):
+        display = name.strip()
+        if addr and display:
+            out.append(f"{display} <{addr}>")
+        elif addr:
+            out.append(addr)
+        elif display:
+            out.append(display)
+    return out
 
 
 def _get_body(
@@ -111,20 +133,56 @@ def _get_body(
     Returns:
         Body text or None if no matching part found.
     """
-    if msg.is_multipart():
-        for part in msg.walk():
-            if part.get_content_type() == content_type:
-                payload = part.get_payload(decode=True)
-                if isinstance(payload, bytes):
-                    charset = part.get_content_charset() or "utf-8"
-                    return payload.decode(charset, errors="replace")
-    else:
-        if msg.get_content_type() == content_type:
-            payload = msg.get_payload(decode=True)
-            if isinstance(payload, bytes):
-                charset = msg.get_content_charset() or "utf-8"
+    for part in msg.walk():
+        if part.is_multipart():
+            continue
+        # A text/plain *attachment* is evidence, but it is not the body.
+        if part.get_content_disposition() == "attachment":
+            continue
+        if part.get_content_type() != content_type:
+            continue
+        payload = part.get_payload(decode=True)
+        if isinstance(payload, bytes):
+            charset = part.get_content_charset() or "utf-8"
+            try:
                 return payload.decode(charset, errors="replace")
+            except LookupError:
+                # A charset the platform does not know must not lose the body.
+                return payload.decode("utf-8", errors="replace")
     return None
+
+
+def _html_to_text(html: str) -> str:
+    """Strip markup from an HTML body so its words are searchable."""
+    text = _SCRIPT_STYLE_RE.sub(" ", html)
+    text = _HTML_TAG_RE.sub(" ", text)
+    for entity, char in (
+        ("&nbsp;", " "),
+        ("&amp;", "&"),
+        ("&lt;", "<"),
+        ("&gt;", ">"),
+        ("&quot;", '"'),
+        ("&#39;", "'"),
+    ):
+        text = text.replace(entity, char)
+    return _HTML_WS_RE.sub("\n", text).strip()
+
+
+def _get_searchable_body(msg: email_lib.message.Message) -> str | None:
+    """The message body as text, whatever it was sent as.
+
+    ``text/plain`` when present, otherwise ``text/html`` with the markup
+    stripped. An HTML-only message -- which is most phishing -- previously
+    had no body at all, so no keyword could match it and nothing of its
+    content reached the case.
+    """
+    plain = _get_body(msg, "text/plain")
+    if plain and plain.strip():
+        return plain
+    html = _get_body(msg, "text/html")
+    if html and html.strip():
+        return _html_to_text(html)
+    return plain or html
 
 
 def _matches_search(
@@ -133,6 +191,7 @@ def _matches_search(
     body: str | None,
     recipients: list[str],
     search_term: str,
+    attachments: list[str] | None = None,
 ) -> bool:
     """Check whether an email matches the search keyword.
 
@@ -140,8 +199,12 @@ def _matches_search(
         subject: Email subject line.
         sender: Sender address.
         body: Plain text body (may be None).
-        recipients: List of recipient addresses.
+        recipients: Every recipient -- To, Cc *and* Bcc. Cc and Bcc were
+            parsed and then never searched, so a search naming a copied
+            recipient silently missed the message.
         search_term: Keyword to search for (case insensitive).
+        attachments: Attachment filenames, which is how an analyst looks
+            for a named payload.
 
     Returns:
         True if the term appears in any searchable field.
@@ -153,7 +216,9 @@ def _matches_search(
         return True
     if body and term in body.lower():
         return True
-    return any(term in r.lower() for r in recipients)
+    if any(term in r.lower() for r in recipients):
+        return True
+    return any(term in a.lower() for a in attachments or [])
 
 
 def _message_date(raw: str | None) -> datetime | None:
@@ -225,11 +290,19 @@ def _parse_email_message(
     has_suspicious = False
 
     for part in msg.walk():
-        if part.get_content_disposition() == "attachment":
-            filename = part.get_filename() or "unnamed"
-            attachments.append(filename)
-            ext = Path(filename).suffix.lower()
-            if ext in _SUSPICIOUS_EXTENSIONS:
+        if part.is_multipart():
+            continue
+        filename = part.get_filename()
+        disposition = part.get_content_disposition()
+        # An attachment is anything carrying a filename, not only what
+        # declares `Content-Disposition: attachment`. Malicious payloads
+        # arrive as `inline`, or with no disposition header at all, and both
+        # were previously invisible -- including to the suspicious-extension
+        # check, which is the point of this function.
+        if disposition == "attachment" or filename:
+            name = filename or "unnamed"
+            attachments.append(name)
+            if Path(name).suffix.lower() in _SUSPICIOUS_EXTENSIONS:
                 has_suspicious = True
 
     return {
@@ -239,7 +312,7 @@ def _parse_email_message(
         "recipients_to": _parse_recipients(msg.get("To", "")),
         "recipients_cc": _parse_recipients(msg.get("Cc", "")),
         "date": msg.get("Date"),
-        "body_text": _get_body(msg, "text/plain"),
+        "body_text": _get_searchable_body(msg),
         "attachments": attachments,
         "folder": folder,
         "importance": msg.get("Importance", "normal"),
@@ -298,9 +371,14 @@ def _parse_extracted_emails(
             sender = str(parsed.get("sender", ""))
             body_val = parsed.get("body_text")
             body_str = str(body_val) if body_val is not None else None
-            to_val = parsed.get("recipients_to")
-            to_list = [str(r) for r in to_val] if isinstance(to_val, list) else []
-            if not _matches_search(subject, sender, body_str, to_list, search_term):
+            recipients: list[str] = []
+            for key in ("recipients_to", "recipients_cc"):
+                val = parsed.get(key)
+                if isinstance(val, list):
+                    recipients.extend(str(r) for r in val)
+            att_val_s = parsed.get("attachments")
+            att_names = [str(a) for a in att_val_s] if isinstance(att_val_s, list) else []
+            if not _matches_search(subject, sender, body_str, recipients, search_term, att_names):
                 continue
 
         if parsed.get("has_suspicious_attachment"):
