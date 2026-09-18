@@ -31,6 +31,7 @@ the SDK without a type error.
 """
 
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*\n(.*?)\n\s*```", re.DOTALL)
+_JSON_DECODER = json.JSONDecoder()
 
 _PLAN_REQUIRED_KEYS: set[str] = {"tasks"}
 _EXECUTOR_REQUIRED_KEYS: set[str] = {"results"}
@@ -280,15 +281,7 @@ def extract_json_from_text(text: str) -> dict[str, Any]:
     Returns:
         Parsed dictionary, or empty dict if no valid JSON is found.
     """
-    stripped = text.strip()
-    try:
-        parsed: object = json.loads(stripped)
-        if isinstance(parsed, dict):
-            return parsed
-    except (json.JSONDecodeError, ValueError):
-        pass
-
-    result = _try_extract_json(stripped, set())
+    result = _try_extract_json(text, set())
     if result is not None:
         return result
 
@@ -297,9 +290,13 @@ def extract_json_from_text(text: str) -> dict[str, Any]:
 
 
 def _safe_parse(text: str, required_keys: set[str]) -> dict[str, Any] | None:
-    """Parse JSON from text, returning None on failure or missing keys.
+    """Return the largest balanced JSON object in text that has required_keys.
 
-    Finds the first '{' and last '}' to handle text surrounding JSON.
+    Tries ``raw_decode`` at every ``{``, so markup before or after the
+    object (leaked tool-call tokens, ``<think>`` blocks, prose with braces)
+    cannot break the parse the way a first-``{``/last-``}`` slice does.
+    Largest wins so a leaked ``{"name": ...}`` tool-call stub loses to the
+    real output whichever side of it the stub lands on.
 
     Args:
         text: Text potentially containing a JSON object.
@@ -308,21 +305,17 @@ def _safe_parse(text: str, required_keys: set[str]) -> dict[str, Any] | None:
     Returns:
         Parsed dict or None.
     """
-    start = text.find("{")
-    end = text.rfind("}")
-    if start == -1 or end == -1 or end <= start:
-        return None
-
-    candidate = text[start : end + 1]
-    try:
-        obj = json.loads(candidate)
-    except (json.JSONDecodeError, ValueError):
-        return None
-
-    if not isinstance(obj, dict):
-        return None
-
-    if not required_keys.issubset(obj.keys()):
-        return None
-
-    return obj
+    # ponytail: O(n * braces) rescans; fine for transcripts, revisit if a
+    # multi-MB message ever shows up here.
+    best: dict[str, Any] | None = None
+    best_len = -1
+    pos = text.find("{")
+    while pos != -1:
+        try:
+            obj, end = _JSON_DECODER.raw_decode(text, pos)
+        except ValueError:
+            obj, end = None, pos
+        if isinstance(obj, dict) and required_keys.issubset(obj) and end - pos > best_len:
+            best, best_len = obj, end - pos
+        pos = text.find("{", pos + 1)
+    return best

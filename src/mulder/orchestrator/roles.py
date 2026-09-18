@@ -49,6 +49,9 @@ _PLANNER_OUT_OF_TURNS: str = (
 
 _MAX_PLANNER_NOTES_CHARS: int = 20_000
 
+_REPAIR_MAX_CHARS: int = 24_000
+"""Cap on planner text sent to the JSON-repair utility model (~6K tokens)."""
+
 _EXECUTOR_CONTROL_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__mulder__open_case",
@@ -560,8 +563,13 @@ class RoleRunner:
             Parsed JSON plan dict, or None if repair failed.
         """
         raw_text = "\n".join(messages[-3:])
-        if not raw_text.strip():
+        # Nothing brace-shaped means nothing to repair (e.g. the planner ran
+        # out of turns mid-investigation); skip the utility call entirely.
+        start = raw_text.find("{")
+        if start == -1:
+            logger.info("[%s] No JSON object in planner output; skipping repair", phase_name)
             return None
+        raw_text = raw_text[start : start + _REPAIR_MAX_CHARS]
 
         deterministic = extract_json_plan([raw_text])
         if deterministic is not None:
@@ -575,10 +583,12 @@ class RoleRunner:
         repair_prompt = (
             "The following text contains a JSON plan that may have syntax errors, "
             "be wrapped in markdown fences, or have extra text around it. "
+            "It may also contain tool-call markup, special tokens, or reasoning "
+            "that is not JSON; ignore all of that. "
             "Extract and fix the JSON so it is valid. Return ONLY the corrected "
             "JSON object with keys: tasks, investigation_questions, expected_sources. "
             "tasks must be a non-empty array of objects with tool, args, and purpose keys, "
-            "not strings.\n\n"
+            'not strings. If the text contains no plan at all, return {"tasks": []}.\n\n'
             f"TEXT:\n{raw_text}"
         )
 
