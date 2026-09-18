@@ -35,6 +35,7 @@ from mulder.server.tools.extract.tsk import (
     _resolve_partition_offset,
     _tsk_extract_files,
 )
+from mulder.server.tools.tsk import _detect_filesystem_type
 
 __all__ = [
     "_DOTNET",
@@ -501,7 +502,8 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
     """Parse the $MFT from a disk image using MFTECmd (EZ Tools).
 
     The Master File Table contains timestamps, sizes, and parent
-    directories for every file on an NTFS volume.  Extracts $MFT via
+    directories for every file on an NTFS volume.  Skips volumes whose
+    filesystem is known to be non-NTFS; otherwise extracts $MFT via
     TSK icat (inode 0) first, falls back to mount.
 
     Args:
@@ -528,8 +530,23 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
                 0.0,
             )
 
+    offset = _resolve_partition_offset(image_path)
+    fs_type = _detect_filesystem_type(image_path, offset)
+    if fs_type and fs_type != "ntfs":
+        return tool_response(
+            tc_id,
+            "run_mft_parser",
+            params,
+            {
+                "status": "skipped",
+                "reason": f"Not applicable: filesystem is {fs_type}, no $MFT",
+                "filesystem_type": fs_type,
+            },
+            "ez.mft",
+            (time.monotonic() - t0) * 1000,
+        )
+
     if require_binary("icat"):
-        offset = _resolve_partition_offset(image_path)
         with tempfile.TemporaryDirectory(prefix="mulder_mft_") as tmpdir:
             mft_dest = Path(tmpdir) / "$MFT"
             cmd = ["icat"]
