@@ -5,7 +5,10 @@ Tier 1 tools: help the agent orient before running any extractions.
 
 from __future__ import annotations
 
+import bz2
+import gzip
 import hashlib
+import json
 import logging
 import os
 import shutil
@@ -13,6 +16,7 @@ import subprocess
 import tarfile
 import time
 import zipfile
+from datetime import datetime, timezone
 from pathlib import Path
 
 from mulder.path_policy import PathPolicyError, resolve_allowed_path
@@ -32,6 +36,14 @@ from mulder.server.tool_access import ALL_ROLES, Role, tool_access
 logger = logging.getLogger(__name__)
 
 _EXTRACT_TIMEOUT = 600
+
+_COMPLETION_MARKER = ".mulder-extraction-complete.json"
+"""Written only after an extraction runs to completion.
+
+The presence of *files* in a destination proves only that an extraction
+started.  A run killed by a timeout, a full disk or a crash leaves a partial
+tree behind that is indistinguishable from a finished one by that test.
+"""
 
 
 @mcp.tool()
@@ -492,11 +504,77 @@ def _extract_tar(archive: Path, dest: Path) -> list[str]:
     return [str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()]
 
 
+def _extract_single_stream(archive: Path, dest: Path) -> list[str]:
+    """Decompress a single-member gzip/bzip2 stream into *dest*.
+
+    ``evidence.dd.gz`` is one compressed file, not an archive of files.  The
+    output keeps the name with the compression suffix removed, so
+    ``evidence.dd.gz`` becomes ``evidence.dd``.
+    """
+    opener = gzip.open if archive.suffix.lower() == ".gz" else bz2.open
+    out = dest / archive.stem
+    with opener(archive, "rb") as src, open(out, "wb") as dst:
+        shutil.copyfileobj(src, dst)
+    return [str(out.relative_to(dest))]
+
+
+def _tar_member_count(archive: Path) -> int:
+    """Return how many members *archive* yields when read as a tar, else 0.
+
+    ``tarfile.is_tarfile`` cannot answer this for a compressed file: it sees
+    the gzip wrapper and returns True for a plain ``.dd.gz`` as readily as for
+    a real ``.tar.gz``.  Counting members is the only honest test.
+    """
+    try:
+        with tarfile.open(archive, "r:*") as tf:
+            return sum(1 for _ in tf)
+    except (tarfile.TarError, OSError, EOFError):
+        return 0
+
+
 def _extract_7z(archive: Path, dest: Path) -> list[str]:
     """Extract via the ``7z`` CLI to *dest*; return paths relative to *dest*."""
     cmd = ["7z", "x", f"-o{dest}", "-y", str(archive)]
     subprocess.run(cmd, capture_output=True, timeout=_EXTRACT_TIMEOUT, check=True)
     return [str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()]
+
+
+def _extraction_is_complete(dest: Path, archive: Path) -> bool:
+    """Return True only if *dest* holds a finished extraction of *archive*."""
+    marker = dest / _COMPLETION_MARKER
+    if not marker.is_file():
+        return False
+    try:
+        recorded = json.loads(marker.read_text())
+    except (OSError, json.JSONDecodeError):
+        return False
+    return bool(recorded.get("archive") == str(archive))
+
+
+def _mark_extraction_complete(dest: Path, archive: Path, file_count: int) -> None:
+    """Record that *archive* was fully extracted into *dest*."""
+    try:
+        (dest / _COMPLETION_MARKER).write_text(
+            json.dumps(
+                {
+                    "archive": str(archive),
+                    "file_count": file_count,
+                    "completed_utc": datetime.now(timezone.utc).isoformat(),
+                },
+                indent=2,
+            )
+        )
+    except OSError as exc:
+        logger.warning("Could not write extraction marker in %s: %s", dest, exc)
+
+
+def _extracted_files(dest: Path) -> list[str]:
+    """List extracted files, excluding mulder's own completion marker."""
+    return [
+        str(f.relative_to(dest))
+        for f in dest.rglob("*")
+        if f.is_file() and f.name != _COMPLETION_MARKER
+    ]
 
 
 def _archive_slot(archive: Path) -> str:
@@ -567,9 +645,10 @@ def extract_archive(
     else:
         dest = extract_root / _archive_slot(archive)
 
-    # Idempotent: if already extracted, return the existing files
-    if dest.exists() and any(dest.iterdir()):
-        existing_files = [str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()]
+    # Idempotent, but only for an extraction that actually finished.  A
+    # non-empty directory may be the debris of a run that died partway.
+    if _extraction_is_complete(dest, archive):
+        existing_files = _extracted_files(dest)
         result: dict[str, object] = {
             "tool_call_id": tc_id,
             "status": "already_extracted",
@@ -605,12 +684,16 @@ def extract_archive(
     try:
         if ext == ".zip":
             files = _extract_zip(archive, dest)
-        elif (
-            ext in (".tar", ".tgz")
-            or name_lower.endswith((".tar.gz", ".tar.bz2"))
-            or (ext in (".gz", ".bz2") and ".tar" not in name_lower)
-        ):
+        elif ext in (".tar", ".tgz") or name_lower.endswith((".tar.gz", ".tar.bz2")):
             files = _extract_tar(archive, dest)
+        elif ext in (".gz", ".bz2"):
+            # A bare .gz/.bz2 is usually one compressed file (evidence.dd.gz),
+            # but it may also be a tar that was not named .tar.gz.  Ask the
+            # archive which it is instead of guessing from the name.
+            if _tar_member_count(archive):
+                files = _extract_tar(archive, dest)
+            else:
+                files = _extract_single_stream(archive, dest)
         elif ext in (".7z", ".rar") or ".7z." in name_lower:
             if not shutil.which("7z"):
                 return error_response(
@@ -665,6 +748,10 @@ def extract_archive(
     for mi in manifest:
         t = str(mi["artifact_type"])
         type_counts[t] = type_counts.get(t, 0) + 1
+
+    # Written last: the marker is mulder's own bookkeeping, so it must not be
+    # on disk while the classifier is walking the tree for evidence.
+    _mark_extraction_complete(dest, archive, len(files))
 
     result = {
         "tool_call_id": tc_id,

@@ -373,6 +373,12 @@ mulder investigate /evidence my-case \
   --model ollama/llama3.1:70b
 ```
 
+For a model that supports tools but not extended thinking, add `--no-thinking`.
+This disables thinking for every phase and utility query and overrides `--effort`.
+Without the flag, the SDK's default thinking behavior and existing effort settings
+are preserved. The model/provider must support disabling thinking; this option
+does not establish that a model can complete an investigation reliably.
+
 ### Custom LiteLLM Configuration
 
 For advanced model routing, load balancing, or custom deployments, pass a LiteLLM configuration file:
@@ -459,6 +465,7 @@ Runs a full multi-phase forensic investigation.
 | `--analyst-model` | `claude-opus-4-6` | Model for analyst agents |
 | `--config` | None | YAML config file for models and settings |
 | `--effort` | `max` | Effort level (`max`, `xhigh`, `high`) |
+| `--no-thinking` | off | Disable extended thinking for all queries; overrides `--effort` |
 | `--workers` | `3` | Max concurrent extraction sessions |
 | `--db-dir` | `~/.mulder/cases` | Case database directory |
 | `--cwd` | `~/.mulder/workspace` | Working directory for agent sessions. Also settable via `MULDER_CWD`; the container sets it to `/mulder-investigation`. Created on first use, along with a default `.mcp.json` |

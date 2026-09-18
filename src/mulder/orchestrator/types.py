@@ -155,7 +155,7 @@ def extract_json_plan(messages: list[str]) -> dict[str, Any] | None:
 
     Searches messages in reverse order for a valid JSON object
     containing the expected keys (at minimum "tasks"). Handles both
-    code-fenced and inline JSON. Plans with empty tasks are invalid.
+    code-fenced and inline JSON. Tasks must be a non-empty list of objects.
 
     Args:
         messages: List of text messages from an agent session.
@@ -167,7 +167,11 @@ def extract_json_plan(messages: list[str]) -> dict[str, Any] | None:
         result = _try_extract_json(msg, _PLAN_REQUIRED_KEYS)
         if result is not None:
             tasks = result.get("tasks")
-            if isinstance(tasks, list) and len(tasks) > 0:
+            if (
+                isinstance(tasks, list)
+                and len(tasks) > 0
+                and all(isinstance(task, dict) for task in tasks)
+            ):
                 return result
     return None
 

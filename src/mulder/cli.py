@@ -260,6 +260,11 @@ def report(case_id: str, db_dir: str) -> None:
     help="Effort level.",
 )
 @click.option(
+    "--no-thinking",
+    is_flag=True,
+    help="Disable extended thinking for all queries; overrides --effort.",
+)
+@click.option(
     "--db-dir",
     default=DEFAULT_DB_DIR,
     envvar=DB_DIR_ENV_VAR,
@@ -303,6 +308,7 @@ def investigate(
     cwd: str,
     workers: int,
     proxy_config: str | None,
+    no_thinking: bool,
     show_cli_stderr: bool,
 ) -> None:
     """Run a full multi-pass forensic investigation.
@@ -377,7 +383,10 @@ def investigate(
     click.echo(f"  Planner:  {model_config.planner}", err=True)
     click.echo(f"  Executor: {model_config.executor}", err=True)
     click.echo(f"  Analyst:  {model_config.analyst}", err=True)
-    click.echo(f"Effort: {effort}, Workers: {workers}", err=True)
+    if no_thinking:
+        click.echo(f"Thinking: disabled (effort ignored), Workers: {workers}", err=True)
+    else:
+        click.echo(f"Effort: {effort}, Workers: {workers}", err=True)
     click.echo(f"Logging to {log_file}", err=True)
 
     orchestrator = Orchestrator(
@@ -391,6 +400,7 @@ def investigate(
         proxy_config=proxy_config,
         case_id=case_id,
         db_dir=log_dir,
+        no_thinking=no_thinking,
         show_cli_stderr=show_cli_stderr,
     )
 

@@ -51,9 +51,8 @@ def is_proxy_model(model_id: str) -> bool:
 def _build_proxy_config(models: list[str], port: int) -> dict[str, Any]:
     """Build a LiteLLM proxy configuration for the given models.
 
-    Creates a minimal config that maps each litellm model ID to itself,
-    enabling the proxy to route requests based on the model name in the
-    incoming Anthropic API payload.
+    Preserves each public model name while routing Ollama models through
+    the native chat API so streamed tool calls retain their structure.
 
     Args:
         models: Unique litellm model IDs to serve.
@@ -68,7 +67,11 @@ def _build_proxy_config(models: list[str], port: int) -> dict[str, Any]:
             {
                 "model_name": model_id,
                 "litellm_params": {
-                    "model": model_id,
+                    "model": (
+                        "ollama_chat/" + model_id.removeprefix("ollama/")
+                        if model_id.startswith("ollama/")
+                        else model_id
+                    ),
                     "max_tokens": 8192,
                 },
             }

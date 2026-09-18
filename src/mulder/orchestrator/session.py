@@ -157,6 +157,7 @@ class SessionExecutor:
         env: dict[str, str],
         effort: EffortLevel,
         using_proxy: bool = False,
+        no_thinking: bool = False,
         show_cli_stderr: bool = False,
     ) -> None:
         """Initialize the session executor.
@@ -169,6 +170,7 @@ class SessionExecutor:
             effort: Effort level for agent sessions (max, xhigh, high, low).
             using_proxy: Whether a LiteLLM proxy is active (disables
                 per-message token tracking to avoid double counting).
+            no_thinking: Disable extended thinking for phase and utility queries.
             show_cli_stderr: Stream agent CLI diagnostics to the dashboard and log.
         """
         self._dashboard = dashboard
@@ -177,6 +179,7 @@ class SessionExecutor:
         self._env = env
         self._effort = effort
         self._using_proxy = using_proxy
+        self._no_thinking = no_thinking
         self._show_cli_stderr = show_cli_stderr
 
     def _stderr_callback(self, label: str) -> Callable[[str], None]:
@@ -234,7 +237,8 @@ class SessionExecutor:
             disallowed_tools=disallowed_tools,
             permission_mode="bypassPermissions",
             cwd=self._cwd,
-            effort=self._effort,
+            effort=None if self._no_thinking else self._effort,
+            thinking={"type": "disabled"} if self._no_thinking else None,
             env=self._env,
             stderr=self._stderr_callback(log_prefix or task_system or model),
             max_buffer_size=_MAX_BUFFER_SIZE_BYTES,
@@ -420,7 +424,10 @@ class SessionExecutor:
                         try:
                             parsed = json.loads(stripped)
                             if "tasks" in parsed:
-                                task_names = [t.get("tool", "?") for t in parsed["tasks"][:5]]
+                                task_names = [
+                                    t.get("tool", "?") if isinstance(t, dict) else "?"
+                                    for t in parsed["tasks"][:5]
+                                ]
                                 summary = ", ".join(task_names)
                                 extra = (
                                     f" +{len(parsed['tasks']) - 5} more"
@@ -619,7 +626,8 @@ class SessionExecutor:
             allowed_tools=allowed_tools,
             permission_mode="bypassPermissions",
             cwd=self._cwd,
-            effort="low",
+            effort=None if self._no_thinking else "low",
+            thinking={"type": "disabled"} if self._no_thinking else None,
             env=self._env,
             stderr=self._stderr_callback(f"utility: {label}"),
         )

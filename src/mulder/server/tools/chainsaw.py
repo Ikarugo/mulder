@@ -231,13 +231,22 @@ def _run_chainsaw_search(
 
 
 def _run_chainsaw_srum(
-    binary: str, srum_path: Path, output_dir: Path, timeout: int = _CHAINSAW_TIMEOUT
+    binary: str,
+    srum_path: Path,
+    software_hive_path: Path,
+    output_dir: Path,
+    timeout: int = _CHAINSAW_TIMEOUT,
 ) -> tuple[Path, subprocess.CompletedProcess[str]]:
     """Execute Chainsaw SRUM parsing mode.
+
+    ``analyse srum`` takes neither ``--json`` (it always writes JSON to
+    ``--output``) nor a bare database path: it requires the SOFTWARE hive to
+    resolve the SRUM extension GUIDs into table names.
 
     Args:
         binary: Resolved Chainsaw executable.
         srum_path: Path to the SRUDB.dat file.
+        software_hive_path: Path to the SOFTWARE registry hive.
         output_dir: Output directory for results.
         timeout: Subprocess timeout in seconds.
 
@@ -255,7 +264,8 @@ def _run_chainsaw_srum(
         "analyse",
         "srum",
         str(srum_path),
-        "--json",
+        "--software",
+        str(software_hive_path),
         "--output",
         str(output_file),
     ]
@@ -523,6 +533,7 @@ def run_chainsaw(
     evidence_path: str,
     mode: Literal["hunt", "search", "srum", "timeline"] = "hunt",
     sigma_rules_path: str = "",
+    software_hive_path: str = "",
     mapping_path: str = "",
     search_term: str | None = None,
     time_range_start: str | None = None,
@@ -545,6 +556,9 @@ def run_chainsaw(
             "timeline" dumps all events chronologically.
         sigma_rules_path: Path to the Sigma rules directory. Empty
             resolves to the rules installed by 'mulder setup'.
+        software_hive_path: Path to the SOFTWARE registry hive. Required
+            when mode="srum"; Chainsaw needs it to resolve the SRUM
+            extension GUIDs into table names.
         mapping_path: Path to the Chainsaw mapping file that tells it how
             to read third-party Sigma rules. Chainsaw requires this
             whenever Sigma rules are supplied. Empty resolves to the
@@ -563,6 +577,7 @@ def run_chainsaw(
         "evidence_path": evidence_path,
         "mode": mode,
         "sigma_rules_path": sigma_rules_path,
+        "software_hive_path": software_hive_path,
         "mapping_path": mapping_path,
         "search_term": search_term,
         "time_range_start": time_range_start,
@@ -621,6 +636,25 @@ def run_chainsaw(
             error_type="invalid_argument",
         )
 
+    if mode == "srum":
+        if not software_hive_path:
+            return error_response(
+                tc_id,
+                "run_chainsaw",
+                params,
+                "software_hive_path is required when mode='srum': Chainsaw "
+                "needs the SOFTWARE hive to resolve the SRUM extension GUIDs",
+                error_type="invalid_argument",
+            )
+        if not Path(software_hive_path).exists():
+            return error_response(
+                tc_id,
+                "run_chainsaw",
+                params,
+                f"SOFTWARE hive not found: {software_hive_path}",
+                error_type="file_not_found",
+            )
+
     rules = Path(sigma_rules_path) if sigma_rules_path else _default_sigma_rules()
 
     mapping = Path(mapping_path) if mapping_path else _default_chainsaw_mapping()
@@ -670,7 +704,11 @@ def run_chainsaw(
                 source_name = "chainsaw.search"
             elif mode == "srum":
                 results_path, proc = _run_chainsaw_srum(
-                    binary, Path(evidence_path), output_dir, timeout=timeout
+                    binary,
+                    Path(evidence_path),
+                    Path(software_hive_path),
+                    output_dir,
+                    timeout=timeout,
                 )
                 result = _parse_chainsaw_srum_results(results_path)
                 source_name = "chainsaw.srum"

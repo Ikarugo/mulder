@@ -47,6 +47,11 @@ class TestIsProxyModel:
 class TestBuildProxyConfig:
     """Tests for proxy config generation."""
 
+    def test_ollama_uses_native_chat_tools_and_preserves_alias(self) -> None:
+        entry = _build_proxy_config(["ollama/qwen3:latest"], 4000)["model_list"][0]
+        assert entry["model_name"] == "ollama/qwen3:latest"
+        assert entry["litellm_params"]["model"] == "ollama_chat/qwen3:latest"
+
     def test_single_model(self) -> None:
         config = _build_proxy_config(["bedrock/meta.llama3-1-70b"], 4000)
         assert "model_list" in config
