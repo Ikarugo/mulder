@@ -610,6 +610,7 @@ class Orchestrator:
             follow_up_count = 0
             follow_up_context: str = ""
             follow_up_history: list[dict[str, Any]] = []
+            executor_idle = False
 
             while True:
                 try:
@@ -631,6 +632,26 @@ class Orchestrator:
                     exec_results = await self._roles.run_executor(
                         phase, plan, log_prefix, task_system=task_sys
                     )
+
+                    if exec_results.tool_calls == 0:
+                        # Nothing was executed, so there is nothing for the
+                        # analyst to interpret; running it anyway makes it do
+                        # the extraction itself with whatever tools it has.
+                        # Fail this attempt and let the retry loop re-plan.
+                        combined_result.turns_used += plan.turns_used + exec_results.turns_used
+                        pfx = f"[{log_prefix}] " if log_prefix else ""
+                        self.dashboard.log_gate_fail(
+                            f"{pfx}Executor made no tool calls; skipping analyst "
+                            f"(attempt {attempt + 1}/{1 + phase.max_retries})"
+                        )
+                        logger.warning(
+                            "Phase '%s' executor made no tool calls (attempt %d/%d)",
+                            phase.name,
+                            attempt + 1,
+                            1 + phase.max_retries,
+                        )
+                        executor_idle = True
+                        break
 
                     # Step 2.5: Wait for all background batches to finish
                     await self._roles.ensure_batches_complete(exec_results, log_prefix)
@@ -670,6 +691,9 @@ class Orchestrator:
                     continue
 
                 break
+
+            if executor_idle:
+                continue
 
             combined_result.follow_ups_used = follow_up_count
 

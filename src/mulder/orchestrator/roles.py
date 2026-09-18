@@ -296,6 +296,7 @@ class RoleRunner:
             ),
             messages=result.messages,
             batch_ids=result.batch_ids,
+            tool_calls=len(result.tool_names),
         )
 
     async def run_analyst(

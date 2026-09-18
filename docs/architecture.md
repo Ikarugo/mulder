@@ -166,7 +166,7 @@ The Alternative Narrative phase (Phase 4) combines counter-analysis with audit r
 Each phase is defined by a `PhaseConfig` dataclass specifying:
 
 - **Pipeline mode**: Either `split` (planner/executor/analyst) or `single` (one agent session)
-- **Dynamic tool allowlists**: Built at import time from `@tool_access` declarations on each tool (see [Tool Access Control](#tool-access-control) below). Executors see only plan-relevant tools rather than the full 140+ surface.
+- **Dynamic tool allowlists**: Built at import time from `@tool_access` declarations on each tool (see [Tool Access Control](#tool-access-control) below). Every tool outside a role's allowlist is passed to the CLI as `disallowed_tools`, so executors see only plan-relevant tools rather than the full 140+ surface.
 - **Model assignment**: Each role resolves its model via `ModelConfig.resolve(phase, role)` with support for per-phase overrides via config file
 - **Turn limit**: Maximum tool-use round trips per role session
 - **Follow-up limit**: Maximum planner/executor cycles the analyst can request before being capped
@@ -238,6 +238,18 @@ def run_volatility(...):
 ```
 
 The `Role` flag enum covers every pipeline slot: `CATALOG`, `EXTRACT_PLANNER`, `EXTRACT_EXECUTOR`, `EXTRACT_ANALYST`, `CROSS_PLANNER`, etc. Convenience unions (`PLANNERS`, `EXECUTORS`, `ANALYSTS`, `ALL_ROLES`) simplify common patterns.
+
+### Enforcement
+
+The Agent SDK's `allowed_tools` option only auto-approves permissions; with `permission_mode="bypassPermissions"` it restricts nothing, and `disallowed_tools` is the only option that removes a tool from the model's context. `SessionExecutor` therefore passes every registered mulder tool that is *not* on the role's allowlist as `disallowed_tools` (`off_role_tools` in `session.py`). An analyst never sees `run_mmls`; an executor sees the plan's tools plus its control tools (`open_case`, `start_extraction_batch`, `wait_all`, ...). Enforcement happens in the Claude Code CLI, not in the MCP server: `mulder serve` runs any tool a connected client calls.
+
+Three more checks keep the tool surface deterministic:
+
+- Sessions run with `ENABLE_TOOL_SEARCH=false`, so the CLI never defers MCP tools behind its `ToolSearch` tool. The model sees the whole allowlist upfront.
+- The CLI's `init` message reports each MCP server's status and the loaded tool names. If the mulder server is not `connected`, or an allowed tool is missing, the session is aborted before the model answers and respawned (three attempts, logged as "Session started without its tools"). Without this the CLI runs the turn with built-in tools only.
+- The workspace `.mcp.json` is passed to the CLI explicitly with `--strict-mcp-config`, so sessions do not depend on Claude Code's project MCP approval state and never load user-level MCP servers.
+
+An executor that finishes without a single tool call fails its attempt: the analyst is skipped and the phase's `max_retries` loop re-plans, instead of the analyst doing the extraction itself.
 
 ### The `@audited_tool` Decorator
 

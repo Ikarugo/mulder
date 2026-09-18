@@ -12,12 +12,14 @@ import logging
 import os
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 from claude_agent_sdk import ClaudeAgentOptions, query
 from claude_agent_sdk.types import (
     AssistantMessage,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolUseBlock,
 )
@@ -27,8 +29,70 @@ from mulder.orchestrator.display import InvestigationDashboard
 from mulder.orchestrator.errors import AuthenticationError, ModelNotAvailableError
 from mulder.orchestrator.models import ModelConfig
 from mulder.orchestrator.types import EffortLevel, PhaseResult, extract_json_from_text
+from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
 
 logger = logging.getLogger(__name__)
+
+_MCP_SERVER_NAME: str = "mulder"
+_MCP_TOOL_PREFIX: str = f"mcp__{_MCP_SERVER_NAME}__"
+
+#: Sessions that start without their MCP tools are aborted at the CLI's
+#: ``init`` message and respawned this many times in total.
+_MCP_CONNECT_ATTEMPTS: int = 3
+
+#: Claude Code's tool search (default ``auto``) defers MCP tools behind a
+#: ``ToolSearch`` tool once their schemas pass a context threshold, at which
+#: point the model no longer sees the role's tool list. Every mulder role is
+#: defined by exactly which tools the model sees, so deferral is off.
+_SESSION_ENV: dict[str, str] = {"ENABLE_TOOL_SEARCH": "false"}
+
+
+def off_role_tools(allowed_tools: list[str]) -> list[str]:
+    """Return every registered mulder MCP tool that is not in *allowed_tools*.
+
+    ``ClaudeAgentOptions.allowed_tools`` only auto-approves permissions, and
+    ``bypassPermissions`` already approves everything, so on its own the
+    role allowlist restricts nothing. ``disallowed_tools`` is the option that
+    removes tools from the model's context, so the complement of the
+    allowlist is what makes the allowlist real.
+
+    Args:
+        allowed_tools: Fully qualified tool names the session may use.
+
+    Returns:
+        Sorted MCP tool names the session must not see.
+    """
+    allowed = frozenset(allowed_tools)
+    return [t for t in get_tools_for_role(ALL_ROLES) if t not in allowed]
+
+
+def _missing_mcp_tools(init: SystemMessage, expected: set[str]) -> str:
+    """Explain why the CLI's ``init`` message lacks the session's MCP tools.
+
+    Args:
+        init: The ``system``/``init`` message emitted before the first turn.
+        expected: Fully qualified mulder tool names the session relies on.
+
+    Returns:
+        Empty string when the server is connected and every expected tool
+        is present, otherwise a one-line reason for the dashboard and log.
+    """
+    servers = init.data.get("mcp_servers") or []
+    status = next(
+        (
+            s.get("status")
+            for s in servers
+            if isinstance(s, dict) and s.get("name") == _MCP_SERVER_NAME
+        ),
+        None,
+    )
+    if status != "connected":
+        return f"MCP server '{_MCP_SERVER_NAME}' status={status or 'not configured'}"
+    missing = sorted(expected - set(init.data.get("tools") or []))
+    if missing:
+        return f"{len(missing)} allowed tool(s) absent from session (e.g. {missing[0]})"
+    return ""
+
 
 _AUTH_PATTERNS: tuple[str, ...] = (
     "not logged in",
@@ -219,6 +283,38 @@ class SessionExecutor:
 
         return log_stderr
 
+    def _shared_options(
+        self, allowed_tools: list[str], disallowed_tools: list[str]
+    ) -> dict[str, Any]:
+        """Options every session gets: tool enforcement, env, MCP config.
+
+        The workspace ``.mcp.json`` is handed to the CLI explicitly (with
+        ``strict_mcp_config``) so the session does not depend on project
+        MCP approval state or pick up unrelated user-level servers.
+
+        Args:
+            allowed_tools: Role allowlist for this session.
+            disallowed_tools: Phase blocklist; the off-role complement of
+                *allowed_tools* is appended so the model never sees it.
+
+        Returns:
+            Keyword arguments for ``ClaudeAgentOptions``.
+        """
+        mcp_config = Path(self._cwd) / ".mcp.json"
+        return {
+            "allowed_tools": allowed_tools,
+            "disallowed_tools": list(
+                dict.fromkeys([*disallowed_tools, *off_role_tools(allowed_tools)])
+            ),
+            "permission_mode": "bypassPermissions",
+            "cwd": self._cwd,
+            # Title opt-out is a default the caller may override; tool-search
+            # off is enforced so the role allowlists reach the model upfront.
+            "env": {**_NO_SESSION_TITLE, **self._env, **_SESSION_ENV},
+            "mcp_servers": str(mcp_config) if mcp_config.is_file() else {},
+            "strict_mcp_config": mcp_config.is_file(),
+        }
+
     async def execute(
         self,
         system_prompt: str,
@@ -255,16 +351,13 @@ class SessionExecutor:
             system_prompt=system_prompt,
             model=model,
             max_turns=max_turns,
-            allowed_tools=allowed_tools,
-            disallowed_tools=disallowed_tools,
-            permission_mode="bypassPermissions",
-            cwd=self._cwd,
             effort=None if self._no_thinking else self._effort,
             thinking={"type": "disabled"} if self._no_thinking else None,
-            env={**_NO_SESSION_TITLE, **self._env},
             stderr=self._stderr_callback(log_prefix or task_system or model),
             max_buffer_size=_MAX_BUFFER_SIZE_BYTES,
+            **self._shared_options(allowed_tools, disallowed_tools),
         )
+        expected_mcp_tools = {t for t in allowed_tools if t.startswith(_MCP_TOOL_PREFIX)}
 
         messages: list[str] = []
         collected_tool_names: list[str] = []
@@ -285,73 +378,103 @@ class SessionExecutor:
         got_result = False
         hit_context_limit = False
 
-        try:
-            async for message in query(prompt=prompt, options=options):
-                if isinstance(message, AssistantMessage):
-                    delta_in, delta_out, delta_tools, ctx_hit = self._process_assistant_message(
-                        message,
-                        log_prefix,
-                        seen_message_ids,
-                        messages,
-                        tool_names_out=collected_tool_names,
-                        task_system=task_system,
-                    )
-                    phase_in_tokens += delta_in
-                    phase_out_tokens += delta_out
-                    tool_count += delta_tools
-                    if ctx_hit:
-                        hit_context_limit = True
+        for connect_attempt in range(1, _MCP_CONNECT_ATTEMPTS + 1):
+            mcp_problem = ""
+            try:
+                stream = query(prompt=prompt, options=options)
+                async for message in stream:
+                    if isinstance(message, SystemMessage) and message.subtype == "init":
+                        # The CLI runs the first turn even when the MCP server
+                        # failed to connect, so the model would answer with
+                        # built-in tools only. Kill the session before that.
+                        if expected_mcp_tools:
+                            mcp_problem = _missing_mcp_tools(message, expected_mcp_tools)
+                        if mcp_problem:
+                            await stream.aclose()
+                            break
 
-                elif isinstance(message, ResultMessage):
-                    (
-                        turns_used,
-                        session_id,
-                        got_result,
-                        phase_in_tokens,
-                        phase_out_tokens,
-                    ) = self._process_result_message(
-                        message,
-                        model,
-                        tool_count,
-                        turns_used,
-                        phase_in_tokens,
-                        phase_out_tokens,
-                    )
+                    elif isinstance(message, AssistantMessage):
+                        delta_in, delta_out, delta_tools, ctx_hit = (
+                            self._process_assistant_message(
+                                message,
+                                log_prefix,
+                                seen_message_ids,
+                                messages,
+                                tool_names_out=collected_tool_names,
+                                task_system=task_system,
+                            )
+                        )
+                        phase_in_tokens += delta_in
+                        phase_out_tokens += delta_out
+                        tool_count += delta_tools
+                        if ctx_hit:
+                            hit_context_limit = True
 
-                self._extract_batch_ids_from_message(message, collected_batch_ids)
-        except KeyboardInterrupt:
-            raise
-        except SystemExit:
-            raise
-        except (AuthenticationError, ModelNotAvailableError):
-            raise
-        except Exception as exc:
-            exc_msg = str(exc)
-            exc_lower = exc_msg.lower()
+                    elif isinstance(message, ResultMessage):
+                        (
+                            turns_used,
+                            session_id,
+                            got_result,
+                            phase_in_tokens,
+                            phase_out_tokens,
+                        ) = self._process_result_message(
+                            message,
+                            model,
+                            tool_count,
+                            turns_used,
+                            phase_in_tokens,
+                            phase_out_tokens,
+                        )
 
-            category, _ = _classify_fatal_error(exc_msg)
-            if category == "auth":
-                raise AuthenticationError(
-                    message=exc_msg,
-                    suggestion=_auth_suggestion(),
-                ) from exc
-            if category == "model":
-                alt = _extract_alternative_model(exc_msg)
-                raise ModelNotAvailableError(
-                    message=exc_msg,
-                    model=model,
-                    alternative=alt,
-                ) from exc
+                    self._extract_batch_ids_from_message(message, collected_batch_ids)
+            except KeyboardInterrupt:
+                raise
+            except SystemExit:
+                raise
+            except (AuthenticationError, ModelNotAvailableError):
+                raise
+            except Exception as exc:
+                exc_msg = str(exc)
+                exc_lower = exc_msg.lower()
 
-            if "maximum" in exc_lower or "prompt is too long" in exc_lower:
-                self._dashboard.log_info(f"Context exhausted: {exc_msg}")
-                logger.warning("Context exhausted: %s", exc_msg)
-                hit_context_limit = True
-            elif "error result: success" in exc_lower:
-                self._dashboard.log_info("Query completed (SDK reported success as error)")
-            else:
-                self._dashboard.log_gate_fail(f"Query error: {exc_msg}")
-                logger.error("Query error: %s", exc_msg)
+                category, _ = _classify_fatal_error(exc_msg)
+                if category == "auth":
+                    raise AuthenticationError(
+                        message=exc_msg,
+                        suggestion=_auth_suggestion(),
+                    ) from exc
+                if category == "model":
+                    alt = _extract_alternative_model(exc_msg)
+                    raise ModelNotAvailableError(
+                        message=exc_msg,
+                        model=model,
+                        alternative=alt,
+                    ) from exc
+
+                if "maximum" in exc_lower or "prompt is too long" in exc_lower:
+                    self._dashboard.log_info(f"Context exhausted: {exc_msg}")
+                    logger.warning("Context exhausted: %s", exc_msg)
+                    hit_context_limit = True
+                elif "error result: success" in exc_lower:
+                    self._dashboard.log_info("Query completed (SDK reported success as error)")
+                else:
+                    self._dashboard.log_gate_fail(f"Query error: {exc_msg}")
+                    logger.error("Query error: %s", exc_msg)
+
+            if not mcp_problem:
+                break
+            pfx = f"[{log_prefix}] " if log_prefix else ""
+            self._dashboard.log_gate_fail(
+                f"{pfx}Session started without its tools: {mcp_problem} "
+                f"(attempt {connect_attempt}/{_MCP_CONNECT_ATTEMPTS})"
+            )
+            logger.error(
+                "Session started without its tools (model=%s, attempt %d/%d): %s",
+                model,
+                connect_attempt,
+                _MCP_CONNECT_ATTEMPTS,
+                mcp_problem,
+            )
 
         if not got_result and (phase_in_tokens or phase_out_tokens):
             logger.warning(
@@ -644,13 +767,10 @@ class SessionExecutor:
         options = ClaudeAgentOptions(
             model=utility_model,
             max_turns=max_turns,
-            allowed_tools=allowed_tools,
-            permission_mode="bypassPermissions",
-            cwd=self._cwd,
             effort=None if self._no_thinking else "low",
             thinking={"type": "disabled"} if self._no_thinking else None,
-            env={**_NO_SESSION_TITLE, **self._env},
             stderr=self._stderr_callback(f"utility: {label}"),
+            **self._shared_options(allowed_tools, []),
         )
 
         collected_text: list[str] = []
