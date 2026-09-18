@@ -19,6 +19,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from mulder.server.app import get_ctx, mcp
+from mulder.server.jobs import validate_tool_args
 from mulder.server.tool_access import Role, tool_access
 
 if TYPE_CHECKING:
@@ -91,10 +92,16 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 
     tasks_to_submit: list[dict[str, Any]] = []
     skipped: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
 
     for task in tasks:
         tool_name = task["tool"]
         args = task.get("args", {})
+        problem = validate_tool_args(_tool_dispatch_sync[tool_name], args)
+        if problem is not None:
+            logger.warning("Rejecting %s in batch: %s", tool_name, problem)
+            rejected.append({"tool": tool_name, "args": args, "error": problem})
+            continue
         force = args.get("force", False)
         if not force:
             evidence_path = (
@@ -130,11 +137,22 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
                 tool_call_id=tc_id,
                 tool_name="start_extraction_batch",
                 params={"tasks": [t["tool"] for t in tasks]},
-                output_hash=hash_output({"status": "all_skipped"}),
+                output_hash=hash_output({"status": "all_skipped", "rejected": rejected}),
                 duration_ms=elapsed,
             )
         except RuntimeError:
             logger.warning("Audit skipped: no active case context for start_extraction_batch")
+        if rejected:
+            return {
+                "tool_call_id": tc_id,
+                "status": "error",
+                "error_message": (
+                    f"{len(rejected)} task(s) rejected for invalid arguments; nothing submitted. "
+                    "Fix the arguments listed in tasks_rejected and resubmit."
+                ),
+                "tasks_rejected": rejected,
+                "tasks_skipped": skipped,
+            }
         return {
             "tool_call_id": tc_id,
             "status": "all_skipped",
@@ -174,6 +192,13 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     }
     if skipped:
         result["tasks_skipped"] = skipped
+    if rejected:
+        result["tasks_rejected"] = rejected
+        result["hint"] = (
+            f"{len(rejected)} task(s) were NOT submitted because their arguments do not "
+            "match the tool signature (see tasks_rejected). Resubmit those with the "
+            "accepted parameter names. " + result["hint"]
+        )
     return result
 
 

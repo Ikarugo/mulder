@@ -5,7 +5,7 @@ from __future__ import annotations
 import time
 from unittest.mock import patch
 
-from mulder.server.jobs import JobStore, _extract_error_detail
+from mulder.server.jobs import JobStore, _extract_error_detail, validate_tool_args
 
 
 def _noop_dispatch(**kwargs: object) -> dict[str, str]:
@@ -327,3 +327,112 @@ class TestRunJobException:
         assert status is not None
         assert status["failed"] == 1
         store.shutdown(wait=True)
+
+
+def _typed_tool(
+    target_path: str, rules: str | None = None, *, ruleset: str = "builtin"
+) -> dict[str, str]:
+    return {"status": "ok", "target_path": target_path}
+
+
+class TestValidateToolArgs:
+    def test_valid_args_pass(self) -> None:
+        assert validate_tool_args(_typed_tool, {"target_path": "/x"}) is None
+        assert validate_tool_args(_typed_tool, {"target_path": "/x", "ruleset": "custom"}) is None
+
+    def test_unknown_param_names_accepted(self) -> None:
+        msg = validate_tool_args(_typed_tool, {"image_path": "/x", "target_path": "/x"})
+        assert msg == "unexpected parameter(s) 'image_path'; accepted: target_path, rules, ruleset"
+
+    def test_missing_required_reported(self) -> None:
+        msg = validate_tool_args(_typed_tool, {"rules": "r"})
+        assert (
+            msg
+            == "missing required parameter(s) 'target_path'; accepted: target_path, rules, ruleset"
+        )
+
+    def test_var_keyword_accepts_anything(self) -> None:
+        assert validate_tool_args(_noop_dispatch, {"anything": 1}) is None
+
+
+class TestBatchRejectsBadArgs:
+    """start_extraction_batch drops tasks with bad args and still runs the rest."""
+
+    @patch("mulder.server.app.wait_for_resources", return_value=None)
+    def test_rest_of_batch_still_runs(self, _mock_wait: object) -> None:
+        from mulder.server import app
+        from mulder.server.tools import jobs as job_tools
+
+        start_extraction_batch = app._tool_dispatch_sync[job_tools.start_extraction_batch.__name__]
+
+        dispatch = {"typed_tool": _typed_tool}
+        store = JobStore(max_workers=2, tool_dispatch=dispatch)
+        with (
+            patch("mulder.server.app._tool_dispatch_sync", dispatch),
+            patch("mulder.server.app.get_job_store", return_value=store),
+            patch("mulder.server.tools.jobs.tool_already_indexed", return_value=None),
+        ):
+            result = start_extraction_batch(
+                [
+                    {"tool": "typed_tool", "args": {"image_path": "/bad"}},
+                    {"tool": "typed_tool", "args": {"target_path": "/good"}},
+                ]
+            )
+        assert result["status"] == "submitted"
+        assert [t["tool"] for t in result["tasks_submitted"]] == ["typed_tool"]
+        assert result["tasks_rejected"][0]["args"] == {"image_path": "/bad"}
+        assert "accepted: target_path" in result["tasks_rejected"][0]["error"]
+        assert "tasks_rejected" in result["hint"]
+        assert store.wait_for_batch(result["batch_id"], timeout=5.0)
+        status = store.get_batch_status(result["batch_id"])
+        assert status is not None and status["completed"] == 1 and status["failed"] == 0
+        store.shutdown(wait=True)
+
+    def test_all_rejected_is_error(self) -> None:
+        from mulder.server import app
+        from mulder.server.tools import jobs as job_tools
+
+        start_extraction_batch = app._tool_dispatch_sync[job_tools.start_extraction_batch.__name__]
+
+        dispatch = {"typed_tool": _typed_tool}
+        store = JobStore(max_workers=1, tool_dispatch=dispatch)
+        with (
+            patch("mulder.server.app._tool_dispatch_sync", dispatch),
+            patch("mulder.server.app.get_job_store", return_value=store),
+        ):
+            result = start_extraction_batch([{"tool": "typed_tool", "args": {}}])
+        assert result["status"] == "error"
+        assert (
+            "missing required parameter(s) 'target_path'" in result["tasks_rejected"][0]["error"]
+        )
+        assert store.batch_ids() == []
+        store.shutdown()
+
+
+class TestRunParallelRejectsBadArgs:
+    def test_bad_task_errors_without_calling_tool(self) -> None:
+        import anyio
+
+        from mulder.server import app
+
+        calls: list[dict[str, object]] = []
+
+        async def typed_tool(target_path: str) -> dict[str, str]:
+            calls.append({"target_path": target_path})
+            return {"status": "ok"}
+
+        with (
+            patch.dict(app._tool_dispatch, {"typed_tool": typed_tool}),
+            patch("mulder.server.app.has_ctx", return_value=False),
+        ):
+            result = anyio.run(
+                app.run_parallel,
+                [
+                    {"tool": "typed_tool", "args": {"image_path": "/bad"}},
+                    {"tool": "typed_tool", "args": {"target_path": "/good"}},
+                ],
+            )
+        results = [r["result"] for r in result["parallel_results"]]
+        assert "unexpected parameter(s) 'image_path'" in results[0]["error"]
+        assert results[1]["status"] == "ok"
+        assert calls == [{"target_path": "/good"}]
