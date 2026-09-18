@@ -196,6 +196,28 @@ def _is_bare_markup_token(text: str) -> bool:
     return bool(token) and token[0] in "<[" and not any(c.isspace() for c in token)
 
 
+def _trim_edge_markup_lines(text: str) -> str:
+    """Strip leaked markup tokens from the first and last lines of a block.
+
+    The leak usually rides along with prose rather than arriving as its own
+    block, e.g. ``"Now let me search the timeline.\n<｜DSML｜function_calls"``.
+    Leading and trailing lines that individually satisfy
+    :func:`_is_bare_markup_token` are removed; interior lines are untouched.
+
+    Args:
+        text: Raw text block content.
+
+    Returns:
+        The block with edge markup lines removed (may be empty).
+    """
+    lines = text.splitlines()
+    while lines and _is_bare_markup_token(lines[0]):
+        lines.pop(0)
+    while lines and _is_bare_markup_token(lines[-1]):
+        lines.pop()
+    return "\n".join(lines)
+
+
 _TASK_PANEL_SKIP: frozenset[str] = frozenset(
     {
         "search",
@@ -542,30 +564,32 @@ class SessionExecutor:
 
         for block in message.content:
             if isinstance(block, TextBlock):
-                if _is_bare_markup_token(block.text):
-                    logger.debug("Dropping leaked markup text block: %r", block.text)
-                    continue
-                messages.append(block.text)
+                text = _trim_edge_markup_lines(block.text)
+                if text != block.text:
+                    logger.debug("Trimmed leaked markup from text block: %r", block.text)
+                    if not text.strip():
+                        continue
+                messages.append(text)
 
-                category, _ = _classify_fatal_error(block.text)
+                category, _ = _classify_fatal_error(text)
                 if category == "auth":
                     raise AuthenticationError(
-                        message=block.text,
+                        message=text,
                         suggestion=_auth_suggestion(),
                     )
                 if category == "model":
-                    alt = _extract_alternative_model(block.text)
+                    alt = _extract_alternative_model(text)
                     raise ModelNotAvailableError(
-                        message=block.text,
+                        message=text,
                         model="",
                         alternative=alt,
                     )
 
-                if "prompt is too long" in block.text.lower():
+                if "prompt is too long" in text.lower():
                     hit_context = True
                     self._dashboard.log_info(f"{pfx}Context exhausted (detected in response)")
                 else:
-                    display_text = block.text.replace("<thinking>", "").replace("</thinking>", "")
+                    display_text = text.replace("<thinking>", "").replace("</thinking>", "")
                     stripped = display_text.strip()
                     if stripped.startswith("{") and stripped.endswith("}") and len(stripped) > 100:
                         try:

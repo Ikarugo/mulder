@@ -10,14 +10,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import AsyncMock, patch
+from typing import cast
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from claude_agent_sdk.types import AssistantMessage, TextBlock
 
 from mulder.orchestrator.roles import _REPAIR_MAX_CHARS
 from mulder.orchestrator.runner import Orchestrator
-from mulder.orchestrator.session import _is_bare_markup_token
+from mulder.orchestrator.session import _is_bare_markup_token, _trim_edge_markup_lines
 from mulder.orchestrator.types import (
     PhaseResult,
     extract_catalog_result,
@@ -116,6 +117,42 @@ def test_prose_and_json_never_dropped(text: str) -> None:
     assert not _is_bare_markup_token(text)
 
 
+PROSE = (
+    "Now let me get the raw output of the timeline to better understand the sequence of events."
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        (PROSE + "\n" + DEEPSEEK_LEAK, PROSE),
+        (DEEPSEEK_LEAK + "\n" + PROSE, PROSE),
+        ("<|python_tag|>\n" + PROSE + "\n<|eom_id|>", PROSE),
+        (DEEPSEEK_LEAK, ""),
+        (DEEPSEEK_LEAK + "\n" + DEEPSEEK_LEAK, ""),
+        ("First.\n<tag>\nSecond.", "First.\n<tag>\nSecond."),
+        ("Ranges:\n<10 events per host", "Ranges:\n<10 events per host"),
+        (PROSE, PROSE),
+        ("", ""),
+        (DEEPSEEK_LEAK + "\n" + PLAN, PLAN),
+    ],
+    ids=[
+        "trailing_marker",
+        "leading_marker",
+        "both_edges",
+        "marker_only",
+        "markers_only",
+        "interior_tag_kept",
+        "last_line_prose_with_lt_kept",
+        "prose_untouched",
+        "empty",
+        "marker_then_json",
+    ],
+)
+def test_trim_edge_markup_lines(text: str, expected: str) -> None:
+    assert _trim_edge_markup_lines(text) == expected
+
+
 def _make_orchestrator(tmp_path: Path) -> Orchestrator:
     with patch("mulder.orchestrator.runner.InvestigationDashboard"):
         return Orchestrator(evidence_path="/evidence", case_id="case", db_dir=str(tmp_path))
@@ -134,6 +171,29 @@ def test_session_drops_bare_marker_but_keeps_prose_and_plan(tmp_path: Path) -> N
     )
     orch._session._process_assistant_message(message, "", set(), messages)
     assert messages == ["Now I'll examine the sources.", PLAN]
+
+
+def test_session_trims_marker_from_prose_edges_and_still_parses_json(tmp_path: Path) -> None:
+    """The log case: marker is the last line of a prose block, not its own block."""
+    orch = _make_orchestrator(tmp_path)
+    messages: list[str] = []
+    big_plan = json.dumps(
+        {"tasks": [{"tool": "search", "args": {"query": "x" * 100}, "purpose": "p"}]}
+    )
+    message = AssistantMessage(
+        content=[
+            TextBlock(text=PROSE + "\n" + DEEPSEEK_LEAK),
+            TextBlock(text=DEEPSEEK_LEAK + "\nNext step."),
+            TextBlock(text=DEEPSEEK_LEAK),
+            TextBlock(text=DEEPSEEK_LEAK + "\n" + big_plan),
+        ],
+        model="test-model",
+    )
+    orch._session._process_assistant_message(message, "", set(), messages)
+    assert messages == [PROSE, "Next step.", big_plan]
+    dashboard = cast(MagicMock, orch._session._dashboard)
+    assert [c.args[0] for c in dashboard.log.call_args_list] == [PROSE, "Next step."]
+    dashboard.log_tool.assert_called_once_with("Plan: 1 tasks (search)")
 
 
 @pytest.mark.asyncio
