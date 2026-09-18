@@ -112,6 +112,26 @@ def _extract_alternative_model(text: str) -> str:
     return match.group(1) if match else ""
 
 
+def _is_bare_markup_token(text: str) -> bool:
+    """Return True when a text block is only a leaked special token.
+
+    Non-Anthropic models behind the LiteLLM proxy can leak their native
+    tool-call markup as a stray text block next to the real ToolUseBlock,
+    e.g. ``<｜DSML｜function_calls``, ``<|python_tag|>``, ``<tool_call>``,
+    ``[TOOL_CALLS]``. Conservative on purpose: one whitespace-free token
+    opening with ``<`` or ``[``. Prose contains spaces and JSON opens with
+    ``{``, so neither can ever match.
+
+    Args:
+        text: Raw text block content.
+
+    Returns:
+        True if the block should be dropped from the message log.
+    """
+    token = text.strip()
+    return bool(token) and token[0] in "<[" and not any(c.isspace() for c in token)
+
+
 _TASK_PANEL_SKIP: frozenset[str] = frozenset(
     {
         "search",
@@ -394,6 +414,9 @@ class SessionExecutor:
 
         for block in message.content:
             if isinstance(block, TextBlock):
+                if _is_bare_markup_token(block.text):
+                    logger.debug("Dropping leaked markup text block: %r", block.text)
+                    continue
                 messages.append(block.text)
 
                 category, _ = _classify_fatal_error(block.text)
