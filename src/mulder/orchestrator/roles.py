@@ -32,6 +32,23 @@ logger = logging.getLogger(__name__)
 
 _BATCH_ID_RE: re.Pattern[str] = re.compile(r"\bbg_[a-f0-9]{8}\b")
 
+_PLANNER_TURN_BUDGET: str = (
+    "\n\nTURN BUDGET: This session allows {max_turns} turns. Every tool call "
+    "uses one turn and your final JSON plan needs one, so make at most "
+    "{max_calls} tool calls. Stop reading as soon as you can write the plan; "
+    "a plan built from what you have already read is better than no plan."
+)
+
+_PLANNER_OUT_OF_TURNS: str = (
+    "OUT OF TURNS: Your previous planning session reached its turn limit "
+    "before emitting the plan. Tools are disabled now; do NOT call any "
+    "(ignore the instruction to call open_case). Using the case context "
+    "above and your notes below, respond with ONLY the JSON plan.\n\n"
+    "YOUR NOTES FROM THE PREVIOUS SESSION:\n"
+)
+
+_MAX_PLANNER_NOTES_CHARS: int = 20_000
+
 _EXECUTOR_CONTROL_TOOLS: frozenset[str] = frozenset(
     {
         "mcp__mulder__open_case",
@@ -153,6 +170,11 @@ class RoleRunner:
         if follow_up_context:
             prompt += f"\n\nFOLLOW-UP REQUEST:\n{follow_up_context}"
 
+        prompt += _PLANNER_TURN_BUDGET.format(
+            max_turns=phase.planner_max_turns,
+            max_calls=max(phase.planner_max_turns - 1, 1),
+        )
+
         result = await self._session.execute(
             system_prompt=phase.planner_system_prompt,
             prompt=prompt,
@@ -164,6 +186,10 @@ class RoleRunner:
         )
 
         plan_json = extract_json_plan(result.messages)
+        if plan_json is None and result.context_exhausted:
+            plan_json = await self._request_plan_from_notes(
+                phase, prompt, model, result, log_prefix
+            )
         if plan_json is None:
             plan_json = await self._repair_json(result.messages, phase.name)
         if plan_json is None:
@@ -471,6 +497,49 @@ class RoleRunner:
             result.context_exhausted = continuation.context_exhausted
             result.batch_ids.update(continuation.batch_ids)
         return additional_turns
+
+    async def _request_plan_from_notes(
+        self,
+        phase: PhaseConfig,
+        prompt: str,
+        model: str,
+        result: PhaseResult,
+        log_prefix: str = "",
+    ) -> dict[str, Any] | None:
+        """Ask a planner that ran out of turns to emit its plan from its notes.
+
+        A planner that spends every turn on read tools never reaches the
+        final JSON message, and JSON repair cannot fix output that does
+        not exist. This runs one tool-less, single-turn session with the
+        original case prompt plus the planner's own text messages so far.
+        The follow-up's messages and turns are merged into *result*.
+
+        Args:
+            phase: Phase configuration with planner fields.
+            prompt: The user prompt the planner session was given.
+            model: Model identifier.
+            result: Planner session result (mutated).
+            log_prefix: Prefix for dashboard log lines.
+
+        Returns:
+            Parsed JSON plan dict, or None if no plan was produced.
+        """
+        self._dashboard.log_info("Planner hit its turn limit; requesting plan from its notes")
+        logger.info("[%s] Planner exhausted turns without a plan; requesting plan", phase.name)
+        notes = "\n".join(result.messages)[-_MAX_PLANNER_NOTES_CHARS:]
+        follow_up = await self._session.execute(
+            system_prompt=phase.planner_system_prompt,
+            prompt=f"{prompt}\n\n{_PLANNER_OUT_OF_TURNS}{notes}",
+            model=model,
+            allowed_tools=[],
+            disallowed_tools=[*phase.disallowed_tools, *phase.planner_allowed_tools],
+            max_turns=1,
+            log_prefix=log_prefix,
+        )
+        result.messages.extend(follow_up.messages)
+        result.tool_names.extend(follow_up.tool_names)
+        result.turns_used += follow_up.turns_used
+        return extract_json_plan(follow_up.messages)
 
     async def _repair_json(
         self,
