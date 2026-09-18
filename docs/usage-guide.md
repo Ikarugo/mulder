@@ -216,7 +216,7 @@ To expose mulder's tools to Claude Desktop or any other MCP client, add:
 The pre-built container image includes all forensic tools, dependencies, and the Mulder server:
 
 ```bash
-docker pull ghcr.io/calebevans/mulder:1.5.0
+docker pull ghcr.io/calebevans/mulder:1.5.1
 ```
 
 ## Running a Container
@@ -248,6 +248,11 @@ If `--privileged` is too permissive for your environment, use the narrower capab
 
 The container runs as a non-root `mulder` user. An entrypoint script handles credential copying and permission setup automatically.
 
+When entering an existing container, use `docker exec -it -u mulder <container> bash`.
+`docker exec` bypasses the entrypoint's user switch; investigations run as root are
+rejected by the agent CLI. Add `--show-cli-stderr` to `mulder investigate` to see
+the underlying diagnostic if a subprocess exits with a generic error.
+
 ### Using an Anthropic API Key
 
 The simplest configuration passes your API key as an environment variable:
@@ -257,7 +262,7 @@ docker run -it --privileged \
   -v /path/to/evidence:/evidence:ro \
   -v ~/mulder-cases:/home/mulder/.mulder/cases \
   -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-  ghcr.io/calebevans/mulder:1.5.0
+  ghcr.io/calebevans/mulder:1.5.1
 ```
 
 ### Using Google Cloud Vertex AI
@@ -273,7 +278,7 @@ docker run -it --privileged \
   -e ANTHROPIC_VERTEX_PROJECT_ID=your-gcp-project-id \
   -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud-creds.json \
   -v ~/.config/gcloud/application_default_credentials.json:/tmp/gcloud-creds.json:ro \
-  ghcr.io/calebevans/mulder:1.5.0
+  ghcr.io/calebevans/mulder:1.5.1
 ```
 
 Model IDs are passed through to the SDK exactly as specified, with no automatic translation or mapping. When using Vertex, you must provide the full Vertex model ID including the `@version` suffix (e.g. `--model claude-opus-4-6@20250514`). If you omit `--model`, the built-in defaults (`claude-opus-4-6` for planner/analyst, `claude-haiku-4-5` for executor) are used.
@@ -299,7 +304,7 @@ docker run -it --privileged \
   -e AWS_REGION=us-east-1 \
   -e AWS_ACCESS_KEY_ID=$AWS_ACCESS_KEY_ID \
   -e AWS_SECRET_ACCESS_KEY=$AWS_SECRET_ACCESS_KEY \
-  ghcr.io/calebevans/mulder:1.5.0
+  ghcr.io/calebevans/mulder:1.5.1
 ```
 
 Model IDs are passed through to the SDK exactly as specified, with no automatic translation or mapping. When using Bedrock, you must provide the full Bedrock model ID with the `us.anthropic.` prefix (e.g. `--model us.anthropic.claude-opus-4-6`). If you omit `--model`, the built-in defaults (`claude-opus-4-6` for planner/analyst, `claude-haiku-4-5` for executor) are used.
@@ -370,8 +375,15 @@ To use a locally hosted model via Ollama, ensure the Ollama server is accessible
 
 ```bash
 mulder investigate /evidence my-case \
-  --model ollama/llama3.1:70b
+  --model ollama/llama3.1:70b --no-thinking
 ```
+
+Auto-generated proxy configurations preserve the public `ollama/<model>` name
+and route it internally through LiteLLM's `ollama_chat/<model>` provider. This
+uses Ollama's native chat API so streamed tool calls retain their structure.
+Custom proxy YAML is used as supplied; configure its `litellm_params.model` with
+`ollama_chat/` too. Set `api_base` there if Ollama is at a different address, such
+as `http://host.docker.internal:11434` for a host server accessed from Docker Desktop.
 
 For a model that supports tools but not extended thinking, add `--no-thinking`.
 This disables thinking for every phase and utility query and overrides `--effort`.
@@ -612,4 +624,6 @@ docker run -it --privileged \
   mulder:dev
 ```
 
-A `Makefile` is included for convenience. Run `make help` to see available targets.
+A `Makefile` is included for convenience. Run `make all` for pre-commit checks
+and tests, `make dist-check` to build and validate Python packages, or
+`make container-build` to build the image.

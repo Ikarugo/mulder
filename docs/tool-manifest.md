@@ -15,7 +15,7 @@ Scan an evidence directory and create a new case for investigation.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | evidence_path | str | yes | Directory or file containing forensic evidence |
-| case_id | str \| None | no | Unique case identifier; auto-derived from directory name if omitted |
+| case_id | str \| None | no | Unique case identifier (one path segment, no separators or control characters); auto-derived from directory name if omitted |
 | replace | bool | no | Delete and recreate an existing case (default False) |
 
 **Returns:** `case_id`, `evidence_path`, `evidence_tree`, `type_summary`, `total_items`
@@ -28,7 +28,7 @@ Switch the active case to an already-existing case.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
-| case_id | str | yes | Case identifier to load |
+| case_id | str | yes | Case identifier to load (one path segment, no separators or control characters) |
 
 **Returns:** `case_id`, `source_count`
 
@@ -51,9 +51,14 @@ Extract a compressed evidence archive to make its contents accessible.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | archive_path | str | yes | Path to the compressed archive |
-| extract_to | str \| None | no | Optional destination directory |
+| extract_to | str \| None | no | Destination under `<db-dir>/extracted`; defaults to a per-archive directory there |
 
 **Returns:** `extracted_to`, `total_files_extracted`, `type_summary`, `total_evidence_items`
+
+Plain `.gz` and `.bz2` evidence files are decompressed as single files; compressed
+tar archives are unpacked. Only completed extractions are reused. A failed or
+partial extraction returns an error and is retried on the next call. Reused
+extractions return `status="already_extracted"`, `extracted_to`, and `files[]`.
 
 **Roles:** `CATALOG` `EXTRACT_EXECUTOR`
 
@@ -404,13 +409,20 @@ Analyze Windows artifacts using Chainsaw with Sigma rules.
 |-----------|------|----------|-------------|
 | evidence_path | str | yes | Path to EVTX directory or SRUM database |
 | mode | Literal['hunt', 'search', 'srum', 'timeline'] | no | Analysis mode (default "hunt") |
-| sigma_rules_path | str | no | Path to Sigma rules directory |
+| sigma_rules_path | str | no | Path to Sigma rules directory; empty uses the rules installed by `mulder setup` |
+| software_hive_path | str | no | SOFTWARE registry hive path; required when mode="srum" |
+| mapping_path | str | no | Chainsaw Sigma mapping file for hunt mode; empty uses the mapping installed by `mulder setup` |
 | search_term | str \| None | no | Required when mode="search" |
 | time_range_start | str \| None | no | ISO 8601 start time filter |
 | time_range_end | str \| None | no | ISO 8601 end time filter |
 | force | bool | no | Re-run extraction even if sources already exist |
 
 **Returns:** `total_findings`, `severity_counts{}`, `mitre_techniques[]`, `detections[]`
+
+Hunt mode requires a mapping file. SRUM mode requires both the SRUM database and
+its SOFTWARE hive. Nonzero Chainsaw exits return errors, not clean scan results.
+Detection records are indexed for `search()` and `get_raw_output()` even when
+the tool response contains only a bounded preview.
 
 **Roles:** `EXTRACT_EXECUTOR`
 
@@ -541,6 +553,9 @@ Apply Sigma detection rules to Linux logs using Zircolite.
 
 **Returns:** `total_detections`, `level_counts{}`, `mitre_coverage{}`, `timeline[]`
 
+Matched detection records, including rule names and matched fields, are indexed
+in `zircolite.detections`; the response preview may be shorter than the index.
+
 **Roles:** `EXTRACT_EXECUTOR`
 
 ---
@@ -633,6 +648,10 @@ Extract files from TCP streams in a PCAP using tcpxtract.
 ---
 
 ## 6. Extraction: Mobile
+
+MVT indexes the collected module output, including detection records. ALEAPP and
+iLEAPP index parsed artifact rows, including timestamps and field values. Use
+`search()` or `get_raw_output()` for records beyond the bounded response previews.
 
 ### run_mvt_android
 
@@ -757,6 +776,10 @@ Triage a binary using rabin2 for forensic analysis.
 
 **Returns:** `file_info{}`, `timestamps{}`, `packing_indicators[]`, `suspicious_imports{}`, `triage_verdict{}`
 
+Failed or incomplete rabin2 analysis cannot produce a `benign_indicators` verdict;
+without other suspicious indicators, the verdict is `inconclusive`. Derived
+triage findings are indexed alongside the raw analysis for subsequent searches.
+
 **Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
 
 ### run_capa
@@ -771,6 +794,10 @@ Identify capabilities in a binary using Mandiant CAPA.
 | rules_path | str \| None | no | Custom rules directory |
 
 **Returns:** `capabilities[]`, `mitre_summary{}`, `total_rules_matched`
+
+Each capability's `attack[]` entries use `technique_id` for the full ATT&CK ID
+(including a subtechnique suffix such as `T1059.006`) and `subtechnique` for its
+name. The previous always-null `subtechnique_id` field has been removed.
 
 **Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
 
@@ -810,7 +837,7 @@ Analyze a binary executable using radare2 for malware triage.
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | target_path | str | yes | Path to the binary |
-| commands | str | no | Semicolon-separated r2 commands (default "iI;iS;iz;afl") |
+| commands | str | no | Semicolon-separated r2 commands (default "iI;iS;iz;afl"); run under radare2's sandbox, blocking shell execution, writes, and opening other files |
 
 **Returns:** `source_name` (radare2.analysis), `windows_indexed`
 
@@ -847,7 +874,11 @@ Analyze a PDF file for malicious indicators.
 | extract_urls | bool | no | Extract URLs (default True) |
 | extract_embedded | bool | no | List embedded files (default True) |
 
-**Returns:** `indicators[]`, `risk_assessment{}`, `javascript[]`
+**Returns:** `indicators[]`, `risk_assessment{}`, `javascript[]`, `urls[]`, `embedded_files[]`
+
+URL entries include `url`, `source`, and `object_id`. Embedded-file entries include
+`filename`, `object_id`, and `suspicious`; the option lists file metadata rather
+than writing embedded payloads to disk. Both are indexed in `pdf.analysis`.
 
 **Roles:** `EXTRACT_EXECUTOR`
 
@@ -862,9 +893,13 @@ Parse Outlook PST/OST files for forensic email analysis.
 | extract_attachments | bool | no | Extract file attachments (default True) |
 | date_range_start | str \| None | no | Start date filter (YYYY-MM-DD) |
 | date_range_end | str \| None | no | End date filter (YYYY-MM-DD) |
-| search_term | str \| None | no | Keyword filter across all fields |
+| search_term | str \| None | no | Keyword filter across subject, sender, To/Cc recipients, body, and attachment filenames |
 
 **Returns:** `total_emails`, `total_attachments`, `folder_structure{}`, `emails[]`, `suspicious_findings[]`
+
+RFC 2047 encoded headers are decoded, quoted recipient names are preserved,
+HTML-only messages get a searchable text body, and named inline MIME parts count
+as attachments.
 
 **Roles:** `EXTRACT_EXECUTOR`
 

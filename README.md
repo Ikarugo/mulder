@@ -33,7 +33,7 @@ Each investigation runs through five phases with quality gates between them. Pha
 4. **Alternative Narrative** - challenge the primary narrative with counter-evidence, test alternative hypotheses, audit for tool and evidence coverage gaps
 5. **Report** - write the investigation narrative, generate Markdown/HTML reports, export IOCs and ATT&CK Navigator layers
 
-Each gate validates structural criteria (minimum sources indexed, findings submitted, MITRE mappings present, audit tools invoked). Failed gates trigger retries with escalating turn budgets and gap-specific remediation instructions. See [Architecture](https://github.com/calebevans/mulder/blob/main/docs/architecture.md) for the full pipeline design.
+Each gate validates structural criteria (minimum sources indexed, findings submitted, MITRE mappings present, audit tools invoked). Failed gates trigger bounded phase retries; single-agent phases increase the cost budget and include gap-specific remediation instructions. See [Architecture](https://github.com/calebevans/mulder/blob/main/docs/architecture.md) for the full pipeline design.
 
 ## Key Design Decisions
 
@@ -65,7 +65,7 @@ On first run mulder creates a working directory at `~/.mulder/workspace` (overri
 ### Run with Docker (everything preinstalled)
 
 ```bash
-docker pull ghcr.io/calebevans/mulder:1.5.0
+docker pull ghcr.io/calebevans/mulder:1.5.1
 ```
 
 ```bash
@@ -75,7 +75,7 @@ docker run -it --privileged \
   -v /path/to/evidence:/evidence:ro \
   -v ~/mulder-cases:/home/mulder/.mulder/cases \
   -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-  ghcr.io/calebevans/mulder:1.5.0
+  ghcr.io/calebevans/mulder:1.5.1
 ```
 
 ```bash
@@ -156,6 +156,7 @@ Each investigation produces:
 | [Tool Manifest](https://github.com/calebevans/mulder/blob/main/docs/tool-manifest.md) | API reference for all MCP tools |
 | [Adding Tools](https://github.com/calebevans/mulder/blob/main/docs/adding-tools.md) | Contributor guide for adding new forensic tools |
 | [Glossary](https://github.com/calebevans/mulder/blob/main/docs/glossary.md) | Terminology and definitions |
+| [v1.5.1 Release Notes](https://github.com/calebevans/mulder/blob/main/docs/releases/v1.5.1.md) | Fixes, new investigation options, and upgrade notes |
 
 ## License
 

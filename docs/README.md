@@ -7,3 +7,4 @@
 | [Tool Manifest](tool-manifest.md) | API reference for all MCP tools with parameters, types, and role access |
 | [Usage Guide](usage-guide.md) | Try-it-out instructions: pulling the image, configuring providers, running investigations |
 | [Glossary](glossary.md) | Project terminology, forensic artifact definitions, and architecture concepts |
+| [v1.5.1 Release Notes](releases/v1.5.1.md) | Fixes, new investigation options, and upgrade notes |
