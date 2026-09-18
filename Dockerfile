@@ -1,6 +1,12 @@
 # syntax=docker/dockerfile:1
 
 # libewf: build from source (GIFT PPA lacks arm64 packages)
+# Build against FUSE 2 (libfuse-dev), not libfuse3-dev: this libewf release's
+# configure prefers fuse3 and then defines only HAVE_LIBFUSE3, but ewfmount.c
+# compiles its mount code under HAVE_LIBFUSE, so a fuse3 build yields an
+# ewfmount that prints "No sub system to mount EWF format." The runtime image
+# already carries libfuse2 (dislocker, afflib-tools, libvshadow-utils) and
+# fuse3 provides the fusermount symlink libfuse2 execs.
 FROM ubuntu:22.04 AS libewf-builder
 
 ENV DEBIAN_FRONTEND=noninteractive
@@ -13,7 +19,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         zlib1g-dev \
         libbz2-dev \
         libssl-dev \
-        libfuse3-dev \
+        libfuse-dev \
     && rm -rf /var/lib/apt/lists/*
 
 RUN curl -fsSL https://github.com/libyal/libewf/releases/download/20240506/libewf-experimental-20240506.tar.gz \
@@ -353,6 +359,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libssl3 \
         libre2-9 \
         fuse3 \
+        libfuse2 \
         libffi8 \
         libsqlite3-0 \
         regripper \
@@ -544,7 +551,7 @@ RUN chown -R mulder:mulder /mulder-investigation
 COPY scripts/entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x /usr/local/bin/entrypoint.sh
 
-# NOTE: disk image mount operations (mount, ewfmount, guestmount) require
+# NOTE: disk image mount operations (mount, ewfmount) require
 # --privileged or --cap-add SYS_ADMIN when running this container.
 # The container runs as non-root user 'mulder'; the entrypoint handles
 # credential setup and permission fixups before dropping to that user.
