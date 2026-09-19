@@ -158,6 +158,32 @@ Generate a filesystem MAC timeline from a disk image using TSK fls + mactime.
 
 **Roles:** `EXTRACT_EXECUTOR`
 
+### run_optical_listing
+
+List every file on an optical disc image (CD/DVD: UDF or ISO 9660), deleted ones included. Sleuth Kit cannot read optical filesystems (`run_fls`/`run_fsstat` exit with "High entropy", `run_mmls` finds no partition table), so those tools redirect here when the image carries a UDF/ISO 9660 signature. On write-once UDF media (Windows "Live File System" CD-R) every earlier burn session is walked, so files deleted or renamed later are listed as `* ... deleted` and remain extractable. Pure Python; reads E01 (via `xmount`) and raw images.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Path to the disc image (E01, dd, iso, bin) |
+| force | bool | no | Re-run even if `optical.listing` already exists |
+
+**Returns:** `source_name` (optical.listing), `windows_indexed`, `line_count`, `filesystem`, `volume_label`, `sessions`, `files_present`, `files_deleted`
+
+**Roles:** `EXTRACT_EXECUTOR`
+
+### extract_optical_file
+
+Extract one file from an optical disc image into the case's `extracted/` directory so `read_evidence_file`, `analyze_office_document`, `run_hashdeep` or `run_exiftool` can read it. Deleted files on write-once media are recoverable.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Path to the disc image |
+| file_path | str | yes | Path on the disc as shown by `run_optical_listing` (e.g. `/design/winter_storm.amr`) |
+
+**Returns:** `extracted_to`, `disc_path`, `size_bytes`, `sha256`, `deleted_on_disc`, `modified`, `created`
+
+**Roles:** `EXTRACT_EXECUTOR`
+
 ### run_bulk_extractor
 
 Carve IOCs (URLs, emails, domains, IPs) from a disk image using bulk_extractor.

@@ -542,6 +542,8 @@ If no `MULDER.md` is present, the investigation proceeds without additional cont
 
 The extraction planner adapts its tool selection based on what the evidence actually contains, not just its type. Standard toolsets (Volatility for memory, Sleuthkit for disk) always run, but the planner also looks for signals that indicate targeted analysis is warranted.
 
+**Optical media** (CD/DVD images, UDF or ISO 9660) are recognised at catalog time by their volume recognition sequence and listed with `run_optical_listing` rather than the Sleuth Kit tools, which cannot read optical filesystems. Deleted files from earlier burn sessions on write-once media are listed and can be pulled out with `extract_optical_file`.
+
 **Windows disk images** automatically trigger registry queries for system metadata (timezone, install date, shutdown time) and NTUSER.DAT parsing for user activity artifacts (TypedURLs, RecentDocs, UserAssist, MRU lists).
 
 **Execution artifacts** (ShimCache, Prefetch, Amcache, UserAssist) are inspected for communication and networking tools. When the planner detects IRC clients, email clients, chat applications, or remote access tools in execution history, it plans `index_app_files` tasks targeting their configuration and data directories. When packet capture tools like Wireshark appear, the planner adds `analyze_disk_pcaps` to discover saved captures on disk.

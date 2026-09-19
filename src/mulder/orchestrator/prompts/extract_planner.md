@@ -50,6 +50,17 @@ When the evidence includes a DISK IMAGE, always plan:
     syslog/auth/journal, run_chkrootkit
   macOS: run_plaso (unified log timeline), parse_plist
 
+When a disk image is OPTICAL MEDIA (a CD/DVD image: the catalog marks it
+"optical (udf)" or "optical (iso9660)", or the file is a burned CD-R/DVD),
+plan:
+- run_optical_listing INSTEAD of run_fls, run_mmls, run_mactime and the
+  Windows artifact parsers: Sleuth Kit cannot read UDF/ISO 9660 and fails
+  with "high entropy". The listing includes files deleted in earlier burn
+  sessions.
+- run_bulk_extractor and yara_scan_files still apply.
+- extract_optical_file for documents of interest (then
+  analyze_office_document / read_evidence_file / run_hashdeep).
+
 When the evidence includes NETWORK CAPTURES, always plan:
 - run_pcap_analysis (protocol analysis)
 - run_zeek_analysis (structured protocol logs)

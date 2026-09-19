@@ -9,8 +9,10 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Mapping
 from pathlib import Path
 
+from mulder.extractors.optical import probe_optical
 from mulder.patterns import fls_file_entries, parse_mmls_rows
 from mulder.server.app import get_ctx, mcp
 from mulder.server.extract_helpers import extract_and_index
@@ -446,6 +448,33 @@ def _tsk_extract_files(
     return extracted
 
 
+def _optical_redirect(
+    tc_id: str, tool_name: str, params: Mapping[str, object], image_path: str
+) -> dict[str, object] | None:
+    """An error response pointing at run_optical_listing when *image_path* is a disc.
+
+    Sleuth Kit has no UDF/ISO 9660 support: on a burned CD-R ``fls`` and
+    ``fsstat`` exit 1 with "Possible encryption detected (High entropy)" and
+    ``mmls`` finds no partition table, which sent every model in the NDLC
+    benchmark looking for the disc's files on other devices.
+    """
+    media = probe_optical(image_path)
+    if media is None:
+        return None
+    return error_response(
+        tc_id,
+        tool_name,
+        params,
+        f"optical media ({media.upper()}) - Sleuth Kit cannot read CD/DVD filesystems; "
+        "use run_optical_listing",
+        error_type="optical_media",
+        suggestion=(
+            f"Call run_optical_listing(image_path={image_path!r}) to list the disc "
+            "(deleted files included), then extract_optical_file for individual files."
+        ),
+    )
+
+
 def _classify_mmls_failure(returncode: int, stderr: str) -> tuple[str, str, str]:
     """Classify an mmls failure into an error type, message, and suggestion.
 
@@ -513,6 +542,9 @@ def run_mmls(image_path: str) -> dict[str, object]:
         return error_response(tc_id, "run_mmls", params, "mmls timed out", error_type="timeout")
 
     if proc.returncode != 0:
+        redirect = _optical_redirect(tc_id, "run_mmls", params, image_path)
+        if redirect is not None:
+            return redirect
         stderr_text = (proc.stderr or "").strip()
         error_type, error_msg, suggestion = _classify_mmls_failure(proc.returncode, stderr_text)
         logger.info("mmls failed on %s: %s", image_path, error_type)
@@ -619,6 +651,11 @@ def run_fls(
 
     stdout_text = proc.stdout.decode("utf-8", errors="replace")
     stderr_text = (proc.stderr or b"").decode("utf-8", errors="replace")
+
+    if proc.returncode != 0 or not stdout_text.strip():
+        redirect = _optical_redirect(tc_id, "run_fls", params, image_path)
+        if redirect is not None:
+            return redirect
 
     if proc.returncode != 0:
         stderr_hint = stderr_text[:_HINT_CHAR_LIMIT].strip()
@@ -743,6 +780,11 @@ def run_fsstat(image_path: str) -> dict[str, object]:
         proc = subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
     except subprocess.TimeoutExpired:
         return error_response(tc_id, "run_fsstat", params, "fsstat timed out")
+
+    if proc.returncode != 0:
+        redirect = _optical_redirect(tc_id, "run_fsstat", params, image_path)
+        if redirect is not None:
+            return redirect
 
     summary = extract_and_index(proc.stdout.strip(), "tsk.fsstat", image_path, "sleuthkit")
     elapsed = (time.monotonic() - t0) * 1000

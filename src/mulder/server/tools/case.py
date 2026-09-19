@@ -19,6 +19,8 @@ import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+from mulder.extractors.classifier import ClassifiedEvidence
+from mulder.extractors.optical import probe_optical
 from mulder.path_policy import PathPolicyError, resolve_allowed_path
 from mulder.server.app import (
     create_case,
@@ -182,6 +184,27 @@ def _hash_and_register_evidence(manifest: list[dict[str, object]]) -> list[str]:
     return failed_files
 
 
+def _manifest_entry(item: ClassifiedEvidence) -> dict[str, object]:
+    """One evidence manifest row; disk images are probed for an optical signature."""
+    entry: dict[str, object] = {
+        "path": str(item.path),
+        "artifact_type": item.artifact_type,
+    }
+    try:
+        if item.path.is_file():
+            size = item.path.stat().st_size
+            entry["size_bytes"] = size
+            entry["size_human"] = _human_size(size)
+    except OSError:
+        pass
+    if item.artifact_type == "disk_image":
+        media = probe_optical(str(item.path))
+        if media is not None:
+            entry["media"] = f"optical ({media})"
+            entry["note"] = "CD/DVD image: use run_optical_listing, not run_fls/run_mmls"
+    return entry
+
+
 def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str, object]:
     """Inner implementation of scan_evidence with full error propagation."""
     from mulder.extractors.classifier import ClassifierConfig, EvidenceClassifier
@@ -191,18 +214,7 @@ def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str
 
     manifest: list[dict[str, object]] = []
     for item in classified:
-        entry: dict[str, object] = {
-            "path": str(item.path),
-            "artifact_type": item.artifact_type,
-        }
-        try:
-            if item.path.is_file():
-                size = item.path.stat().st_size
-                entry["size_bytes"] = size
-                entry["size_human"] = _human_size(size)
-        except OSError:
-            pass
-        manifest.append(entry)
+        manifest.append(_manifest_entry(item))
 
     type_counts: dict[str, int] = {}
     for mi in manifest:
@@ -220,6 +232,8 @@ def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str
         name = Path(rel).name
         size_label = mi.get("size_human", "")
         atype = mi["artifact_type"]
+        if "media" in mi:
+            atype = f"{atype}, {mi['media']}"
         tree_lines.append(f"{indent}{name}  [{atype}] {size_label}")
 
     result = create_case(case_id, str(ev_path), replace=replace)
@@ -731,18 +745,7 @@ def extract_archive(
 
     manifest: list[dict[str, object]] = []
     for item in classified:
-        entry: dict[str, object] = {
-            "path": str(item.path),
-            "artifact_type": item.artifact_type,
-        }
-        try:
-            if item.path.is_file():
-                size = item.path.stat().st_size
-                entry["size_bytes"] = size
-                entry["size_human"] = _human_size(size)
-        except OSError:
-            pass
-        manifest.append(entry)
+        manifest.append(_manifest_entry(item))
 
     type_counts: dict[str, int] = {}
     for mi in manifest:

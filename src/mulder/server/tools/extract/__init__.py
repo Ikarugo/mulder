@@ -6,6 +6,7 @@ from mulder.server.tools.extract import (  # noqa: F401
     disk_pcap,
     evtx,
     misc,
+    optical,
     pcap,
     plaso,
     registry,
