@@ -206,6 +206,7 @@ class Orchestrator:
         self._proxy.start()
         self._using_proxy = True
         self._session._using_proxy = True
+        self._session._proxy_windows = self._proxy.model_windows()
         self.env.update(self._proxy.env_overrides)
         logger.info(
             "Proxy active; routing %d model(s) through localhost:%d",
@@ -528,6 +529,7 @@ class Orchestrator:
                 accumulated_turns += continuation.turns_used
                 phase_result.messages.extend(continuation.messages)
                 phase_result.tool_names.extend(continuation.tool_names)
+                phase_result.context_exhausted = continuation.context_exhausted
                 phase_result.turns_used = accumulated_turns
 
             gate = await self._validate_phase(phase, phase_result)
