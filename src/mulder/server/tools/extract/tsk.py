@@ -31,6 +31,7 @@ __all__ = [
     "_cleanup_tsk_extract_dir",
     "_collect_fls_chunks",
     "_detect_partition_offset",
+    "_mmls_text",
     "_parse_all_partitions",
     "_parse_partition_offset",
     "_resolve_partition_offset",
@@ -284,26 +285,23 @@ def _discover_partitions(image_path: str) -> list[tuple[int, int, str]]:
         List of ``(start_sector, length, description)`` from
         ``_parse_all_partitions``, largest first.
     """
+    return _parse_all_partitions(_mmls_text(image_path))
+
+
+def _mmls_text(image_path: str) -> str:
+    """Raw mmls output for *image_path*: the indexed ``tsk.partitions`` source, else live mmls."""
     ctx = get_ctx()
-    sources = ctx.db.get_sources()
-    part_src = next((s for s in sources if s.source_name == "tsk.partitions"), None)
-
-    if part_src:
-        windows = ctx.db.get_windows_by_source("tsk.partitions")
-        mmls_text = "\n".join(w.raw_text for w in windows)
-        return _parse_all_partitions(mmls_text)
-
+    if any(s.source_name == "tsk.partitions" for s in ctx.db.get_sources()):
+        return "\n".join(w.raw_text for w in ctx.db.get_windows_by_source("tsk.partitions"))
     if not require_binary("mmls"):
-        return []
+        return ""
     try:
         proc = subprocess.run(
             ["mmls", image_path], capture_output=True, text=True, timeout=30, check=False
         )
-        if proc.returncode != 0:
-            return []
-        return _parse_all_partitions(proc.stdout)
     except (subprocess.TimeoutExpired, OSError):
-        return []
+        return ""
+    return proc.stdout if proc.returncode == 0 else ""
 
 
 def _index_secondary_partitions(

@@ -14,6 +14,7 @@ import subprocess
 import time
 from typing import NamedTuple
 
+from mulder.patterns import parse_mmls_rows
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
@@ -24,7 +25,7 @@ from mulder.server.helpers import (
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
-from mulder.server.tools.extract.tsk import _resolve_partition_offset
+from mulder.server.tools.extract.tsk import _mmls_text, _resolve_partition_offset
 
 __all__ = ["detect_masquerading"]
 
@@ -36,6 +37,7 @@ _DEFAULT_SAMPLE_BYTES = 8192
 _WALK_BUDGET_S = 300
 _HITS_IN_RESPONSE = 25
 _FLS_TIMEOUT = 300
+_NON_FS_ROWS = ("unallocated", "table", "gpt header")
 
 # (offset, magic, family).  First match wins, so longer/more specific
 # signatures go before short ones that share a prefix.
@@ -254,14 +256,19 @@ def detect_masquerading(
     audio/video, SQLite, text) against the extension.  An OOXML document
     inside a ``.zip`` is reported as the document type it really is.
 
-    Indexes as ``tsk.masquerade``, one line per mismatch with path,
-    extension, detected type, size, allocated/deleted status and
-    timestamps.  Searchable via ``search(query, source='tsk.masquerade')``.
+    Without ``partition_offset`` every partition mmls reports is walked;
+    ones fls cannot open are listed under ``partitions_skipped`` so a
+    partial scan is never mistaken for a clean image.
+
+    Indexes as ``tsk.masquerade``, one line per mismatch with partition
+    offset, path, extension, detected type, size, allocated/deleted
+    status and timestamps.  Searchable via
+    ``search(query, source='tsk.masquerade')``.
 
     Args:
         image_path: Path to the disk image (E01, dd, img).
-        partition_offset: Sector offset of the partition.  Auto-detected
-            (or reused from run_fls) if omitted.
+        partition_offset: Sector offset of a single partition to scan.
+            If omitted, all partitions are scanned.
         max_files: Stop sampling after this many files (default 5000).
         sample_bytes: Bytes read from the head of each file (default 8192).
         force: Re-run even if ``tsk.masquerade`` is already indexed.
@@ -295,74 +302,103 @@ def detect_masquerading(
                 tc_id, name, params, f"{binary} not found on PATH", error_type="binary_missing"
             )
 
-    offset = (
-        partition_offset if partition_offset is not None else _resolve_partition_offset(image_path)
-    )
-    try:
-        proc = subprocess.run(
-            _tsk_cmd("fls", image_path, offset, "-r", "-p", "-l"),
-            capture_output=True,
-            timeout=_FLS_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return error_response(tc_id, name, params, "fls timed out", error_type="timeout")
-    if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace")[:200].strip()
-        return error_response(
-            tc_id,
-            name,
-            params,
-            f"fls exited {proc.returncode} at partition_offset={offset}: {stderr}",
-            error_type="extraction_failed",
-            suggestion="Run run_mmls and pass the data partition start sector as the offset.",
-        )
-
-    entries = parse_fls_long(proc.stdout.decode("utf-8", errors="replace"))
-    # Only extensions we know a family for can ever produce a hit, so skip the rest.
-    candidates = [e for e in entries if _extension(e.path) in _EXT_FAMILIES]
+    if partition_offset is not None:
+        targets = [(partition_offset, "explicit")]
+    else:
+        targets = [
+            (start, desc)
+            for start, length, desc in parse_mmls_rows(_mmls_text(image_path))
+            if length > 0 and not any(w in desc for w in _NON_FS_ROWS)
+        ] or [(_resolve_partition_offset(image_path), "auto")]
 
     # ponytail: samples the first max_files in fls order within a wall-clock
     # budget; add user-directory prioritisation if system images need it.
     hits: list[dict[str, object]] = []
+    scanned: list[dict[str, object]] = []
+    skipped: list[dict[str, object]] = []
+    listed = 0
     sampled = 0
     truncated = False
-    for entry in candidates:
-        if sampled >= max_files or time.monotonic() - t0 > _WALK_BUDGET_S:
-            truncated = True
-            break
-        sampled += 1
-        ext = _extension(entry.path)
-        detected = identify_content(_read_head(image_path, offset, entry.inode, sample_bytes))
-        if is_mismatch(entry.path, detected):
-            hits.append(
-                {
-                    "path": entry.path,
-                    "extension": ext,
-                    "detected": detected,
-                    "size": entry.size,
-                    "deleted": entry.deleted,
-                    "inode": entry.inode,
-                    "mtime": entry.mtime,
-                    "atime": entry.atime,
-                    "ctime": entry.ctime,
-                    "crtime": entry.crtime,
-                }
+    for offset, desc in targets:
+        try:
+            proc = subprocess.run(
+                _tsk_cmd("fls", image_path, offset, "-r", "-p", "-l"),
+                capture_output=True,
+                timeout=_FLS_TIMEOUT,
+                check=False,
             )
+        except subprocess.TimeoutExpired:
+            skipped.append({"partition_offset": offset, "description": desc, "reason": "timeout"})
+            continue
+        if proc.returncode != 0:
+            stderr = proc.stderr.decode("utf-8", errors="replace")[:200].strip()
+            reason = f"fls exited {proc.returncode}: {stderr}"
+            skipped.append({"partition_offset": offset, "description": desc, "reason": reason})
+            continue
+
+        entries = parse_fls_long(proc.stdout.decode("utf-8", errors="replace"))
+        listed += len(entries)
+        part_hits = 0
+        # Only extensions we know a family for can ever produce a hit, so skip the rest.
+        for entry in (e for e in entries if _extension(e.path) in _EXT_FAMILIES):
+            if sampled >= max_files or time.monotonic() - t0 > _WALK_BUDGET_S:
+                truncated = True
+                break
+            sampled += 1
+            detected = identify_content(_read_head(image_path, offset, entry.inode, sample_bytes))
+            if is_mismatch(entry.path, detected):
+                part_hits += 1
+                hits.append(
+                    {
+                        "path": entry.path,
+                        "extension": _extension(entry.path),
+                        "detected": detected,
+                        "size": entry.size,
+                        "deleted": entry.deleted,
+                        "inode": entry.inode,
+                        "mtime": entry.mtime,
+                        "atime": entry.atime,
+                        "ctime": entry.ctime,
+                        "crtime": entry.crtime,
+                        "partition_offset": offset,
+                    }
+                )
+        scanned.append(
+            {
+                "partition_offset": offset,
+                "description": desc,
+                "files_listed": len(entries),
+                "mismatches": part_hits,
+            }
+        )
+
+    if not scanned:
+        return error_response(
+            tc_id,
+            name,
+            params,
+            "fls could not open any partition: "
+            + "; ".join(f"offset {s['partition_offset']} ({s['reason']})" for s in skipped),
+            error_type="extraction_failed",
+            suggestion="Run run_mmls and pass the data partition start sector as the offset.",
+        )
 
     lines = [
         f"{h['path']} | ext={h['extension']} | detected={h['detected']} | size={h['size']} | "
         f"{'deleted' if h['deleted'] else 'allocated'} | inode={h['inode']} | "
-        f"mtime={h['mtime']} | atime={h['atime']} | ctime={h['ctime']} | crtime={h['crtime']}"
+        f"mtime={h['mtime']} | atime={h['atime']} | ctime={h['ctime']} | crtime={h['crtime']} | "
+        f"offset={h['partition_offset']}"
         for h in hits
     ]
+    # Partition report goes before the hits so the 500-char preview never drops it.
     summary: dict[str, object] = {
         "mismatches": len(hits),
-        "hits": hits[:_HITS_IN_RESPONSE],
-        "files_listed": len(entries),
+        "partitions_scanned": scanned,
+        "partitions_skipped": skipped,
+        "files_listed": listed,
         "files_sampled": sampled,
         "truncated": truncated,
-        "partition_offset": offset,
+        "hits": hits[:_HITS_IN_RESPONSE],
     }
     summary.update(extract_and_index("\n".join(lines), _SOURCE, image_path, "sleuthkit"))
     elapsed = (time.monotonic() - t0) * 1000
