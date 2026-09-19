@@ -21,7 +21,7 @@ from mulder.audit import AuditLog
 from mulder.db import CaseDB
 from mulder.index.correlator import Correlator
 from mulder.server.jobs import JobStore, fill_case_id, validate_tool_args
-from mulder.server.tool_access import EXECUTORS, tool_access
+from mulder.server.tool_access import EXECUTORS, UNTHROTTLED, tool_access
 
 logger = logging.getLogger(__name__)
 
@@ -52,17 +52,24 @@ def _wrap_sync_tool(fn: Callable[_P, _R]) -> Callable[_P, Awaitable[_R]]:
     transport stays responsive to heartbeats and new requests while
     the tool waits for CPU/memory pressure to subside.  The actual
     tool execution then runs in a worker thread.
+
+    Tools in ``UNTHROTTLED`` (declared via ``@tool_access(...,
+    unthrottled=True)``) skip both the gate and the tool limiter: they
+    are cheap job-control/query calls that must not queue behind the
+    heavy work they report on, and ``wait``/``wait_all`` must not hold
+    a ``--workers`` slot for their whole poll loop.  They run on anyio's
+    default thread limiter instead.
     """
     tool_name = getattr(fn, "__name__", "unknown")
 
     @functools.wraps(fn)
     async def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> _R:
         """Async bridge that throttles then dispatches *fn* in a thread."""
+        call = functools.partial(fn, *args, **kwargs)
+        if tool_name in UNTHROTTLED:
+            return await anyio.to_thread.run_sync(call)
         await async_wait_for_resources(tool_name)
-        return await anyio.to_thread.run_sync(
-            functools.partial(fn, *args, **kwargs),
-            limiter=_get_tool_limiter(),
-        )
+        return await anyio.to_thread.run_sync(call, limiter=_get_tool_limiter())
 
     return wrapper
 

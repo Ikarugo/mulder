@@ -37,7 +37,7 @@ def _get_job_store() -> JobStore:
 
 
 @mcp.tool()
-@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR)
+@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR, unthrottled=True)
 def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     """Submit long-running extraction tools for background execution and return immediately.
 
@@ -206,7 +206,7 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 @mcp.tool()
-@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR)
+@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR, unthrottled=True)
 def check_extraction_status(batch_id: str) -> dict[str, Any]:
     """Poll the progress of a background extraction batch.
 
@@ -280,7 +280,7 @@ def check_extraction_status(batch_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR)
+@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR, unthrottled=True)
 def get_completed_results(
     batch_id: str,
     tool_names: list[str] | None = None,
@@ -380,7 +380,7 @@ def get_completed_results(
 
 
 @mcp.tool()
-@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR)
+@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR, unthrottled=True)
 def wait_all(
     batch_ids: list[str],
     poll_interval: int = 5,
@@ -492,7 +492,7 @@ def wait_all(
 
 
 @mcp.tool()
-@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR)
+@tool_access(Role.CATALOG | Role.EXTRACT_EXECUTOR, unthrottled=True)
 def wait(
     seconds: int = 300,
     batch_id: str | None = None,

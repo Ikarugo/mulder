@@ -530,7 +530,8 @@ def submit_narrative(narrative: str) -> dict[str, object]:
 
 @mcp.tool()
 @tool_access(
-    ANALYSTS | Role.CROSS_PLANNER | Role.NARRATIVE_PLANNER | Role.NARRATIVE_EXECUTOR | Role.REPORT
+    ANALYSTS | Role.CROSS_PLANNER | Role.NARRATIVE_PLANNER | Role.NARRATIVE_EXECUTOR | Role.REPORT,
+    unthrottled=True,
 )
 def get_findings(limit: int = 20, offset: int = 0) -> dict[str, object]:
     """Retrieve paginated findings submitted in this case.

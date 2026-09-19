@@ -267,7 +267,7 @@ def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str
 
 
 @mcp.tool()
-@tool_access(Role.CATALOG | Role.EXTRACT_PLANNER | Role.REPORT)
+@tool_access(Role.CATALOG | Role.EXTRACT_PLANNER | Role.REPORT, unthrottled=True)
 def list_cases() -> dict[str, object]:
     """List all cases in the database directory.
 
@@ -331,7 +331,7 @@ def list_cases() -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(ALL_ROLES)
+@tool_access(ALL_ROLES, unthrottled=True)
 def open_case(case_id: str) -> dict[str, object]:
     """Switch the active case to an already-existing case.
 
