@@ -43,6 +43,7 @@ _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
         "yara_scan_files",
         "run_plaso",
         "detect_steganography",
+        "run_optical_listing",
     ],
     "network_capture": [
         "run_pcap_analysis",
