@@ -80,6 +80,78 @@ def test_e01_is_xmounted_at_partition_offset_then_fuse_mounted(tmp_path: Path) -
     assert not any(c[0] in {"mount", "sudo", "guestmount", "ewfmount"} for c in calls)
 
 
+@pytest.mark.parametrize("first", ["image.E01", "image.e01", "image.s01"])
+def test_split_ewf_passes_every_segment_to_xmount_in_order(tmp_path: Path, first: str) -> None:
+    # xmount does not glob .E02.. itself; given only .E01 it exits 1 with
+    # "Unable to read end of data! Did you specify all EWF segments?!"
+    names = [first[:-2] + f"{n:02d}" for n in range(1, 5)]
+    for name in names:
+        (tmp_path / name).touch()
+    calls: list[list[str]] = []
+    with (
+        patch("mulder.extractors.disk.shutil.which", _which),
+        patch("mulder.extractors.disk.subprocess.run", _fake_run(calls)),
+    ):
+        assert disk._mount_image(tmp_path / first, tmp_path / "mnt") is True
+
+    xmount = calls[1]
+    assert xmount[1 : 3 + len(names)] == ["--in", "ewf", *(str(tmp_path / n) for n in names)]
+    assert xmount[3 + len(names)] == "--out"
+
+
+def test_split_ewf_with_missing_middle_segment_stops_at_the_gap(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    for name in ["image.E01", "image.E02", "image.E04"]:
+        (tmp_path / name).touch()
+    calls: list[list[str]] = []
+    with (
+        patch("mulder.extractors.disk.shutil.which", _which),
+        patch("mulder.extractors.disk.subprocess.run", _fake_run(calls)),
+        caplog.at_level("WARNING", logger="mulder.extractors.disk"),
+    ):
+        disk._mount_image(tmp_path / "image.E01", tmp_path / "mnt")
+
+    assert calls[1][2:5] == ["ewf", str(tmp_path / "image.E01"), str(tmp_path / "image.E02")]
+    assert "image.E03 is missing but 1 later segment(s) exist" in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("suffix", "expected"),
+    [
+        (".E01", ".E02"),
+        (".E99", ".EAA"),
+        (".EAZ", ".EBA"),
+        (".EZZ", ".FAA"),
+        (".e99", ".eaa"),
+        (".s09", ".s10"),
+    ],
+)
+def test_next_ewf_suffix_follows_libewf_naming(suffix: str, expected: str) -> None:
+    assert disk._next_ewf_suffix(suffix) == expected
+
+
+def test_failed_command_logs_stdout_and_argv_when_stderr_is_empty(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    # xmount prints "ERROR: main@3689 : ..." on stdout, leaving stderr empty.
+    def run(cmd: list[str], **_: object) -> subprocess.CompletedProcess[Any]:
+        return subprocess.CompletedProcess(
+            cmd, 1, stdout=b"\nERROR: main : no segments\n", stderr=b""
+        )
+
+    with (
+        patch("mulder.extractors.disk.subprocess.run", run),
+        caplog.at_level("WARNING", logger="mulder.extractors.disk"),
+    ):
+        assert disk._run(["xmount", "--in", "ewf", "a b.E01"], 1) is False
+
+    assert (
+        "xmount exited 1: ERROR: main : no segments (argv: xmount --in ewf 'a b.E01')"
+        in caplog.text
+    )
+
+
 def test_raw_image_without_partition_table_falls_through_to_next_driver(tmp_path: Path) -> None:
     calls: list[list[str]] = []
     with (
