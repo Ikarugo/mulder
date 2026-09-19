@@ -161,6 +161,33 @@ async def test_cli_command_uses_workspace_mcp_config(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio()
+async def test_session_with_case_id_preloads_case_in_mcp_server(tmp_path: Path) -> None:
+    """The mulder server starts with the case so query tools work before
+    the model calls open_case; other servers in .mcp.json are kept (issue #230)."""
+    (tmp_path / ".mcp.json").write_text(
+        '{"mcpServers": {"mulder": {"command": "mulder", "args": ["serve"]},'
+        ' "other": {"command": "other-server"}}}'
+    )
+    orch = Orchestrator("/evidence", cwd=str(tmp_path), case_id="CASE-230")
+    options = await _capture_options(orch, CATALOG.single_allowed_tools, ["Bash"])
+    servers = cast("dict[str, dict[str, object]]", options.mcp_servers)
+    assert servers["mulder"]["command"] == "mulder"
+    assert servers["mulder"]["args"] == ["serve", "--case-id", "CASE-230"]
+    assert servers["other"] == {"command": "other-server"}
+    assert options.strict_mcp_config is True
+
+
+@pytest.mark.asyncio()
+async def test_session_without_case_id_keeps_workspace_mcp_config(tmp_path: Path) -> None:
+    mcp_json = tmp_path / ".mcp.json"
+    mcp_json.write_text('{"mcpServers": {"mulder": {"command": "mulder", "args": ["serve"]}}}')
+    orch = Orchestrator("/evidence", cwd=str(tmp_path))
+    options = await _capture_options(orch, CATALOG.single_allowed_tools, ["Bash"])
+    assert options.mcp_servers == str(mcp_json)
+    assert options.strict_mcp_config is True
+
+
+@pytest.mark.asyncio()
 async def test_utility_query_is_restricted_too(tmp_path: Path) -> None:
     orch = Orchestrator("/evidence", cwd=str(tmp_path))
     allowed = ["mcp__mulder__wait_all", "mcp__mulder__open_case", "mcp__mulder__list_cases"]

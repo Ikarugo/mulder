@@ -365,7 +365,17 @@ def init_server(
     _seed_psutil()
 
     if case_id is not None:
-        load_case(case_id)
+        validate_case_id(case_id)
+        if (db_dir / f"{case_id}.db").exists():
+            load_case(case_id)
+        else:
+            # The orchestrator passes --case-id to every agent session, including
+            # the catalog one that runs before scan_evidence creates the case.
+            logger.warning(
+                "Case '%s' has no database yet; starting without it "
+                "(scan_evidence will create it).",
+                case_id,
+            )
 
     logger.info("Mulder MCP server ready (db_dir=%s)", db_dir)
 

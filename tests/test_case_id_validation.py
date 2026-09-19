@@ -31,6 +31,7 @@ still work, and the tests below pin that as hard as they pin the traversal.
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 
@@ -234,6 +235,22 @@ class TestLoadCaseIsTheChokePoint:
         ctx = load_case("CASE-2024-007")
 
         assert ctx.case_id == "CASE-2024-007"
+
+    def test_init_server_tolerates_a_case_without_a_database(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Agent sessions pass --case-id before scan_evidence has created the
+        case (issue #230); the server must start in ready state, not crash."""
+        from mulder.server.app import init_server
+
+        db_dir = tmp_path / "cases"
+        db_dir.mkdir()
+
+        with caplog.at_level(logging.WARNING, logger="mulder.server.app"):
+            init_server(db_dir=db_dir, case_id="CASE-230")
+
+        assert "CASE-230" in caplog.text
+        assert not (db_dir / "CASE-230.db").exists()
 
     def test_init_server_refuses_a_traversal_case_id(self, tmp_path: Path) -> None:
         """init_server(case_id=...) reaches load_case without passing open_case."""
