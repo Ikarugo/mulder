@@ -403,6 +403,15 @@ count against it. Phase queries run at `--effort` (`max` and `xhigh` reach
 Bedrock as `high`); utility queries run at `low`, which DeepSeek treats as
 non-reasoning.
 
+In a tool loop Claude Code sends each earlier turn's `thinking` block back in
+the assistant history. Bedrock's DeepSeek route returns those blocks without a
+signature, and LiteLLM 1.101.0 replays an unsigned thinking block as a plain
+assistant `text` block rather than a Bedrock `reasoningContent` block
+(`add_thinking_blocks_to_assistant_content` in
+`litellm_core_utils/prompt_templates/factory.py`). The loop continues
+normally; the cost is that prior reasoning is re-read as visible assistant
+prose on every turn.
+
 Models LiteLLM does not list as reasoning-capable are served without it and a
 warning is logged at proxy start. A custom `--proxy-config` is used verbatim;
 add `allowed_openai_params: [reasoning_effort]` to its `litellm_params` yourself.

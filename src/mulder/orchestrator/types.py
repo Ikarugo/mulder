@@ -74,9 +74,10 @@ class ExecutionResults:
             extract batch IDs for the post-executor wait step.
         batch_ids: Batch IDs captured structurally from start_extraction_batch
             tool result blocks during execution.
-        tool_calls: Number of tool calls the executor made across its
-            session and any continuations. Zero means the plan was not
-            executed at all.
+        tool_calls: Number of extraction tool calls (including batch
+            launches) the executor made across its session and any
+            continuations; passive control tools such as open_case and
+            wait are not counted. Zero means the plan was not executed.
     """
 
     plan_id: str
