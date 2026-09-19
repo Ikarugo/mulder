@@ -113,6 +113,23 @@ def _missing_mcp_tools(init: SystemMessage, expected: set[str]) -> str:
     return ""
 
 
+def builtin_tools(init: SystemMessage) -> list[str]:
+    """Return the non-MCP (Claude Code built-in) tools an ``init`` message lists.
+
+    Sessions run with ``tools=[]``, so this should be empty; anything here
+    means the CLI's built-in handling drifted and the model can read
+    evidence, write the workspace or reach the network outside the audit
+    log.
+
+    Args:
+        init: The ``system``/``init`` message emitted before the first turn.
+
+    Returns:
+        Sorted tool names that do not start with ``mcp__``.
+    """
+    return sorted(t for t in init.data.get("tools") or [] if not t.startswith("mcp__"))
+
+
 _AUTH_PATTERNS: tuple[str, ...] = (
     "not logged in",
     "please run /login",
@@ -425,6 +442,10 @@ class SessionExecutor:
         """
         mcp_config = Path(self._cwd) / ".mcp.json"
         return {
+            # ``[]`` disables every Claude Code built-in (Read, Grep, Glob,
+            # Write, Edit, WebFetch, Task, ...) while MCP tools stay loaded,
+            # so the audited MCP path is the only path (issue #213).
+            "tools": [],
             "allowed_tools": allowed_tools,
             "disallowed_tools": list(
                 dict.fromkeys([*disallowed_tools, *off_role_tools(allowed_tools)])
@@ -531,6 +552,13 @@ class SessionExecutor:
                         if mcp_problem:
                             await stream.aclose()
                             break
+                        if leaked := builtin_tools(message):
+                            logger.warning(
+                                "Session has %d built-in tool(s) despite tools=[] (model=%s): %s",
+                                len(leaked),
+                                model,
+                                ", ".join(leaked),
+                            )
 
                     elif isinstance(message, AssistantMessage):
                         stats = self._process_assistant_message(

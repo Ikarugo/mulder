@@ -248,10 +248,12 @@ The `Role` flag enum covers every pipeline slot: `CATALOG`, `EXTRACT_PLANNER`, `
 
 The Agent SDK's `allowed_tools` option only auto-approves permissions; with `permission_mode="bypassPermissions"` it restricts nothing, and `disallowed_tools` is the only option that removes a tool from the model's context. `SessionExecutor` therefore passes every registered mulder tool that is *not* on the role's allowlist as `disallowed_tools` (`off_role_tools` in `session.py`). An analyst never sees `run_mmls`; an executor sees the plan's tools plus its control tools (`open_case`, `start_extraction_batch`, `wait_all`, ...). Enforcement happens in the Claude Code CLI, not in the MCP server: `mulder serve` runs any tool a connected client calls.
 
+Claude Code's own built-in tools (`Read`, `Grep`, `Glob`, `Write`, `Edit`, `WebFetch`, `WebSearch`, `Task`, `Skill`, ... about thirty in the bundled CLI) are disabled wholesale with the SDK's `tools=[]` option (`--tools ""`), which removes every built-in while MCP tools stay loaded. This is set in `SessionExecutor._shared_options`, so it covers role sessions, continuation and remediation sessions, JSON repair and utility queries alike. Without it a model can read `/evidence` and the workspace with `Read`/`Grep`/`Glob`, write the workspace, or reach the network, all outside the audit log and the `evidence_refs` validation (issue #213). `Bash`/`Shell` remain on each phase's `disallowed_tools` list as belt and braces.
+
 Three more checks keep the tool surface deterministic:
 
 - Sessions run with `ENABLE_TOOL_SEARCH=false`, so the CLI never defers MCP tools behind its `ToolSearch` tool. The model sees the whole allowlist upfront.
-- The CLI's `init` message reports each MCP server's status and the loaded tool names. If the mulder server is not `connected`, or an allowed tool is missing, the session is aborted before the model answers and respawned (three attempts, logged as "Session started without its tools"). Without this the CLI runs the turn with built-in tools only.
+- The CLI's `init` message reports each MCP server's status and the loaded tool names. If the mulder server is not `connected`, or an allowed tool is missing, the session is aborted before the model answers and respawned (three attempts, logged as "Session started without its tools"). Without this the CLI runs the turn with built-in tools only. The same message is checked for any tool name that does not start with `mcp__`; one present after `tools=[]` means the CLI's built-in handling drifted, and it is logged as a warning naming the tools.
 - The workspace `.mcp.json` is passed to the CLI explicitly with `--strict-mcp-config`, so sessions do not depend on Claude Code's project MCP approval state and never load user-level MCP servers.
 
 An executor that finishes without a single tool call fails its attempt: the analyst is skipped and the phase's `max_retries` loop re-plans, instead of the analyst doing the extraction itself.
@@ -527,7 +529,7 @@ Several enrichment tools are available for agents to call during relevant phases
 
 ### No Shell Access
 
-The MCP server exposes only typed tool functions. Shell, Bash, and arbitrary command execution are explicitly blocked in both the MCP server permissions and in each phase's `disallowed_tools` list. All evidence access goes through audited MCP tools.
+The MCP server exposes only typed tool functions. Every Claude Code built-in tool (Bash, Read, Grep, Glob, Write, Edit, WebFetch, WebSearch, Task, ...) is disabled for every agent session with the SDK's `tools=[]` option, and Shell/Bash are additionally on each phase's `disallowed_tools` list. All evidence access goes through audited MCP tools; there is no unaudited way for the model to read evidence, write the workspace, or reach the network.
 
 `run_radare2` also enables radare2's own sandbox before executing the requested
 command batch, blocking shell escapes, writes, and opening additional files.

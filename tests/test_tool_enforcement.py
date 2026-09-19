@@ -17,7 +17,7 @@ from claude_agent_sdk.types import AssistantMessage, SystemMessage, TextBlock
 from mulder.orchestrator.phases import CATALOG, CROSS_SYSTEM, EXTRACTION, REPORT
 from mulder.orchestrator.roles import _EXECUTOR_CONTROL_TOOLS, RoleRunner
 from mulder.orchestrator.runner import Orchestrator
-from mulder.orchestrator.session import _MCP_CONNECT_ATTEMPTS, off_role_tools
+from mulder.orchestrator.session import _MCP_CONNECT_ATTEMPTS, builtin_tools, off_role_tools
 from mulder.orchestrator.types import AnalystResult, ExecutionResults, PhaseResult, Plan
 from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
 
@@ -141,6 +141,9 @@ async def test_cli_command_disallows_off_role_tools(tmp_path: Path) -> None:
     assert set(disallowed) == set(EXTRACTION.disallowed_tools) | (ALL_TOOLS - set(allowed))
     assert len(disallowed) == len(set(disallowed))
     assert _flag(cmd, "--permission-mode") == ["bypassPermissions"]
+    # ``--tools ""`` disables every Claude Code built-in (Read, Grep, Glob,
+    # Write, WebFetch, ...) while MCP tools stay loaded (issue #213).
+    assert cmd[cmd.index("--tools") + 1] == ""
     assert options.env["ENABLE_TOOL_SEARCH"] == "false"
     # No workspace .mcp.json: the CLI keeps its own MCP discovery.
     assert "--mcp-config" not in cmd
@@ -163,6 +166,7 @@ async def test_utility_query_is_restricted_too(tmp_path: Path) -> None:
     allowed = ["mcp__mulder__wait_all", "mcp__mulder__open_case", "mcp__mulder__list_cases"]
     options = await _capture_options(orch, allowed, [], utility=True)
     assert set(options.disallowed_tools) == ALL_TOOLS - set(allowed)
+    assert options.tools == []
     assert options.env["ENABLE_TOOL_SEARCH"] == "false"
 
 
@@ -227,21 +231,39 @@ async def test_session_without_its_tools_is_aborted_and_retried(
 
 
 @pytest.mark.asyncio()
-async def test_session_with_its_tools_proceeds() -> None:
+@pytest.mark.parametrize("leaked", [[], ["Read", "Grep"]])
+async def test_session_with_its_tools_proceeds_and_flags_builtins(
+    leaked: list[str], caplog: pytest.LogCaptureFixture
+) -> None:
+    """A session with its MCP tools runs; any built-in still present is a
+    CLI drift warning, not an abort (issue #213)."""
     orch = Orchestrator("/evidence")
     calls = 0
 
     async def healthy_query(*, prompt: str, options: ClaudeAgentOptions) -> AsyncIterator[object]:
         nonlocal calls
         calls += 1
-        yield _init("connected", ["Read", *ALLOWED, "mcp__mulder__run_mmls"])
+        yield _init("connected", [*leaked, *ALLOWED, "mcp__mulder__run_mmls"])
         yield AssistantMessage(content=[TextBlock(text="working")], model="m")
 
-    with patch("mulder.orchestrator.session.query", healthy_query):
+    with (
+        patch("mulder.orchestrator.session.query", healthy_query),
+        caplog.at_level(logging.WARNING, logger="mulder.orchestrator.session"),
+    ):
         result = await orch._session.execute("sys", "p", "test-model", ALLOWED, [], 5)
 
     assert calls == 1
     assert result.messages == ["working"]
+    warnings = [r for r in caplog.records if "built-in tool(s) despite tools=[]" in r.message]
+    assert len(warnings) == (1 if leaked else 0)
+    if leaked:
+        assert "Grep, Read" in warnings[0].message
+
+
+def test_builtin_tools_is_every_non_mcp_name() -> None:
+    init = _init("connected", ["Write", "mcp__mulder__open_case", "Bash", "mcp__other__x"])
+    assert builtin_tools(init) == ["Bash", "Write"]
+    assert builtin_tools(SystemMessage(subtype="init", data={})) == []
 
 
 @pytest.mark.asyncio()
