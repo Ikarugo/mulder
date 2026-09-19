@@ -25,7 +25,10 @@ from mulder.server.helpers import (
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
-from mulder.server.tools.extract.tsk import _mmls_text, _resolve_partition_offset
+from mulder.server.tools.extract.tsk import (
+    _partition_table_text,
+    _resolve_partition_offset,
+)
 
 __all__ = ["detect_masquerading"]
 
@@ -307,7 +310,7 @@ def detect_masquerading(
     else:
         targets = [
             (start, desc)
-            for start, length, desc in parse_mmls_rows(_mmls_text(image_path))
+            for start, length, desc in parse_mmls_rows(_partition_table_text(image_path))
             if length > 0 and not any(w in desc for w in _NON_FS_ROWS)
         ] or [(_resolve_partition_offset(image_path), "auto")]
 

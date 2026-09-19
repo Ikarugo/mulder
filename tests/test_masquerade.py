@@ -261,7 +261,7 @@ def test_no_offset_scans_every_partition_and_reports_skipped() -> None:
 
     with (
         patch(f"{MOD}.subprocess.run", side_effect=fake_fls) as run,
-        patch(f"{MOD}._mmls_text", return_value=MMLS_TWO),
+        patch(f"{MOD}._partition_table_text", return_value=MMLS_TWO),
         patch(f"{MOD}._read_head", side_effect=lambda _i, _o, inode, _n: HEADS[inode]),
         patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),
         patch(f"{MOD}.sources_already_indexed", return_value=[]),
@@ -290,7 +290,7 @@ def test_unopenable_partition_is_reported_not_silenced() -> None:
 
     with (
         patch(f"{MOD}.subprocess.run", side_effect=fake_fls),
-        patch(f"{MOD}._mmls_text", return_value=MMLS_TWO),
+        patch(f"{MOD}._partition_table_text", return_value=MMLS_TWO),
         patch(f"{MOD}._read_head", side_effect=lambda _i, _o, inode, _n: HEADS[inode]),
         patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),
         patch(f"{MOD}.sources_already_indexed", return_value=[]),
