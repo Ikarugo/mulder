@@ -54,7 +54,7 @@ async def test_invalid_plan_runs_utility_repair_and_accepts_corrected_plan(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_invalid_repair_fails_phase_cleanly_without_executor(tmp_path: Path) -> None:
+async def test_invalid_repair_skips_executor_and_runs_analyst(tmp_path: Path) -> None:
     orch = _make_orchestrator(tmp_path)
     with patch.object(
         orch._session,
@@ -62,8 +62,10 @@ async def test_invalid_repair_fails_phase_cleanly_without_executor(tmp_path: Pat
         new=AsyncMock(return_value=PhaseResult(phase_name="query", messages=[BAD])),
     ) as execute:
         result = await orch._run_split_phase(CROSS_SYSTEM, VARS)
-    assert not result.success
-    assert execute.await_count == 2
+    # planner, repair, then the analyst on existing results (#217); no executor
+    assert execute.await_count == 3
+    assert execute.call_args.kwargs["allowed_tools"] == CROSS_SYSTEM.analyst_allowed_tools
+    assert result.plans_executed == 0
 
 
 def test_display_retains_malformed_message_without_raising(tmp_path: Path) -> None:

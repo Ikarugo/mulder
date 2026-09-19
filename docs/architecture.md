@@ -164,7 +164,7 @@ flowchart TD
     retryR --> report
 ```
 
-The Alternative Narrative phase (Phase 4) combines counter-analysis with audit responsibilities (evidence coverage, tool coverage, deduplication). Its gate checks finalize readiness before proceeding to the report phase.
+The Alternative Narrative phase (Phase 4) combines counter-analysis with audit responsibilities (evidence coverage, tool coverage, deduplication); its analyst owns the audit tools. Its gate checks finalize readiness before proceeding to the report phase. When a split phase's planner produces no plan, the executor is skipped and the analyst still runs on the results already indexed, so the audits and finding review happen and the gate decides (extraction re-plans instead, since nothing is indexed yet). As a fallback, the report role can also call `audit_evidence_coverage` and `audit_tool_coverage` itself when `check_finalize_readiness` reports them missing, so the `audit_tools_called` gate never strands the report phase (issue #217).
 
 ### Phase Configuration
 
@@ -522,7 +522,7 @@ Before the alternative narrative phase, the orchestrator builds a dedup index fr
 Several enrichment tools are available for agents to call during relevant phases. These are exposed through tool access control and referenced in phase prompts, but do not run automatically at phase boundaries:
 
 - **TI enrichment** (cross-system phase): The `enrich_iocs` tool queries public threat intelligence sources for context on extracted indicators (IPs, domains, file hashes), annotating findings with reputation data and known campaign associations.
-- **Evidence gap detection** (narrative phase): The `audit_evidence_coverage` and `audit_tool_coverage` tools identify artifact types that were present but not examined, coverage blind spots, and systems with incomplete extraction. Gap reports are surfaced to the narrative planner and extraction analyst for remediation.
+- **Evidence gap detection** (narrative phase): The `audit_evidence_coverage` and `audit_tool_coverage` tools identify artifact types that were present but not examined, coverage blind spots, and systems with incomplete extraction. Gap reports are surfaced to the narrative planner and extraction analyst for remediation. The narrative analyst is the primary owner of these audits; the report role may run them as a fallback when readiness reports them missing.
 - **Finding deduplication** (narrative phase): The `deduplicate_findings` tool merges duplicate findings that describe the same artifact observed on multiple hosts, consolidating evidence references while preserving source attribution.
 
 ## Security Model

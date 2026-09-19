@@ -88,7 +88,7 @@ def _get_source_samples(db: CaseDB, source_name: str) -> list[str]:
 
 
 @mcp.tool()
-@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST)
+@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST | Role.REPORT)
 def audit_evidence_coverage() -> dict[str, object]:
     """Identify indexed evidence sources not cited by any submitted finding.
 
@@ -169,7 +169,7 @@ def audit_evidence_coverage() -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST)
+@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST | Role.REPORT)
 def audit_tool_coverage() -> dict[str, object]:
     """Report applicable forensic tools that were never invoked during the investigation.
 
