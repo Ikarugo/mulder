@@ -1,4 +1,4 @@
-# NDLC on DeepSeek V3.2 (Mulder v1.5.2)
+# NDLC on DeepSeek V3.2, run 3 of 3 (Mulder v1.5.2)
 
 Mulder's autonomous investigation of the [NIST CFReDS Data Leakage Case](https://cfreds-archive.nist.gov/data_leakage_case/data-leakage-case.html) using the open-weight model `bedrock/deepseek.v3.2` on Amazon Bedrock through Mulder's LiteLLM proxy, run on the v1.5.2 release image with `--no-thinking`. The same evidence, prompts, tools and scoring rubric as the [Claude Opus 4.6 run](../opus-4.6/) in this directory.
 
@@ -11,33 +11,34 @@ Scored against the [published NIST answer key](https://cfreds-archive.nist.gov/d
 | Status | Count | Percentage |
 |--------|-------|------------|
 | FOUND | 0 | 0% |
-| PARTIAL | 12 | 60% |
-| MISSED | 8 | 40% |
-| FALSE POSITIVE | 5 | 25% |
+| PARTIAL | 13 | 65% |
+| MISSED | 7 | 35% |
+| FALSE POSITIVE | 4 | 20% |
 
-**0% full match, 60% detection rate, 25% false positive rate.**
+**0% full match, 65% detection rate, 20% false positive rate.** The highest detection of the three DeepSeek runs on this image; see [run 1](../deepseek-v3.2-run1/) and [run 2](../deepseek-v3.2-run2/).
 
 ## What the Model Concluded
 
-- Framed the case as a "coordinated data collection, concealment, and potential exfiltration" operation from December 2014 to March 2015 by an unattributed actor. It identified the `informant` account and the `iaman.informant@nist.gov.ost` mailbox but dismissed the address as a possible placeholder.
-- Correctly identified Windows 7 Ultimate installed on 2015-03-22, read the "IAMAN CD" optical disc (9 write sessions, full directory tree of Office documents disguised as media, archive and text files) with the new UDF reader, and named Eraser and CCleaner from ShimCache.
-- Narrated the insider case as an intrusion: the SYSTEM password reset and the `admin11`, `ITechTeam` and `temporary` accounts as initial access and privilege escalation, the ASP.NET State Service as persistence, OMB and whitehouse.gov strings from Govdocs sample documents as government targeting, and bulk_extractor credit-card hits as payment-card leakage. Those five claims are the false positives.
-- Missed both USB devices' identities, RM1 entirely, the USB connection events, iCloud, the network share, the email correspondent and the timezone, and dated the file masquerading to December 2014 from document modification times.
+- Narrated the case as a system compromise: "initial access" through the `informant` credentials with "privilege escalation" on March 22 and the `admin11`, `ITechTeam` and `temporary` accounts as persistence. Attribution was left between insider and external compromise, although "IAMAN CD" is tied to `iaman.informant@nist.gov` three times.
+- Built a timeline that starts before the OS existed: research in October 2014, masqueraded documents created December 2014 to January 2015, Eraser installed January 12 and CCleaner March 13. All are carried file timestamps; the answer key has everything on March 22 to 25.
+- Enumerated all 17 disguised files with true types and most sizes, and read the CD ("IAMAN CD", 9 burn sessions, three photos in the current session), but placed the disguised files on the PC and "on Optical Media" rather than on RM2's FAT32, and never named RM2 as a device.
+- Named RM1 for the first time in a DeepSeek run ("Authorized USB" with the "Secret Project Data" folder) and one USB registry timestamp, but no serials, no OS edition, no timezone, no February copy, no network share, no iCloud, no email correspondent.
+- Reported 263 "credit card numbers" as a PCI breach and OMB and Library of Congress addresses as "government data exposure", both from bulk_extractor hits inside the public sample documents, while concluding the case showed "exfiltration preparation rather than confirmed exfiltration". Those, the pre-install timeline and the account-manipulation kill chain are the four false positives.
 
 ## Investigation Stats
 
 | Metric | Value |
 |--------|-------|
 | Systems analyzed | 1 PC + 3 removable media (RM1 USB, RM2 USB, RM3 CD-R) |
-| Evidence sources indexed | 91 (46 disk, 45 other) |
-| Total tool calls | 352 |
-| Findings | 17 (0 critical, 6 high, 9 medium, 0 low, 2 info) |
-| Confirmed / Inference | 9 / 8 |
-| False positives | 5 |
-| Runtime | 27 minutes |
+| Evidence sources indexed | 111 (50 disk, 61 other) |
+| Total tool calls | 491 |
+| Findings | 17 (0 critical, 5 high, 7 medium, 3 low, 2 info) |
+| Confirmed / Inference | 7 / 10 |
+| False positives | 4 |
+| Runtime | 40 minutes |
 | Model | bedrock/deepseek.v3.2 (`--no-thinking`) |
-| Tokens | 9.95M input / 61K output (no prompt caching through the proxy) |
-| Exit code | 0, all quality gates passed |
+| Tokens | 14.0M input / 75K output (no prompt caching through the proxy) |
+| Exit code | 0, one report-gate retry |
 | Mulder | v1.5.2 |
 
 ## How It Was Run
@@ -75,7 +76,7 @@ Bedrock credentials came from the EC2 instance role. See the [usage guide](../..
 |------|-------------|
 | `ndlc.report.md` | Full investigation report (Markdown) |
 | `ndlc.report.html` | Investigation report (HTML with navigation) |
-| `ndlc.audit.jsonl` | Structured tool execution audit log (376 entries) |
-| `orchestrator.log` | Agent phase transitions and reasoning (1,642 lines) |
-| `mulder.log` | MCP server tool execution log (707 lines) |
+| `ndlc.audit.jsonl` | Structured tool execution audit log (521 entries) |
+| `orchestrator.log` | Agent phase transitions and reasoning (2,028 lines) |
+| `mulder.log` | MCP server tool execution log (310 lines) |
 | `ACCURACY-REPORT.md` | Ground truth comparison against the published answer key |

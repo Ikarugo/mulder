@@ -5,8 +5,8 @@ against forensic evidence datasets, unmodified from tool output.
 
 ## NIST Data Leakage Case on Mulder v1.5.2, four models
 
-The same case, evidence, prompts and tools, run once per model on the v1.5.2
-release image and scored item by item against the
+The same case, evidence, prompts and tools on the v1.5.2 release image, once
+for Claude Opus 4.6 and three times per open-weight model and scored item by item against the
 [published NIST answer key](https://cfreds-archive.nist.gov/data_leakage_case/leakage-answers.pdf)
 (20 ground-truth items). Each directory holds the full report (Markdown and
 HTML), the audit log, both execution logs, the scorecard and a README with the
@@ -16,10 +16,10 @@ run's settings.
 |-------|----------|-----------:|----------:|----------------:|---------:|-----------:|--------:|-------:|--------|-----------|
 | [Claude Opus 4.6](ndlc-v1.5.2/opus-4.6/) | Anthropic | 45% | 95% | 10% | 23 | 596 | 68 min | 37K in / 239K out | [HTML](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/opus-4.6/ndlc.report.html) | [ACCURACY-REPORT](ndlc-v1.5.2/opus-4.6/ACCURACY-REPORT.md) |
 | Kimi K3, 3 runs: [1](ndlc-v1.5.2/kimi-k3-run1/), [2](ndlc-v1.5.2/kimi-k3-run2/), [3](ndlc-v1.5.2/kimi-k3-run3/) | Bedrock | 35% (35 to 50) | 90% (80 to 95) | 20% (20 to 25) | 12 / 31 / 21 | 827 / 1,271 / 1,063 | 52 / 70 / 60 min | 200K / 180K / 170K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/kimi-k3-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/kimi-k3-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/kimi-k3-run3/ndlc.report.html) | [1](ndlc-v1.5.2/kimi-k3-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/kimi-k3-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/kimi-k3-run3/ACCURACY-REPORT.md) |
-| [MiniMax M2.5](ndlc-v1.5.2/minimax-m2.5/) | Bedrock | 5% | 60% | 5% | 13 | 323 | 29 min | 7.3M in / 123K out | [HTML](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/minimax-m2.5/ndlc.report.html) | [ACCURACY-REPORT](ndlc-v1.5.2/minimax-m2.5/ACCURACY-REPORT.md) |
-| [DeepSeek V3.2](ndlc-v1.5.2/deepseek-v3.2/) | Bedrock | 0% | 60% | 25% | 17 | 352 | 27 min | 9.9M in / 61K out | [HTML](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/deepseek-v3.2/ndlc.report.html) | [ACCURACY-REPORT](ndlc-v1.5.2/deepseek-v3.2/ACCURACY-REPORT.md) |
+| MiniMax M2.5, 3 runs: [1](ndlc-v1.5.2/minimax-m2.5-run1/), [2](ndlc-v1.5.2/minimax-m2.5-run2/), [3](ndlc-v1.5.2/minimax-m2.5-run3/) | Bedrock | 5% (0 to 5) | 55% (55 to 60) | 10% (5 to 10) | 13 / 10 / 11 | 323 / 315 / 300 | 29 / 31 / 19 min | 7.3M / 6.3M / 6.1M in, 123K / 110K / 103K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/minimax-m2.5-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/minimax-m2.5-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/minimax-m2.5-run3/ndlc.report.html) | [1](ndlc-v1.5.2/minimax-m2.5-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/minimax-m2.5-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/minimax-m2.5-run3/ACCURACY-REPORT.md) |
+| DeepSeek V3.2, 3 runs: [1](ndlc-v1.5.2/deepseek-v3.2-run1/), [2](ndlc-v1.5.2/deepseek-v3.2-run2/), [3](ndlc-v1.5.2/deepseek-v3.2-run3/) | Bedrock | 0% (0 to 0) | 60% (50 to 65) | 20% (20 to 25) | 17 / 12 / 17 | 352 / 353 / 491 | 27 / 36 / 40 min | 9.9M / 10.1M / 14.0M in, 61K / 63K / 75K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/deepseek-v3.2-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/deepseek-v3.2-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/deepseek-v3.2-run3/ndlc.report.html) | [1](ndlc-v1.5.2/deepseek-v3.2-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/deepseek-v3.2-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/deepseek-v3.2-run3/ACCURACY-REPORT.md) |
 
-Kimi K3 is listed as the median of three runs with the range in parentheses, and its per-run counts in run order. Anthropic token counts exclude prompt-cache reads; the proxy models have no
+Each open-weight model is listed as the median of three runs with the range in parentheses, and per-run counts in run order. Anthropic token counts exclude prompt-cache reads; the proxy models have no
 prompt caching, so their input counts are the full replayed context. LiteLLM
 does not report input tokens for Kimi K3.
 

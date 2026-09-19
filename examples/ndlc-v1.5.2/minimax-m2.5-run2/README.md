@@ -1,4 +1,4 @@
-# NDLC on MiniMax M2.5 (Mulder v1.5.2)
+# NDLC on MiniMax M2.5, run 2 of 3 (Mulder v1.5.2)
 
 Mulder's autonomous investigation of the [NIST CFReDS Data Leakage Case](https://cfreds-archive.nist.gov/data_leakage_case/data-leakage-case.html) using the open-weight model `bedrock/minimax.minimax-m2.5` on Amazon Bedrock through Mulder's LiteLLM proxy, run on the v1.5.2 release image with the model's native reasoning. The same evidence, prompts, tools and scoring rubric as the [Claude Opus 4.6 run](../opus-4.6/) in this directory.
 
@@ -11,33 +11,34 @@ Scored against the [published NIST answer key](https://cfreds-archive.nist.gov/d
 | Status | Count | Percentage |
 |--------|-------|------------|
 | FOUND | 1 | 5% |
-| PARTIAL | 11 | 55% |
-| MISSED | 8 | 40% |
-| FALSE POSITIVE | 1 | 5% |
+| PARTIAL | 10 | 50% |
+| MISSED | 9 | 45% |
+| FALSE POSITIVE | 2 | 10% |
 
-**5% full match, 60% detection rate, 5% false positive rate.**
+**5% full match, 55% detection rate, 10% false positive rate.** The only MiniMax run on this image to score a full match on the masquerading item; see [run 1](../minimax-m2.5-run1/) and [run 3](../minimax-m2.5-run3/).
 
 ## What the Model Concluded
 
-- Concluded an insider data-exfiltration case attributed to the user account `informant` (`iaman.informant@nist.gov`), with no malware, no external access and no persistence. Attribution was held at inference for lack of USN journal and process evidence.
-- Identified 17 deleted Office documents with mislabeled extensions on the "IAMAN $_@" USB drive (RM2), created between 09:59:27 and 10:00:18 on 2015-03-24, and read the "IAMAN CD" (RM3) with the new UDF reader: 9 sessions, five project directories, byte-exact size matches to the RM2 files, and the last deletion at 20:54 on March 24. The first open-weight run to state the RM2 volume label.
-- Concluded, wrongly, that the files were copied from the CD to the USB drive and that the CD pre-dates the incident. The disc was formatted after the USB copy. This is the single false positive. RM1 ("Authorized USB"), where the originals sit under their real names, was never examined.
-- Found the Google Drive install and sync folder but ruled cloud storage a "non-factor"; noted the `\\10.11.11.128\secured_drive` share and a USBSTOR load at 13:37:59 on March 24; missed CCleaner, Eraser, the search history, iCloud, the email correspondent, the OS edition and the timezone.
+- Insider data theft by the `informant` account (`iaman.informant@nist.gov`), correctly framed as an insider threat with no malware, no external access and no lateral movement. The suspect's name is never stated, and the "IAMAN CD" label is read as a placeholder.
+- Two USB sticks placed on the right images by label ("Authorized USB" on RM1 with the "Secret Project Data" folder; "IAMAN $_@" on RM2, FAT32) and all 17 disguised files on RM2 named with their true Office types, deleted, dated March 24. No serials, connection times or original-name mappings.
+- A multi-session CD ("IAMAN CD", 9 sessions, both directory naming schemes, final burn on the evening of March 24) whose content is misread as exfiltrated OMB and Library of Congress material (the sample-document metadata), reported as the run's only critical finding with a recommendation to notify both agencies. That is one of the two false positives.
+- An operational timeline built on file-modification dates that runs from late 2014 through "Eraser installed January 12" and "Google Drive installed February 19", all before the OS was installed on March 22. That pre-install timeline is the other false positive.
+- Absent: the OS version, CCleaner, the search history, iCloud, the USB connection records, the February copy, the RM2 file opens, the network share, the email correspondent and the timezone. Five of these were retrieved during the run and never reached the report.
 
 ## Investigation Stats
 
 | Metric | Value |
 |--------|-------|
 | Systems analyzed | 1 PC + 3 removable media (RM1 USB, RM2 USB, RM3 CD-R) |
-| Evidence sources indexed | 99 (58 disk, 41 other) |
-| Total tool calls | 323 |
-| Findings | 13 (0 critical, 3 high, 6 medium, 0 low, 4 info) |
-| Confirmed / Inference | 7 / 6 |
-| False positives | 1 |
-| Runtime | 29 minutes |
+| Evidence sources indexed | 245 (32 disk, 213 other) |
+| Total tool calls | 315 |
+| Findings | 10 (1 critical, 6 high, 2 medium, 0 low, 1 info) |
+| Confirmed / Inference | 9 / 1 |
+| False positives | 2 |
+| Runtime | 31 minutes |
 | Model | bedrock/minimax.minimax-m2.5 (native reasoning) |
-| Tokens | 7.27M input / 123K output (no prompt caching through the proxy) |
-| Exit code | 0, one quality-gate retry |
+| Tokens | 6.30M input / 110K output (no prompt caching through the proxy) |
+| Exit code | 0, all quality gates passed |
 | Mulder | v1.5.2 |
 
 ## How It Was Run
@@ -76,7 +77,7 @@ Bedrock credentials came from the EC2 instance role. See the [usage guide](../..
 |------|-------------|
 | `ndlc.report.md` | Full investigation report (Markdown) |
 | `ndlc.report.html` | Investigation report (HTML with navigation) |
-| `ndlc.audit.jsonl` | Structured tool execution audit log (341 entries) |
-| `orchestrator.log` | Agent phase transitions and reasoning (2,006 lines) |
-| `mulder.log` | MCP server tool execution log (615 lines) |
+| `ndlc.audit.jsonl` | Structured tool execution audit log (333 entries) |
+| `orchestrator.log` | Agent phase transitions and reasoning (2,091 lines) |
+| `mulder.log` | MCP server tool execution log (185 lines) |
 | `ACCURACY-REPORT.md` | Ground truth comparison against the published answer key |
