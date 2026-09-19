@@ -30,6 +30,13 @@ _LITELLM_PREFIXES: tuple[str, ...] = (
 _DEFAULT_PORT: int = 4000
 _HEALTH_CHECK_TIMEOUT: float = 30.0
 _HEALTH_CHECK_INTERVAL: float = 0.5
+_MASTER_KEY: str = "sk-mulder-proxy"
+
+#: Output tokens reserved per request for proxy-routed models. Doubles as
+#: the LiteLLM ``max_tokens`` default and as ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``
+#: for the session, because the CLI's explicit value (32000 for model IDs
+#: it does not recognise) would otherwise override the proxy default.
+PROXY_MAX_OUTPUT_TOKENS: int = 8192
 
 
 def is_proxy_model(model_id: str) -> bool:
@@ -72,7 +79,7 @@ def _build_proxy_config(models: list[str], port: int) -> dict[str, Any]:
                         if model_id.startswith("ollama/")
                         else model_id
                     ),
-                    "max_tokens": 8192,
+                    "max_tokens": PROXY_MAX_OUTPUT_TOKENS,
                 },
             }
         )
@@ -86,7 +93,7 @@ def _build_proxy_config(models: list[str], port: int) -> dict[str, Any]:
             "modify_params": True,
         },
         "general_settings": {
-            "master_key": "sk-mulder-proxy",
+            "master_key": _MASTER_KEY,
         },
     }
 
@@ -126,6 +133,50 @@ def _wait_for_health(port: int, timeout: float = _HEALTH_CHECK_TIMEOUT) -> bool:
         time.sleep(_HEALTH_CHECK_INTERVAL)
 
     return False
+
+
+def fetch_model_windows(port: int, timeout: float = 5.0) -> dict[str, int]:
+    """Read each served model's context window from the running proxy.
+
+    LiteLLM's ``/model_group/info`` reports ``max_input_tokens`` per public
+    model name from its ``model_prices_and_context_window`` map. Claude Code
+    assumes a 200K window for model IDs it does not recognise, so the real
+    window is handed to each session as ``CLAUDE_CODE_MAX_CONTEXT_TOKENS``
+    (see :mod:`mulder.orchestrator.session`). Reading it over HTTP keeps
+    litellm out of mulder's venv.
+
+    Args:
+        port: Port the proxy is listening on.
+        timeout: Seconds to wait for the endpoint.
+
+    Returns:
+        Mapping of model name to context window in tokens. Models the map
+        does not know are omitted; any failure yields an empty mapping.
+    """
+    import json
+    import urllib.error
+    import urllib.request
+
+    req = urllib.request.Request(
+        f"http://localhost:{port}/model_group/info",
+        headers={"Authorization": f"Bearer {_MASTER_KEY}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            payload = json.load(resp)
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError) as exc:
+        logger.warning("Could not read model windows from proxy: %s", exc)
+        return {}
+
+    windows: dict[str, int] = {}
+    entries = payload.get("data") if isinstance(payload, dict) else None
+    for entry in entries if isinstance(entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        name, window = entry.get("model_group"), entry.get("max_input_tokens")
+        if isinstance(name, str) and isinstance(window, (int, float)) and window > 0:
+            windows[name] = int(window)
+    return windows
 
 
 class ProxyManager:
@@ -182,7 +233,7 @@ class ProxyManager:
         """
         return {
             "ANTHROPIC_BASE_URL": f"http://localhost:{self._port}",
-            "ANTHROPIC_AUTH_TOKEN": "sk-mulder-proxy",
+            "ANTHROPIC_AUTH_TOKEN": _MASTER_KEY,
             "CLAUDE_CODE_USE_BEDROCK": "0",
             "CLAUDE_CODE_USE_VERTEX": "0",
             "CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY": "1",
@@ -254,6 +305,10 @@ class ProxyManager:
             )
 
         logger.info("LiteLLM proxy is healthy on port %d", self._port)
+
+    def model_windows(self) -> dict[str, int]:
+        """Context window per served model, empty when the proxy cannot say."""
+        return fetch_model_windows(self._port)
 
     def stop(self) -> None:
         """Stop the proxy subprocess and clean up temporary files."""

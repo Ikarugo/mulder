@@ -28,6 +28,7 @@ from rich.text import Text
 from mulder.orchestrator.display import InvestigationDashboard
 from mulder.orchestrator.errors import AuthenticationError, ModelNotAvailableError
 from mulder.orchestrator.models import ModelConfig
+from mulder.orchestrator.proxy import PROXY_MAX_OUTPUT_TOKENS, is_proxy_model
 from mulder.orchestrator.types import EffortLevel, PhaseResult, extract_json_from_text
 from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
 
@@ -112,6 +113,36 @@ _MODEL_PATTERNS: tuple[str, ...] = (
     "model not found",
     "you could try using",
 )
+
+
+#: Provider phrasings for a request that no longer fits the model's context
+#: window. Anthropic: "prompt is too long: N tokens > M maximum" and "input
+#: length and `max_tokens` exceed context limit". Bedrock Claude: "Input is
+#: too long for requested model". OpenAI-compatible providers and Bedrock
+#: open-weight models via LiteLLM: "This model's maximum context length is N
+#: tokens" with error code ``context_length_exceeded``. Claude Code's own
+#: stop reason: "The model has reached its context window limit".
+_CONTEXT_PATTERNS: tuple[str, ...] = (
+    "prompt is too long",
+    "input is too long",
+    "exceed context limit",
+    "maximum context length",
+    "context_length_exceeded",
+    "context window limit",
+)
+
+
+def _is_context_exhausted(text: str) -> bool:
+    """Return True when *text* is a provider's context-overflow rejection.
+
+    Args:
+        text: Error message or streamed text content.
+
+    Returns:
+        True if any known overflow phrasing appears (case-insensitive).
+    """
+    lower = text.lower()
+    return any(pattern in lower for pattern in _CONTEXT_PATTERNS)
 
 
 def _classify_fatal_error(text: str) -> tuple[str, str]:
@@ -295,6 +326,9 @@ class SessionExecutor:
         self._env = env
         self._effort = effort
         self._using_proxy = using_proxy
+        #: Context window per proxy-routed model, filled by the orchestrator
+        #: from the proxy once it is healthy.
+        self._proxy_windows: dict[str, int] = {}
         self._no_thinking = no_thinking
         self._show_cli_stderr = show_cli_stderr
 
@@ -310,8 +344,32 @@ class SessionExecutor:
 
         return log_stderr
 
+    def _gateway_env(self, model: str) -> dict[str, str]:
+        """Context and output limits Claude Code should assume for *model*.
+
+        Claude Code sizes a model ID it does not recognise as a Claude model:
+        32000 output tokens per request and a 200K context window. Behind
+        the LiteLLM proxy that means a 163K model is never auto-compacted
+        before the provider rejects the request. Both env vars are the
+        CLI's documented overrides for gateway model IDs; native Anthropic,
+        Bedrock-Claude and Vertex sessions keep the CLI defaults.
+
+        Args:
+            model: Model identifier for the session.
+
+        Returns:
+            Env vars for proxy-routed models, empty otherwise.
+        """
+        if not is_proxy_model(model):
+            return {}
+        env = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(PROXY_MAX_OUTPUT_TOKENS)}
+        window = self._proxy_windows.get(model)
+        if window:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+        return env
+
     def _shared_options(
-        self, allowed_tools: list[str], disallowed_tools: list[str]
+        self, allowed_tools: list[str], disallowed_tools: list[str], model: str
     ) -> dict[str, Any]:
         """Options every session gets: tool enforcement, env, MCP config.
 
@@ -323,6 +381,7 @@ class SessionExecutor:
             allowed_tools: Role allowlist for this session.
             disallowed_tools: Phase blocklist; the off-role complement of
                 *allowed_tools* is appended so the model never sees it.
+            model: Model identifier, for gateway context/output limits.
 
         Returns:
             Keyword arguments for ``ClaudeAgentOptions``.
@@ -335,9 +394,15 @@ class SessionExecutor:
             ),
             "permission_mode": "bypassPermissions",
             "cwd": self._cwd,
-            # Title opt-out is a default the caller may override; tool-search
-            # off is enforced so the role allowlists reach the model upfront.
-            "env": {**_NO_SESSION_TITLE, **self._env, **_SESSION_ENV},
+            # Title opt-out and gateway limits are defaults the caller may
+            # override; tool-search off is enforced so the role allowlists
+            # reach the model upfront.
+            "env": {
+                **_NO_SESSION_TITLE,
+                **self._gateway_env(model),
+                **self._env,
+                **_SESSION_ENV,
+            },
             "mcp_servers": str(mcp_config) if mcp_config.is_file() else {},
             "strict_mcp_config": mcp_config.is_file(),
         }
@@ -382,7 +447,7 @@ class SessionExecutor:
             thinking={"type": "disabled"} if self._no_thinking else None,
             stderr=self._stderr_callback(log_prefix or task_system or model),
             max_buffer_size=_MAX_BUFFER_SIZE_BYTES,
-            **self._shared_options(allowed_tools, disallowed_tools),
+            **self._shared_options(allowed_tools, disallowed_tools, model),
         )
         expected_mcp_tools = {t for t in allowed_tools if t.startswith(_MCP_TOOL_PREFIX)}
 
@@ -478,7 +543,7 @@ class SessionExecutor:
                         alternative=alt,
                     ) from exc
 
-                if "maximum" in exc_lower or "prompt is too long" in exc_lower:
+                if _is_context_exhausted(exc_msg):
                     self._dashboard.log_info(f"Context exhausted: {exc_msg}")
                     logger.warning("Context exhausted: %s", exc_msg)
                     hit_context_limit = True
@@ -590,7 +655,7 @@ class SessionExecutor:
                         alternative=alt,
                     )
 
-                if "prompt is too long" in text.lower():
+                if _is_context_exhausted(text):
                     hit_context = True
                     self._dashboard.log_info(f"{pfx}Context exhausted (detected in response)")
                 else:
@@ -799,7 +864,7 @@ class SessionExecutor:
             effort=None if self._no_thinking else "low",
             thinking={"type": "disabled"} if self._no_thinking else None,
             stderr=self._stderr_callback(f"utility: {label}"),
-            **self._shared_options(allowed_tools, []),
+            **self._shared_options(allowed_tools, [], utility_model),
         )
 
         collected_text: list[str] = []
