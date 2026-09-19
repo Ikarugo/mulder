@@ -43,8 +43,10 @@ from mulder.orchestrator.roles import RoleRunner
 from mulder.orchestrator.session import SessionExecutor
 from mulder.orchestrator.types import (
     EffortLevel,
+    ExecutionResults,
     InvestigationResult,
     PhaseResult,
+    Plan,
     extract_catalog_result,
 )
 from mulder.patterns import (
@@ -575,8 +577,11 @@ class Orchestrator:
         """Execute a planner/executor/analyst phase.
 
         The three roles run in sequence. The analyst may request follow-up
-        iterations (up to ``phase.max_follow_ups``). Gate validation runs
-        after the analyst completes. When the gate fails, the next attempt
+        iterations (up to ``phase.max_follow_ups``). When the planner
+        produces no plan the executor is skipped and the analyst runs on
+        the results already indexed (extraction re-plans instead, since
+        nothing is indexed yet). Gate validation runs after the analyst
+        completes. When the gate fails, the next attempt
         is an analyst-only remediation session handed the gate's gap list;
         if that also fails, the attempt after it is a full cycle whose
         planner sees the gaps as a follow-up request. Attempts are bounded
@@ -644,11 +649,38 @@ class Orchestrator:
                             phase, prompt_vars, follow_up_context, log_prefix
                         )
 
-                        if plan is None and follow_up_count == 0:
-                            combined_result.success = False
-                            return combined_result
+                        if plan is None and follow_up_count == 0 and phase.name == "extraction":
+                            # Nothing is indexed for this system yet, so the
+                            # analyst has nothing to work on; re-plan, as
+                            # after an idle executor.
+                            executor_idle = True
+                            break
 
-                        if plan is None or not plan.tasks:
+                        if plan is None and follow_up_count == 0:
+                            # The analyst owns finding review and the audit
+                            # tools the gate requires (#217), so a missing
+                            # plan must not skip it: run it on the results
+                            # earlier phases already indexed.
+                            pfx = f"[{log_prefix}] " if log_prefix else ""
+                            self.dashboard.log_info(
+                                f"{pfx}Planner produced no plan; "
+                                "running analyst on existing results"
+                            )
+                            logger.warning(
+                                "Phase '%s' planner produced no plan; running analyst on "
+                                "existing results",
+                                phase.name,
+                            )
+                            plan = Plan(
+                                plan_id=f"{phase.name}-noplan-{self._case_id}",
+                                tasks=[],
+                                investigation_questions=[],
+                                expected_sources=[],
+                                raw_text="",
+                                turns_used=0,
+                            )
+                            exec_results = ExecutionResults(plan.plan_id, [], 0, False)
+                        elif plan is None or not plan.tasks:
                             # A follow-up cycle with nothing more to run
                             # ends here; the completed cycle's results
                             # and findings stand and go to the gate.
@@ -657,38 +689,42 @@ class Orchestrator:
                                 "Planner has nothing more to run; ending cycle"
                             )
                             break
+                        else:
+                            combined_result.plans_executed += 1
 
-                        combined_result.plans_executed += 1
-
-                        # Step 2: Executor
-                        self._update_dashboard_sub_step(phase, "Executing", log_prefix)
-                        exec_results = await self._roles.run_executor(
-                            phase, plan, log_prefix, task_system=task_sys
-                        )
-
-                        if exec_results.tool_calls == 0:
-                            # Nothing was executed (opening the case and waiting
-                            # do not count), so there is nothing for the
-                            # analyst to interpret; running it anyway makes it do
-                            # the extraction itself with whatever tools it has.
-                            # Fail this attempt and let the retry loop re-plan.
-                            combined_result.turns_used += plan.turns_used + exec_results.turns_used
-                            pfx = f"[{log_prefix}] " if log_prefix else ""
-                            self.dashboard.log_gate_fail(
-                                f"{pfx}Executor made no extraction tool calls; skipping analyst "
-                                f"(attempt {attempt + 1}/{1 + phase.max_retries})"
+                            # Step 2: Executor
+                            self._update_dashboard_sub_step(phase, "Executing", log_prefix)
+                            exec_results = await self._roles.run_executor(
+                                phase, plan, log_prefix, task_system=task_sys
                             )
-                            logger.warning(
-                                "Phase '%s' executor made no extraction calls (attempt %d/%d)",
-                                phase.name,
-                                attempt + 1,
-                                1 + phase.max_retries,
-                            )
-                            executor_idle = True
-                            break
 
-                        # Step 2.5: Wait for all background batches to finish
-                        await self._roles.ensure_batches_complete(exec_results, log_prefix)
+                            if exec_results.tool_calls == 0:
+                                # Nothing was executed (opening the case and
+                                # waiting do not count), so there is nothing
+                                # for the analyst to interpret; running it
+                                # anyway makes it do the extraction itself
+                                # with whatever tools it has. Fail this
+                                # attempt and let the retry loop re-plan.
+                                combined_result.turns_used += (
+                                    plan.turns_used + exec_results.turns_used
+                                )
+                                pfx = f"[{log_prefix}] " if log_prefix else ""
+                                self.dashboard.log_gate_fail(
+                                    f"{pfx}Executor made no extraction tool calls; "
+                                    f"skipping analyst "
+                                    f"(attempt {attempt + 1}/{1 + phase.max_retries})"
+                                )
+                                logger.warning(
+                                    "Phase '%s' executor made no extraction calls (attempt %d/%d)",
+                                    phase.name,
+                                    attempt + 1,
+                                    1 + phase.max_retries,
+                                )
+                                executor_idle = True
+                                break
+
+                            # Step 2.5: Wait for all background batches to finish
+                            await self._roles.ensure_batches_complete(exec_results, log_prefix)
 
                         # Step 3: Analyst
                         self._update_dashboard_sub_step(phase, "Analyzing", log_prefix)
