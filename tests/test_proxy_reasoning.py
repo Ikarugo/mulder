@@ -28,8 +28,10 @@ from mulder.orchestrator.session import SessionExecutor
 DEEPSEEK = "bedrock/deepseek.v3.2"
 LLAMA = "bedrock/meta.llama3-3-70b-instruct-v1:0"
 _OUT = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
-REASONING = ModelSettings(max_output_tokens=PROXY_REASONING_MAX_OUTPUT_TOKENS, reasoning=True)
-PLAIN = ModelSettings(max_output_tokens=PROXY_MAX_OUTPUT_TOKENS)
+REASONING = ModelSettings(
+    max_output_tokens=PROXY_REASONING_MAX_OUTPUT_TOKENS, reasoning=True, known=True
+)
+PLAIN = ModelSettings(max_output_tokens=PROXY_MAX_OUTPUT_TOKENS, known=True)
 
 
 def _params(config: dict[str, object], name: str) -> dict[str, object]:
@@ -52,7 +54,7 @@ class TestBuildProxyConfig:
 
     def test_default_is_unknown_model(self) -> None:
         params = _params(_build_proxy_config([DEEPSEEK], 4000), DEEPSEEK)
-        assert "allowed_openai_params" not in params
+        assert params["allowed_openai_params"] == ["tools"]
         assert params["max_tokens"] == PROXY_REASONING_MAX_OUTPUT_TOKENS
 
 

@@ -185,7 +185,7 @@ class TestProxyManager:
         entries = written["model_list"]
         assert isinstance(entries, list)
         params = {e["model_name"]: e["litellm_params"] for e in entries}
-        assert params[KIMI]["allowed_openai_params"] == ["reasoning_effort"]
+        assert params[KIMI]["allowed_openai_params"] == ["reasoning_effort", "tools"]
         assert params[KIMI]["max_tokens"] == 32768
         assert params[KIMI]["model"] == "bedrock/converse/us.moonshotai.kimi-k3"
         assert "allowed_openai_params" not in params[LLAMA]
@@ -232,7 +232,7 @@ def test_orchestrator_hands_overrides_to_proxy(tmp_path: Path) -> None:
 def test_build_proxy_config_without_settings_is_unknown() -> None:
     params = _build_proxy_config([KIMI], 4000)["model_list"][0]["litellm_params"]
     assert params["max_tokens"] == PROXY_REASONING_MAX_OUTPUT_TOKENS
-    assert "allowed_openai_params" not in params
+    assert params["allowed_openai_params"] == ["tools"]
 
 
 class TestUnknownBedrockRoute:
@@ -250,14 +250,25 @@ class TestUnknownBedrockRoute:
         params = self._entry(KIMI, ModelSettings(max_output_tokens=32768, reasoning=True))
         assert params["model"] == "bedrock/converse/us.moonshotai.kimi-k3"
         assert params["max_tokens"] == 32768
-        assert params["allowed_openai_params"] == ["reasoning_effort"]
+        assert params["allowed_openai_params"] == ["reasoning_effort", "tools"]
+
+    def test_unknown_bedrock_model_gets_tools_allowed(self) -> None:
+        # LiteLLM lists `tools` as supported only for mapped models and
+        # drop_params strips it otherwise; see issue #207.
+        params = self._entry(KIMI, ModelSettings())
+        assert params["model"] == "bedrock/converse/us.moonshotai.kimi-k3"
+        assert params["allowed_openai_params"] == ["tools"]
 
     def test_known_bedrock_model_untouched(self) -> None:
-        assert self._entry(LLAMA, ModelSettings(known=True))["model"] == LLAMA
+        params = self._entry(LLAMA, ModelSettings(known=True))
+        assert params["model"] == LLAMA
+        assert "allowed_openai_params" not in params
 
     @pytest.mark.parametrize("model", ["openai/gpt-4o", "azure/gpt-4o"])
     def test_non_bedrock_untouched(self, model: str) -> None:
-        assert self._entry(model, ModelSettings())["model"] == model
+        params = self._entry(model, ModelSettings())
+        assert params["model"] == model
+        assert "allowed_openai_params" not in params
 
     def test_ollama_still_uses_chat_route(self) -> None:
         assert self._entry("ollama/qwen3", ModelSettings())["model"] == "ollama_chat/qwen3"
