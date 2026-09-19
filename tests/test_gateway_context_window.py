@@ -15,7 +15,12 @@ from claude_agent_sdk import ClaudeAgentOptions as Options
 from mulder.orchestrator.gates import GateResult
 from mulder.orchestrator.models import ModelConfig
 from mulder.orchestrator.phases import CATALOG
-from mulder.orchestrator.proxy import PROXY_MAX_OUTPUT_TOKENS, fetch_model_windows
+from mulder.orchestrator.proxy import (
+    PROXY_MAX_OUTPUT_TOKENS,
+    PROXY_REASONING_MAX_OUTPUT_TOKENS,
+    ModelSettings,
+    fetch_model_windows,
+)
 from mulder.orchestrator.runner import Orchestrator
 from mulder.orchestrator.session import SessionExecutor, _is_context_exhausted
 from mulder.orchestrator.types import PhaseResult
@@ -23,6 +28,10 @@ from mulder.orchestrator.types import PhaseResult
 _OUT = "CLAUDE_CODE_MAX_OUTPUT_TOKENS"
 _CTX = "CLAUDE_CODE_MAX_CONTEXT_TOKENS"
 DEEPSEEK = "bedrock/deepseek.v3.2"
+#: LiteLLM knows the window and says "no reasoning" (the 8192 cap).
+DEEPSEEK_SETTINGS = {
+    DEEPSEEK: ModelSettings(context_window=163840, max_output_tokens=PROXY_MAX_OUTPUT_TOKENS)
+}
 
 BEDROCK_OVERFLOW = (
     "API Error: 400 litellm.BadRequestError: BedrockException - "
@@ -67,15 +76,15 @@ class TestGatewayEnv:
     @pytest.mark.asyncio()
     async def test_proxy_model_gets_window_and_output_cap(self) -> None:
         session = _session()
-        session._proxy_windows = {DEEPSEEK: 163840}
+        session._proxy_settings = DEEPSEEK_SETTINGS
         env = await _captured_env(session, DEEPSEEK)
         assert env[_OUT] == str(PROXY_MAX_OUTPUT_TOKENS)
         assert env[_CTX] == "163840"
 
     @pytest.mark.asyncio()
-    async def test_unknown_window_still_caps_output(self) -> None:
+    async def test_unknown_model_gets_reasoning_cap_and_no_window(self) -> None:
         env = await _captured_env(_session(), DEEPSEEK)
-        assert env[_OUT] == str(PROXY_MAX_OUTPUT_TOKENS)
+        assert env[_OUT] == str(PROXY_REASONING_MAX_OUTPUT_TOKENS)
         assert _CTX not in env
 
     @pytest.mark.parametrize(
@@ -84,7 +93,7 @@ class TestGatewayEnv:
     @pytest.mark.asyncio()
     async def test_native_models_untouched(self, model: str) -> None:
         session = _session()
-        session._proxy_windows = {DEEPSEEK: 163840}
+        session._proxy_settings = DEEPSEEK_SETTINGS
         env = await _captured_env(session, model)
         assert _OUT not in env
         assert _CTX not in env
@@ -92,7 +101,7 @@ class TestGatewayEnv:
     @pytest.mark.asyncio()
     async def test_caller_env_wins(self) -> None:
         session = _session({_OUT: "4096", _CTX: "100000"})
-        session._proxy_windows = {DEEPSEEK: 163840}
+        session._proxy_settings = DEEPSEEK_SETTINGS
         env = await _captured_env(session, DEEPSEEK)
         assert env[_OUT] == "4096"
         assert env[_CTX] == "100000"
@@ -101,7 +110,7 @@ class TestGatewayEnv:
     async def test_utility_query_uses_its_own_model(self) -> None:
         session = _session()
         session._model_config = ModelConfig(planner=DEEPSEEK)
-        session._proxy_windows = {DEEPSEEK: 163840}
+        session._proxy_settings = DEEPSEEK_SETTINGS
         env = await _captured_env(session, "", utility=True)
         assert env[_OUT] == str(PROXY_MAX_OUTPUT_TOKENS)
         assert env[_CTX] == "163840"
@@ -172,14 +181,14 @@ class TestFetchModelWindows:
         with patch("urllib.request.urlopen", side_effect=OSError("refused")):
             assert fetch_model_windows(4000) == {}
 
-    def test_orchestrator_hands_windows_to_session(self) -> None:
+    def test_orchestrator_hands_settings_to_session(self) -> None:
         with patch("mulder.orchestrator.runner.InvestigationDashboard"):
             orch = Orchestrator("/evidence", model_config=ModelConfig(planner=DEEPSEEK))
         with patch("mulder.orchestrator.runner.ProxyManager") as pm_cls:
-            pm_cls.return_value.model_windows.return_value = {DEEPSEEK: 163840}
+            pm_cls.return_value.settings = DEEPSEEK_SETTINGS
             pm_cls.return_value.env_overrides = {}
             orch._start_proxy_if_needed()
-        assert orch._session._proxy_windows == {DEEPSEEK: 163840}
+        assert orch._session._proxy_settings is DEEPSEEK_SETTINGS
 
 
 class TestSinglePhaseCompaction:
