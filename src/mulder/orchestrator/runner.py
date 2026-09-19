@@ -13,6 +13,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,7 @@ class Orchestrator:
         self._max_compactions = max_compactions
         self._phase_counter = 0
         self._total_phases = 0
+        self._phase_started_at = 0.0
         self._case_briefing: str = ""
         self._proxy_config = proxy_config
         self._proxy: ProxyManager | None = None
@@ -465,6 +467,7 @@ class Orchestrator:
         model = self.model_config.resolve(phase.name, phase.single_role)
         accumulated_turns = 0
         last_result: PhaseResult | None = None
+        self._phase_started_at = time.time()
 
         self._phase_counter += 1
         self.dashboard.set_phase(
@@ -811,7 +814,12 @@ class Orchestrator:
             return validate_narrative(summary_result, readiness)
 
         if phase.name == "report":
-            return validate_report(phase_result.tool_names)
+            return validate_report(
+                phase_result.tool_names,
+                report_path=self._db_dir / f"{self._case_id}.report.md",
+                readiness=self._server.get_readiness(),
+                started_at=self._phase_started_at,
+            )
 
         return None
 
