@@ -387,6 +387,60 @@ class RoleRunner:
                 f"Investigation questions:\n{context['investigation_questions']}"
             )
 
+        return await self._analyst_session(phase, prompt, model, log_prefix, task_system)
+
+    async def run_remediation(
+        self,
+        phase: PhaseConfig,
+        gaps: list[str],
+        log_prefix: str = "",
+        task_system: str = "",
+    ) -> AnalystResult:
+        """Run an analyst-only session that fixes a failed gate's gaps.
+
+        Cheaper than a full planner/executor/analyst cycle: the gate has
+        already named what is missing, and every gap it reports is fixable
+        with the analyst's own tools (``update_finding``, ``submit_finding``,
+        ``submit_narrative``, the audit tools).
+
+        Args:
+            phase: Phase configuration with analyst fields.
+            gaps: Gap list from the failed ``GateResult``.
+            log_prefix: Prefix for dashboard log lines.
+            task_system: Task panel system name for tool tracking.
+
+        Returns:
+            AnalystResult for the remediation session.
+        """
+        model = self._model_config.resolve(phase.name, "analyst")
+        gap_text = "\n".join(f"- {gap}" for gap in gaps)
+        prompt = (
+            f"Case ID: {self._case_id}\n"
+            f"Call open_case(case_id='{self._case_id}') as your FIRST action.\n\n"
+            f"GATE FAILED for phase '{phase.name}':\n{gap_text}\n\n"
+            "Fix exactly these gaps and nothing else. For each finding named "
+            "above, either set event_time_start via update_finding using a "
+            "precise timestamp from evidence you have already examined, or, "
+            "if it describes a state rather than a timed event, set its "
+            "severity to 'info'; if it records a hypothesis you ruled out, "
+            "prefix its title with '[NEGATIVE]'. Do not fabricate timestamps. "
+            "Do not re-run extraction and do not submit new findings unless "
+            "a gap explicitly asks for one. Call check_finalize_readiness "
+            "when done."
+        )
+        self._dashboard.log_info(f"{phase.name}: Remediating gate gaps (analyst only)")
+        logger.info("[%s] Running gate remediation for gaps: %s", phase.name, gaps)
+        return await self._analyst_session(phase, prompt, model, log_prefix, task_system)
+
+    async def _analyst_session(
+        self,
+        phase: PhaseConfig,
+        prompt: str,
+        model: str,
+        log_prefix: str,
+        task_system: str,
+    ) -> AnalystResult:
+        """Run one analyst session plus its continuation loop."""
         result = await self._session.execute(
             system_prompt=phase.analyst_system_prompt,
             prompt=prompt,
@@ -406,10 +460,11 @@ class RoleRunner:
             disallowed_tools=phase.disallowed_tools,
             max_turns=phase.analyst_max_turns,
             continuation_prompt=(
-                "CONTINUATION: The previous analyst session exhausted its "
-                "context window. All submitted findings are saved. Review "
-                "the investigation summary and continue analysis. Submit "
-                "any remaining findings. Do NOT re-submit existing findings."
+                "CONTINUATION: The previous analyst session ended before it "
+                "finished (context window or turn limit). All submitted "
+                "findings are saved. Review the investigation summary and "
+                "continue analysis. Submit any remaining findings. Do NOT "
+                "re-submit existing findings."
             ),
             role_label="Analyst",
             log_prefix=log_prefix,
@@ -519,8 +574,9 @@ class RoleRunner:
         additional_turns = 0
         while result.context_exhausted and compaction_count < self._max_compactions:
             compaction_count += 1
+            why = "ran out of turns; continuing" if result.turns_exhausted else "auto-compacting"
             self._dashboard.log_info(
-                f"{role_label} auto-compacting (#{compaction_count}/{self._max_compactions})"
+                f"{role_label} {why} (#{compaction_count}/{self._max_compactions})"
             )
             continuation = await self._session.execute(
                 system_prompt=system_prompt,
@@ -536,6 +592,7 @@ class RoleRunner:
             result.messages.extend(continuation.messages)
             result.tool_names.extend(continuation.tool_names)
             result.context_exhausted = continuation.context_exhausted
+            result.turns_exhausted = continuation.turns_exhausted
             result.batch_ids.update(continuation.batch_ids)
         return additional_turns
 

@@ -149,6 +149,25 @@ def _is_context_exhausted(text: str) -> bool:
     return any(pattern in lower for pattern in _CONTEXT_PATTERNS)
 
 
+#: ``ResultMessage.subtype`` the CLI emits when the agent loop stopped at
+#: ``max_turns`` without a final answer. The SDK then raises a ``ResultError``
+#: carrying the same subtype ("Claude Code returned an error result: Reached
+#: maximum number of turns (N)").
+_MAX_TURNS_SUBTYPE = "error_max_turns"
+
+
+def _is_turns_exhausted(message: object) -> bool:
+    """Return True when a ResultMessage or SDK error reports the turn limit.
+
+    Args:
+        message: A ``ResultMessage`` or an exception raised by ``query``.
+
+    Returns:
+        True if its structured ``subtype`` is ``error_max_turns``.
+    """
+    return getattr(message, "subtype", None) == _MAX_TURNS_SUBTYPE
+
+
 def _classify_fatal_error(text: str) -> tuple[str, str]:
     """Classify text as an auth error, model error, or neither.
 
@@ -480,6 +499,7 @@ class SessionExecutor:
         seen_message_ids: set[str] = set()
         got_result = False
         hit_context_limit = False
+        hit_turn_limit = False
 
         for connect_attempt in range(1, _MCP_CONNECT_ATTEMPTS + 1):
             mcp_problem = ""
@@ -514,6 +534,8 @@ class SessionExecutor:
                             hit_context_limit = True
 
                     elif isinstance(message, ResultMessage):
+                        if _is_turns_exhausted(message):
+                            hit_turn_limit = True
                         (
                             turns_used,
                             session_id,
@@ -554,7 +576,13 @@ class SessionExecutor:
                         alternative=alt,
                     ) from exc
 
-                if _is_context_exhausted(exc_msg):
+                if hit_turn_limit or _is_turns_exhausted(exc):
+                    # The CLI already yielded the error_max_turns result; the
+                    # trailing exception is its deliberate non-zero exit.
+                    hit_turn_limit = True
+                    self._dashboard.log_info(f"Turn limit reached ({max_turns}); will continue")
+                    logger.warning("Turn limit reached (max_turns=%d): %s", max_turns, exc_msg)
+                elif _is_context_exhausted(exc_msg):
                     self._dashboard.log_info(f"Context exhausted: {exc_msg}")
                     logger.warning("Context exhausted: %s", exc_msg)
                     hit_context_limit = True
@@ -594,7 +622,8 @@ class SessionExecutor:
             tool_names=collected_tool_names,
             turns_used=turns_used,
             session_id=session_id,
-            context_exhausted=hit_context_limit,
+            context_exhausted=hit_context_limit or hit_turn_limit,
+            turns_exhausted=hit_turn_limit,
             batch_ids=collected_batch_ids,
         )
 

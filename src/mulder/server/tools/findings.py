@@ -35,6 +35,34 @@ _MIDNIGHT_RE = re.compile(r"T00:00:00(?:Z|[+-]00:?00)?$")
 _MIN_NON_NEGATIVE_FINDINGS = 3
 _MIN_EVIDENCE_CITATION_PCT = 50.0
 
+# Findings the timestamp_coverage gate leaves alone: negative findings and
+# state-not-event severities. Keep in step with _evaluate_finalize_gates.
+_NEGATIVE_PREFIX = "[NEGATIVE]"
+_TS_EXEMPT_SEVERITIES = ("info", "informational")
+
+
+def _timestamp_gap(title: str, severity: str, event_time_start: str | None) -> str | None:
+    """Return the timestamp_coverage gate's complaint for this finding, or None.
+
+    Mirrors the gate's exemptions exactly so the model hears about a missing
+    ``event_time_start`` when it submits the finding, not from the phase gate
+    several sessions later. A warning rather than a rejection: submitting
+    first and timestamping via ``update_finding`` is how existing runs work,
+    and a hard reject would push a weaker model to fabricate a timestamp.
+    """
+    if event_time_start or title.startswith(_NEGATIVE_PREFIX):
+        return None
+    if severity in _TS_EXEMPT_SEVERITIES:
+        return None
+    return (
+        "This finding has no event_time_start and will block finalize_report "
+        "(timestamp_coverage gate). Either call update_finding with a precise "
+        "ISO-8601 event_time_start copied from tool output, set severity to "
+        "'info' if it describes a state rather than a timed event, or prefix "
+        f"the title with '{_NEGATIVE_PREFIX}' if it records a hypothesis you "
+        "ruled out. Do not fabricate a timestamp."
+    )
+
 
 def _evaluate_finalize_gates(
     findings: list[Finding],
@@ -50,7 +78,7 @@ def _evaluate_finalize_gates(
     (which reports all gates).
     """
     gates: list[dict[str, object]] = []
-    non_negative = [f for f in findings if not f.title.startswith("[NEGATIVE]")]
+    non_negative = [f for f in findings if not f.title.startswith(_NEGATIVE_PREFIX)]
 
     # Gate 1: Minimum non-negative finding count
     count = len(non_negative)
@@ -70,7 +98,6 @@ def _evaluate_finalize_gates(
     # Configuration and informational findings may not have meaningful
     # timestamps (e.g., "BitLocker keys stored insecurely" is a state,
     # not a timed event). Exempt them to avoid incentivizing fabricated dates.
-    _TS_EXEMPT_SEVERITIES = ("info", "informational")
     ts_required = [f for f in non_negative if f.severity not in _TS_EXEMPT_SEVERITIES]
     missing_ts = [f for f in ts_required if not f.event_time_start]
     passed = len(missing_ts) == 0
@@ -198,7 +225,9 @@ def submit_finding(
 
     Timestamps must be precise ISO-8601 values copied from tool output;
     pass null rather than fabricating. Day-precision placeholders are
-    auto-nullified.
+    auto-nullified. A non-negative finding above 'info' severity needs
+    event_time_start before finalize_report will run; the response says
+    so in timestamp_warnings when it is missing.
 
     Returns finding_id on acceptance. Severity must be
     critical/high/medium/low/info. Confidence must be "confirmed"
@@ -232,6 +261,9 @@ def submit_finding(
     event_time_end, w = _sanitize_event_time(event_time_end)
     if w:
         ts_warnings.append(w)
+    gap = _timestamp_gap(title, severity, event_time_start)
+    if gap:
+        ts_warnings.append(gap)
 
     try:
         finding = Finding(
@@ -406,6 +438,9 @@ def update_finding(
     }
     if updated is not None:
         result["finding"] = updated.model_dump()
+        gap = _timestamp_gap(updated.title, updated.severity, updated.event_time_start)
+        if gap:
+            ts_warnings.append(gap)
     if ts_warnings:
         result["timestamp_warnings"] = ts_warnings
     return result
