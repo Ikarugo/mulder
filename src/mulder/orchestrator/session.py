@@ -12,6 +12,7 @@ import logging
 import os
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,7 @@ from claude_agent_sdk.types import (
     ResultMessage,
     SystemMessage,
     TextBlock,
+    ThinkingBlock,
     ToolUseBlock,
 )
 from rich.text import Text
@@ -37,6 +39,22 @@ from mulder.orchestrator.types import EffortLevel, PhaseResult, extract_json_fro
 from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _MessageStats:
+    """What one ``AssistantMessage`` contributed to the running session totals."""
+
+    in_tokens: int = 0
+    out_tokens: int = 0
+    tool_calls: int = 0
+    hit_context: bool = False
+    thinking_blocks: int = 0
+    thinking_chars: int = 0
+    #: A non-empty text block (after markup trimming) or a tool call.
+    has_output: bool = False
+    msg_id: str | None = None
+
 
 _MCP_SERVER_NAME: str = "mulder"
 _MCP_TOOL_PREFIX: str = f"mcp__{_MCP_SERVER_NAME}__"
@@ -497,6 +515,15 @@ class SessionExecutor:
         phase_in_tokens = 0
         phase_out_tokens = 0
         seen_message_ids: set[str] = set()
+        thinking_blocks = 0
+        thinking_chars = 0
+        # The CLI can emit one AssistantMessage per content block of the same
+        # API turn (same message_id), so silence is judged per turn, not per
+        # SDK message; the running turn is closed when the id changes or at
+        # the ResultMessage.
+        turn_id: str | None = None
+        turn_has_output = False
+        last_silent = False
         got_result = False
         hit_context_limit = False
         hit_turn_limit = False
@@ -517,25 +544,33 @@ class SessionExecutor:
                             break
 
                     elif isinstance(message, AssistantMessage):
-                        delta_in, delta_out, delta_tools, ctx_hit = (
-                            self._process_assistant_message(
-                                message,
-                                log_prefix,
-                                seen_message_ids,
-                                messages,
-                                tool_names_out=collected_tool_names,
-                                task_system=task_system,
-                            )
+                        stats = self._process_assistant_message(
+                            message,
+                            log_prefix,
+                            seen_message_ids,
+                            messages,
+                            tool_names_out=collected_tool_names,
+                            task_system=task_system,
                         )
-                        phase_in_tokens += delta_in
-                        phase_out_tokens += delta_out
-                        tool_count += delta_tools
-                        if ctx_hit:
+                        phase_in_tokens += stats.in_tokens
+                        phase_out_tokens += stats.out_tokens
+                        tool_count += stats.tool_calls
+                        thinking_blocks += stats.thinking_blocks
+                        thinking_chars += stats.thinking_chars
+                        if stats.hit_context:
                             hit_context_limit = True
+                        if stats.msg_id != turn_id:
+                            if turn_id is not None and not turn_has_output:
+                                self._log_silent_turn(log_prefix)
+                            turn_id, turn_has_output = stats.msg_id, False
+                        turn_has_output = turn_has_output or stats.has_output
 
                     elif isinstance(message, ResultMessage):
                         if _is_turns_exhausted(message):
                             hit_turn_limit = True
+                        last_silent = turn_id is not None and not turn_has_output
+                        if last_silent:
+                            self._log_silent_turn(log_prefix)
                         (
                             turns_used,
                             session_id,
@@ -549,6 +584,8 @@ class SessionExecutor:
                             turns_used,
                             phase_in_tokens,
                             phase_out_tokens,
+                            thinking=(thinking_blocks, thinking_chars),
+                            last_silent=last_silent,
                         )
 
                     self._extract_batch_ids_from_message(message, collected_batch_ids)
@@ -635,7 +672,7 @@ class SessionExecutor:
         messages: list[str],
         tool_names_out: list[str] | None = None,
         task_system: str = "",
-    ) -> tuple[int, int, int, bool]:
+    ) -> _MessageStats:
         """Process content blocks from an AssistantMessage.
 
         Args:
@@ -649,10 +686,11 @@ class SessionExecutor:
                 dashboard task panel for this system.
 
         Returns:
-            Tuple of (input_token_delta, output_token_delta,
-            tool_count_delta, hit_context_limit).
+            Token deltas, tool/thinking counts and whether the message
+            produced visible output (see ``_MessageStats``).
         """
         msg_id = getattr(message, "message_id", None)
+        stats = _MessageStats(msg_id=msg_id)
         msg_usage = getattr(message, "usage", None) or {}
         msg_in = msg_usage.get("input_tokens", 0) or 0
         msg_out = msg_usage.get("output_tokens", 0) or 0
@@ -661,16 +699,12 @@ class SessionExecutor:
         if msg_id is not None:
             seen_message_ids.add(msg_id)
 
-        delta_in = 0
-        delta_out = 0
         if is_new_step and (msg_in or msg_out) and not self._using_proxy:
-            delta_in = msg_in
-            delta_out = msg_out
+            stats.in_tokens = msg_in
+            stats.out_tokens = msg_out
             self._dashboard.add_tokens(msg_in, msg_out)
 
         pfx = f"[{log_prefix}] " if log_prefix else ""
-        tool_count = 0
-        hit_context = False
 
         for block in message.content:
             if isinstance(block, TextBlock):
@@ -680,6 +714,8 @@ class SessionExecutor:
                     if not text.strip():
                         continue
                 messages.append(text)
+                if text.strip():
+                    stats.has_output = True
 
                 category, _ = _classify_fatal_error(text)
                 if category == "auth":
@@ -696,7 +732,7 @@ class SessionExecutor:
                     )
 
                 if _is_context_exhausted(text):
-                    hit_context = True
+                    stats.hit_context = True
                     self._dashboard.log_info(f"{pfx}Context exhausted (detected in response)")
                 else:
                     display_text = text.replace("<thinking>", "").replace("</thinking>", "")
@@ -734,8 +770,16 @@ class SessionExecutor:
                         continue
                     if display_text.strip():
                         self._dashboard.log(f"{pfx}{display_text}" if pfx else display_text)
+            elif (
+                isinstance(block, ThinkingBlock) or type(block).__name__ == "RedactedThinkingBlock"
+            ):
+                # SDK 0.2.152 has no RedactedThinkingBlock; the name check
+                # covers one appearing later. Length only, never content.
+                stats.thinking_blocks += 1
+                stats.thinking_chars += len(getattr(block, "thinking", "") or "")
             elif isinstance(block, ToolUseBlock):
-                tool_count += 1
+                stats.tool_calls += 1
+                stats.has_output = True
                 tool_short = block.name.replace("mcp__mulder__", "")
                 if tool_names_out is not None:
                     tool_names_out.append(tool_short)
@@ -759,7 +803,26 @@ class SessionExecutor:
                     else:
                         self._dashboard.update_task(task_system, tool_short, "running")
 
-        return delta_in, delta_out, tool_count, hit_context
+        if stats.thinking_blocks:
+            logger.info(
+                "%sthinking: %d blocks, %d chars", pfx, stats.thinking_blocks, stats.thinking_chars
+            )
+        return stats
+
+    @staticmethod
+    def _log_silent_turn(log_prefix: str) -> None:
+        """Warn that an assistant turn produced no text and no tool use.
+
+        With reasoning enabled through a proxy the answer can land in the
+        thinking block with an empty text block, which otherwise looks like
+        silence in the log while the session ends (#199).
+        """
+        pfx = f"[{log_prefix}] " if log_prefix else ""
+        logger.warning(
+            "%sassistant turn had no text and no tool use (thinking-only or empty); "
+            "session may end here",
+            pfx,
+        )
 
     @staticmethod
     def _extract_tokens(message: Any) -> tuple[int, int]:
@@ -825,6 +888,8 @@ class SessionExecutor:
         turns_used: int,
         phase_in_tokens: int,
         phase_out_tokens: int,
+        thinking: tuple[int, int] = (0, 0),
+        last_silent: bool = False,
     ) -> tuple[int, str, bool, int, int]:
         """Process a ResultMessage and reconcile token counts.
 
@@ -835,6 +900,8 @@ class SessionExecutor:
             turns_used: Current turn count (overridden from message).
             phase_in_tokens: Running input token count.
             phase_out_tokens: Running output token count.
+            thinking: (block count, total chars) of thinking seen this query.
+            last_silent: The final assistant turn had no text and no tool use.
 
         Returns:
             Tuple of (turns_used, session_id, got_result,
@@ -865,11 +932,14 @@ class SessionExecutor:
         total_phase_tokens = phase_in_tokens + phase_out_tokens
         self._dashboard.log_phase_done(tool_count, turns_used, total_phase_tokens)
         logger.info(
-            "Query complete (model=%s): turns=%d, in=%d, out=%d",
+            "Query complete (model=%s): turns=%d, in=%d, out=%d, thinking=%d blocks/%d chars%s",
             model_label,
             turns_used,
             phase_in_tokens,
             phase_out_tokens,
+            thinking[0],
+            thinking[1],
+            f"; ended on a silent turn (stop_reason={message.stop_reason})" if last_silent else "",
         )
 
         return turns_used, session_id, True, phase_in_tokens, phase_out_tokens
