@@ -644,9 +644,19 @@ class Orchestrator:
                             phase, prompt_vars, follow_up_context, log_prefix
                         )
 
-                        if plan is None:
+                        if plan is None and follow_up_count == 0:
                             combined_result.success = False
                             return combined_result
+
+                        if plan is None or not plan.tasks:
+                            # A follow-up cycle with nothing more to run
+                            # ends here; the completed cycle's results
+                            # and findings stand and go to the gate.
+                            combined_result.turns_used += plan.turns_used if plan else 0
+                            self.dashboard.log_info(
+                                "Planner has nothing more to run; ending cycle"
+                            )
+                            break
 
                         combined_result.plans_executed += 1
 

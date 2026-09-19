@@ -161,15 +161,18 @@ class InvestigationResult:
     success: bool = False
 
 
-def extract_json_plan(messages: list[str]) -> dict[str, Any] | None:
+def extract_json_plan(messages: list[str], allow_empty: bool = False) -> dict[str, Any] | None:
     """Extract a JSON plan/results object from agent messages.
 
     Searches messages in reverse order for a valid JSON object
     containing the expected keys (at minimum "tasks"). Handles both
-    code-fenced and inline JSON. Tasks must be a non-empty list of objects.
+    code-fenced and inline JSON. Tasks must be a list of objects, and
+    non-empty unless *allow_empty* is set.
 
     Args:
         messages: List of text messages from an agent session.
+        allow_empty: Accept ``{"tasks": []}``. On a follow-up cycle an
+            empty plan means "nothing more to run", not a failed plan.
 
     Returns:
         Parsed dict if a valid plan JSON was found, None otherwise.
@@ -180,7 +183,7 @@ def extract_json_plan(messages: list[str]) -> dict[str, Any] | None:
             tasks = result.get("tasks")
             if (
                 isinstance(tasks, list)
-                and len(tasks) > 0
+                and (allow_empty or len(tasks) > 0)
                 and all(isinstance(task, dict) for task in tasks)
             ):
                 return result
@@ -212,7 +215,9 @@ def extract_follow_up_request(messages: list[str]) -> dict[str, Any] | None:
     """Extract a follow-up request JSON from analyst output.
 
     A valid follow-up must contain a "request" key with value
-    "additional_plan".
+    "additional_plan" and a non-empty "suggested_tools" list. An
+    analyst that emits the request shape while saying it is done (no
+    tools named) is not asking for another planner/executor cycle.
 
     Args:
         messages: List of text messages from an analyst session.
@@ -223,7 +228,9 @@ def extract_follow_up_request(messages: list[str]) -> dict[str, Any] | None:
     for msg in reversed(messages):
         result = _try_extract_json(msg, _FOLLOW_UP_REQUIRED_KEYS)
         if result is not None and result.get("request") == _FOLLOW_UP_REQUEST_VALUE:
-            return result
+            tools = result.get("suggested_tools")
+            if isinstance(tools, list) and len(tools) > 0:
+                return result
     return None
 
 
