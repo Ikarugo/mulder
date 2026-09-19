@@ -17,6 +17,7 @@ from mulder.orchestrator.proxy import (
     PROXY_MAX_OUTPUT_TOKENS,
     PROXY_REASONING_MAX_OUTPUT_TOKENS,
     ModelOverride,
+    ModelSettings,
     ProxyManager,
     _build_proxy_config,
     resolve_settings,
@@ -186,8 +187,10 @@ class TestProxyManager:
         params = {e["model_name"]: e["litellm_params"] for e in entries}
         assert params[KIMI]["allowed_openai_params"] == ["reasoning_effort"]
         assert params[KIMI]["max_tokens"] == 32768
+        assert params[KIMI]["model"] == "bedrock/converse/us.moonshotai.kimi-k3"
         assert "allowed_openai_params" not in params[LLAMA]
         assert params[LLAMA]["max_tokens"] == 4096
+        assert params[LLAMA]["model"] == LLAMA
 
         assert (pm.settings[KIMI].context_window, pm.settings[LLAMA].context_window) == (
             262144,
@@ -230,3 +233,36 @@ def test_build_proxy_config_without_settings_is_unknown() -> None:
     params = _build_proxy_config([KIMI], 4000)["model_list"][0]["litellm_params"]
     assert params["max_tokens"] == PROXY_REASONING_MAX_OUTPUT_TOKENS
     assert "allowed_openai_params" not in params
+
+
+class TestUnknownBedrockRoute:
+    """Unmapped bedrock/ ids go through the explicit Converse route; the
+    default route infers the wrong provider and streams an empty end_turn."""
+
+    def _entry(self, model: str, settings: ModelSettings) -> dict[str, object]:
+        config = _build_proxy_config([model], 4000, {model: settings})
+        entry = config["model_list"][0]
+        assert entry["model_name"] == model
+        params: dict[str, object] = entry["litellm_params"]
+        return params
+
+    def test_unknown_bedrock_model_is_rewritten_with_its_settings(self) -> None:
+        params = self._entry(KIMI, ModelSettings(max_output_tokens=32768, reasoning=True))
+        assert params["model"] == "bedrock/converse/us.moonshotai.kimi-k3"
+        assert params["max_tokens"] == 32768
+        assert params["allowed_openai_params"] == ["reasoning_effort"]
+
+    def test_known_bedrock_model_untouched(self) -> None:
+        assert self._entry(LLAMA, ModelSettings(known=True))["model"] == LLAMA
+
+    @pytest.mark.parametrize("model", ["openai/gpt-4o", "azure/gpt-4o"])
+    def test_non_bedrock_untouched(self, model: str) -> None:
+        assert self._entry(model, ModelSettings())["model"] == model
+
+    def test_ollama_still_uses_chat_route(self) -> None:
+        assert self._entry("ollama/qwen3", ModelSettings())["model"] == "ollama_chat/qwen3"
+
+    def test_resolve_settings_records_whether_litellm_knows_the_model(self) -> None:
+        assert resolve_settings(ModelOverride(), None).known is False
+        assert resolve_settings(ModelOverride(reasoning=True), None).known is False
+        assert resolve_settings(ModelOverride(), False).known is True

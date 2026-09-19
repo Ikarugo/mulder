@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from mulder.orchestrator.proxy import (
+    ModelSettings,
     ProxyManager,
     _build_proxy_config,
     is_proxy_model,
@@ -53,7 +54,8 @@ class TestBuildProxyConfig:
         assert entry["litellm_params"]["model"] == "ollama_chat/qwen3:latest"
 
     def test_single_model(self) -> None:
-        config = _build_proxy_config(["bedrock/meta.llama3-1-70b"], 4000)
+        known = {"bedrock/meta.llama3-1-70b": ModelSettings(known=True)}
+        config = _build_proxy_config(["bedrock/meta.llama3-1-70b"], 4000, known)
         assert "model_list" in config
         assert len(config["model_list"]) == 1
         entry = config["model_list"][0]

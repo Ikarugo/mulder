@@ -124,11 +124,13 @@ class TestProxyManagerStart:
         assert f"no reasoning support for {LLAMA}" in caplog.text
         assert DEEPSEEK not in caplog.text
 
-    def test_no_thinking_skips_the_lookup(self, caplog: pytest.LogCaptureFixture) -> None:
+    def test_no_thinking_serves_without_reasoning(self, caplog: pytest.LogCaptureFixture) -> None:
         written = self._start(False, caplog)
-        assert written["_queried"] is False
+        # The lookup still runs: it decides the bedrock/ route (see #204).
+        assert written["_queried"] is True
         assert written["_reasoning"] == set()
         assert "allowed_openai_params" not in _params(written, DEEPSEEK)
+        assert _params(written, DEEPSEEK)["model"] == DEEPSEEK
         assert "no reasoning support" not in caplog.text
 
 
