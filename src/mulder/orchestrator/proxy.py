@@ -137,7 +137,19 @@ def resolve_settings(
 #: DeepSeek (and other non-Claude reasoning models) silently ignore. Listing
 #: the param here makes LiteLLM forward the raw string instead, which is the
 #: shape those models honour. See issue #193.
-_REASONING_PARAMS: dict[str, Any] = {"allowed_openai_params": ["reasoning_effort"]}
+_REASONING_PARAMS: list[str] = ["reasoning_effort"]
+
+#: LiteLLM's Bedrock Converse config lists ``tools`` as a supported param
+#: only for model families it hard-codes or for models whose map entry says
+#: ``supports_function_calling``. For an unmapped model neither holds, so
+#: ``drop_params: true`` silently strips ``tools`` from every request (the
+#: Converse body goes out without ``toolConfig``) and the model can only
+#: answer in text. Allowing the param explicitly skips that check; the
+#: Converse transformation and stream decoder handle ``toolUse`` for any
+#: model. ``model_info.supports_function_calling`` does not work here: the
+#: router registers it under ``bedrock/...`` while the check looks up
+#: ``bedrock_converse/...``. See issue #207.
+_UNMAPPED_BEDROCK_PARAMS: list[str] = ["tools"]
 
 
 def is_proxy_model(model_id: str) -> bool:
@@ -186,7 +198,9 @@ def _build_proxy_config(
     the native chat API so streamed tool calls retain their structure.
     Each model's ``max_tokens`` and raw ``reasoning_effort`` passthrough
     (see :data:`_REASONING_PARAMS`) come from its :class:`ModelSettings`;
-    a model without settings is served as unknown.
+    a model without settings is served as unknown. An unmapped ``bedrock/``
+    model also gets ``tools`` allowed explicitly (see
+    :data:`_UNMAPPED_BEDROCK_PARAMS`).
 
     Args:
         models: Unique litellm model IDs to serve.
@@ -199,13 +213,19 @@ def _build_proxy_config(
     model_list = []
     for model_id in models:
         s = (settings or {}).get(model_id) or ModelSettings()
+        route = _litellm_model(model_id, s.known)
+        allowed: list[str] = []
+        if s.reasoning:
+            allowed += _REASONING_PARAMS
+        if route.startswith("bedrock/converse/"):
+            allowed += _UNMAPPED_BEDROCK_PARAMS
         model_list.append(
             {
                 "model_name": model_id,
                 "litellm_params": {
-                    "model": _litellm_model(model_id, s.known),
+                    "model": route,
                     "max_tokens": s.max_output_tokens,
-                    **(_REASONING_PARAMS if s.reasoning else {}),
+                    **({"allowed_openai_params": allowed} if allowed else {}),
                 },
             }
         )

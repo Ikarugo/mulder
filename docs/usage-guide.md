@@ -463,8 +463,12 @@ Converse route (`litellm_params.model: bedrock/converse/<id>`, the public
 name is unchanged). For an unmapped id LiteLLM 1.101.0 infers the provider
 from the id itself (`moonshot` for Kimi) and a streaming request, which is
 what Claude Code always sends, comes back as an empty `end_turn` with no
-error; the Converse route streams the thinking and text correctly. Models
-LiteLLM knows keep their id as given.
+error; the Converse route streams the thinking and text correctly. The same
+model also gets `litellm_params.allowed_openai_params: [tools]`: LiteLLM
+treats `tools` as supported on Bedrock Converse only for models its map
+knows, and otherwise `drop_params` strips them from every request, so an
+unmapped model never sees a tool and can only answer in text (issue #207).
+Models LiteLLM knows keep their id as given.
 
 Where a config file is awkward, such as a container run, the same three keys
 are read from the environment and applied to every proxy model in the run
