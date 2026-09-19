@@ -38,6 +38,20 @@ _MASTER_KEY: str = "sk-mulder-proxy"
 #: it does not recognise) would otherwise override the proxy default.
 PROXY_MAX_OUTPUT_TOKENS: int = 8192
 
+#: Same, for models that reason. Reasoning tokens count against ``max_tokens``
+#: and a truncated reasoning chain yields no tool call, so these get Claude
+#: Code's own default cap (32000, rounded). Claude Code's auto-compact reserve
+#: is ``min(cap, 20000) + 13000``, so going above 20000 costs no more context.
+PROXY_REASONING_MAX_OUTPUT_TOKENS: int = 32768
+
+#: LiteLLM's ``/v1/messages`` adapter turns Claude Code's ``thinking`` +
+#: ``output_config.effort`` into ``reasoning_effort``; Bedrock's Converse
+#: mapping then rewrites that back into Anthropic's ``thinking`` block, which
+#: DeepSeek (and other non-Claude reasoning models) silently ignore. Listing
+#: the param here makes LiteLLM forward the raw string instead, which is the
+#: shape those models honour. See issue #193.
+_REASONING_PARAMS: dict[str, Any] = {"allowed_openai_params": ["reasoning_effort"]}
+
 
 def is_proxy_model(model_id: str) -> bool:
     """Determine whether a model ID requires routing through a LiteLLM proxy.
@@ -55,31 +69,47 @@ def is_proxy_model(model_id: str) -> bool:
     return any(model_id.startswith(prefix) for prefix in _LITELLM_PREFIXES)
 
 
-def _build_proxy_config(models: list[str], port: int) -> dict[str, Any]:
+def _litellm_model(model_id: str) -> str:
+    """The provider route LiteLLM should use for a public model name.
+
+    Ollama models go through the native chat API so streamed tool calls
+    retain their structure; everything else is served as named.
+    """
+    if model_id.startswith("ollama/"):
+        return "ollama_chat/" + model_id.removeprefix("ollama/")
+    return model_id
+
+
+def _build_proxy_config(
+    models: list[str], port: int, reasoning_models: frozenset[str] | set[str] = frozenset()
+) -> dict[str, Any]:
     """Build a LiteLLM proxy configuration for the given models.
 
     Preserves each public model name while routing Ollama models through
     the native chat API so streamed tool calls retain their structure.
+    Models in *reasoning_models* get the raw ``reasoning_effort`` passthrough
+    and the larger output cap (see :data:`_REASONING_PARAMS`).
 
     Args:
         models: Unique litellm model IDs to serve.
         port: Port number for the proxy server.
+        reasoning_models: Subset of *models* to serve with reasoning enabled.
 
     Returns:
         LiteLLM config dict suitable for YAML serialization.
     """
     model_list = []
     for model_id in models:
+        reasoning = model_id in reasoning_models
         model_list.append(
             {
                 "model_name": model_id,
                 "litellm_params": {
-                    "model": (
-                        "ollama_chat/" + model_id.removeprefix("ollama/")
-                        if model_id.startswith("ollama/")
-                        else model_id
+                    "model": _litellm_model(model_id),
+                    "max_tokens": (
+                        PROXY_REASONING_MAX_OUTPUT_TOKENS if reasoning else PROXY_MAX_OUTPUT_TOKENS
                     ),
-                    "max_tokens": PROXY_MAX_OUTPUT_TOKENS,
+                    **(_REASONING_PARAMS if reasoning else {}),
                 },
             }
         )
@@ -96,6 +126,54 @@ def _build_proxy_config(models: list[str], port: int) -> dict[str, Any]:
             "master_key": _MASTER_KEY,
         },
     }
+
+
+_SUPPORTS_REASONING_SCRIPT = """\
+import json, sys, litellm
+def check(m):
+    try:
+        return bool(litellm.supports_reasoning(model=m))
+    except Exception:
+        return False
+print(json.dumps({m: check(m) for m in sys.argv[1:]}))
+"""
+
+
+def reasoning_models(litellm_bin: str, models: list[str], timeout: float = 60.0) -> set[str]:
+    """Which of *models* LiteLLM's model map says support reasoning.
+
+    Runs :func:`litellm.supports_reasoning` inside LiteLLM's own venv (the
+    interpreter next to the ``litellm`` binary) so litellm stays out of
+    mulder's venv. Any failure yields an empty set with a warning, which
+    means "serve without reasoning" rather than "refuse to start".
+
+    Args:
+        litellm_bin: Resolved path of the ``litellm`` executable.
+        models: Public model names as passed on the command line.
+        timeout: Seconds to wait for the check.
+
+    Returns:
+        The public names whose LiteLLM route supports reasoning.
+    """
+    import json
+
+    python = Path(litellm_bin).resolve().parent / "python"
+    if not python.exists():
+        logger.warning("No interpreter next to %s; serving without reasoning", litellm_bin)
+        return set()
+    try:
+        proc = subprocess.run(
+            [str(python), "-c", _SUPPORTS_REASONING_SCRIPT, *(_litellm_model(m) for m in models)],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=True,
+        )
+        supported = json.loads(proc.stdout)
+    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+        logger.warning("Could not query LiteLLM for reasoning support: %s", exc)
+        return set()
+    return {m for m in models if supported.get(_litellm_model(m)) is True}
 
 
 def _wait_for_health(port: int, timeout: float = _HEALTH_CHECK_TIMEOUT) -> bool:
@@ -197,6 +275,7 @@ class ProxyManager:
         models: list[str],
         port: int | None = None,
         config_path: str | None = None,
+        thinking: bool = True,
     ) -> None:
         """Initialize the proxy manager.
 
@@ -207,14 +286,19 @@ class ProxyManager:
             config_path: Optional path to a user-provided LiteLLM config
                 YAML. When provided, the auto-generated config is skipped
                 and this file is used instead.
+            thinking: Enable reasoning for models that support it. False
+                (``--no-thinking``) serves every model without it.
         """
         import os
 
         self._models = models
         self._port = port or int(os.environ.get("MULDER_PROXY_PORT", _DEFAULT_PORT))
         self._config_path = config_path
+        self._thinking = thinking
         self._process: subprocess.Popen[bytes] | None = None
         self._temp_config: Path | None = None
+        #: Public names served with reasoning on; filled by :meth:`start`.
+        self.reasoning_models: set[str] = set()
 
     @property
     def port(self) -> int:
@@ -263,7 +347,16 @@ class ProxyManager:
         if self._config_path:
             config_file = self._config_path
         else:
-            config = _build_proxy_config(self._models, self._port)
+            if self._thinking:
+                self.reasoning_models = reasoning_models(litellm_bin, self._models)
+                for model in self._models:
+                    if model not in self.reasoning_models:
+                        logger.warning(
+                            "Thinking is on but LiteLLM reports no reasoning support for %s; "
+                            "it will run without reasoning (pass --no-thinking to silence)",
+                            model,
+                        )
+            config = _build_proxy_config(self._models, self._port, self.reasoning_models)
             fd, tmp_path = tempfile.mkstemp(suffix=".yaml", prefix="mulder_litellm_")
             self._temp_config = Path(tmp_path)
             os.close(fd)

@@ -28,7 +28,11 @@ from rich.text import Text
 from mulder.orchestrator.display import InvestigationDashboard
 from mulder.orchestrator.errors import AuthenticationError, ModelNotAvailableError
 from mulder.orchestrator.models import ModelConfig
-from mulder.orchestrator.proxy import PROXY_MAX_OUTPUT_TOKENS, is_proxy_model
+from mulder.orchestrator.proxy import (
+    PROXY_MAX_OUTPUT_TOKENS,
+    PROXY_REASONING_MAX_OUTPUT_TOKENS,
+    is_proxy_model,
+)
 from mulder.orchestrator.types import EffortLevel, PhaseResult, extract_json_from_text
 from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
 
@@ -329,6 +333,8 @@ class SessionExecutor:
         #: Context window per proxy-routed model, filled by the orchestrator
         #: from the proxy once it is healthy.
         self._proxy_windows: dict[str, int] = {}
+        #: Proxy-routed models served with reasoning on; same source.
+        self._proxy_reasoning: set[str] = set()
         self._no_thinking = no_thinking
         self._show_cli_stderr = show_cli_stderr
 
@@ -362,7 +368,12 @@ class SessionExecutor:
         """
         if not is_proxy_model(model):
             return {}
-        env = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(PROXY_MAX_OUTPUT_TOKENS)}
+        cap = (
+            PROXY_REASONING_MAX_OUTPUT_TOKENS
+            if model in self._proxy_reasoning
+            else PROXY_MAX_OUTPUT_TOKENS
+        )
+        env = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(cap)}
         window = self._proxy_windows.get(model)
         if window:
             env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
