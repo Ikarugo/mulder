@@ -92,7 +92,10 @@ Synchronous tool calls pass through an async resource gate before execution (via
 ```mermaid
 flowchart LR
     request["MCP Request"] --> asyncWrapper["Async Wrapper\n(_wrap_sync_tool)"]
-    asyncWrapper --> resourceCheck{"Memory/CPU\nunder limit?"}
+    asyncWrapper --> exempt{"unthrottled\ntool?"}
+    exempt -->|"Yes"| plainThread["Worker Thread\n(default limiter)"]
+    plainThread --> syncTool
+    exempt -->|"No"| resourceCheck{"Memory/CPU\nunder limit?"}
     resourceCheck -->|"No"| wait["anyio.sleep\n(5s intervals)"]
     wait --> resourceCheck
     resourceCheck -->|"Yes"| threadPool["Worker Thread\n(CapacityLimiter)"]
@@ -101,6 +104,8 @@ flowchart LR
 ```
 
 The `CapacityLimiter` bounds concurrent tool execution to the `--workers` count (default 8). The `--mem-limit` and `--cpu-limit` flags set thresholds (default 90%) above which tools wait before proceeding.
+
+Cheap control and query tools are exempt from both the gate and the `CapacityLimiter`, declared with `@tool_access(..., unthrottled=True)` on the tool itself (`tool_access.UNTHROTTLED`). These are the job-control tools (`start_extraction_batch`, `check_extraction_status`, `get_completed_results`, `wait`, `wait_all`), which only enqueue or poll in-memory job state and are the executor's only way to learn that background work finished, plus small DB reads (`open_case`, `list_cases`, `list_sources`, `get_source_stats`, `get_findings`, `get_investigation_summary`, `check_finalize_readiness`). Without the exemption a fully loaded host held the executor's `wait` behind the very jobs it was waiting on, and each blocked `wait` also pinned a `--workers` slot for its whole poll loop. Background jobs still gate themselves in the `JobStore` worker thread (`wait_for_resources`), so exempting `start_extraction_batch` does not let heavy work start under pressure. Tools that run external binaries or scan indexed text (`search`, `get_raw_output`, every `run_*` / parser / carver / YARA tool) stay gated.
 
 ## Orchestration Pipeline
 

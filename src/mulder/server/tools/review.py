@@ -255,7 +255,7 @@ def audit_tool_coverage() -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST | Role.REPORT)
+@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST | Role.REPORT, unthrottled=True)
 def check_finalize_readiness() -> dict[str, object]:
     """Check whether the investigation meets all finalize_report requirements.
 
@@ -357,7 +357,8 @@ def track_progress(
     | Role.CROSS_ANALYST
     | Role.NARRATIVE_PLANNER
     | Role.NARRATIVE_ANALYST
-    | Role.REPORT
+    | Role.REPORT,
+    unthrottled=True,
 )
 def get_investigation_summary() -> dict[str, object]:
     """Return a compact progress dashboard for the current investigation.
