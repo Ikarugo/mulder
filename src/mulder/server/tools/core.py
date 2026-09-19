@@ -211,13 +211,12 @@ def _search_regex(
     matches: list[dict[str, object]] = []
     total_regex_matches = 0
     cursor = 0
-    src_prefix = source or ""
     source_map: dict[int, str] = {s.source_id: s.source_name for s in db.get_sources()}
     exclude_set = exclude_sources or []
 
     while True:
         chunk, _total = db.get_windows_page(
-            src_prefix, after_id=cursor, limit=_CHUNK, source_ids=source_ids
+            source, after_id=cursor, limit=_CHUNK, source_ids=source_ids
         )
         if not chunk:
             break

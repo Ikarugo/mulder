@@ -909,12 +909,15 @@ class CaseDB:
 
     def get_windows_page(
         self,
-        source_prefix: str,
+        source_prefix: str | None,
         after_id: int = 0,
         limit: int = 500,
         source_ids: list[int] | None = None,
     ) -> tuple[list[WindowRow], int]:
         """Fetch a page of windows using keyset pagination.
+
+        A falsy *source_prefix* (``None`` or ``""``) means no source
+        filter: the page spans every window in the case.
 
         Uses ``window_id > after_id`` instead of SQL OFFSET, so seeking
         to any position is O(log n) via the primary key index regardless
@@ -928,24 +931,28 @@ class CaseDB:
 
         Returns ``(windows, total_count)``.
         """
-        source_where = or_(
-            sources_t.c.source_name == source_prefix,
-            sources_t.c.source_name.like(source_prefix + ".%"),
-        )
+        conds = []
+        if source_prefix:
+            conds.append(
+                or_(
+                    sources_t.c.source_name == source_prefix,
+                    sources_t.c.source_name.like(source_prefix + ".%"),
+                )
+            )
         if source_ids is not None:
-            source_where = source_where & windows_t.c.source_id.in_(source_ids)
+            conds.append(windows_t.c.source_id.in_(source_ids))
 
         count_stmt = (
             select(func.count())
             .select_from(windows_t.join(sources_t, windows_t.c.source_id == sources_t.c.source_id))
-            .where(source_where)
+            .where(*conds)
         )
 
         j = windows_t.join(sources_t, windows_t.c.source_id == sources_t.c.source_id)
         page_stmt = (
             select(windows_t)
             .select_from(j)
-            .where(source_where)
+            .where(*conds)
             .where(windows_t.c.window_id > after_id)
             .order_by(windows_t.c.window_id)
             .limit(limit)
