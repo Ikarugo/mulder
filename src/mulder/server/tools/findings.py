@@ -740,6 +740,11 @@ _IOC_PATTERN = re.compile(
 )
 
 _SEVERITY_RANK = SEVERITY_ORDER
+# Guards for the model-callable dedup: a live merge below the default
+# threshold, or one that absorbs more than a quarter of the case, is refused.
+_MIN_DEDUP_THRESHOLD = 0.4
+_MAX_DEDUP_MERGE_FRACTION = 0.25
+_MERGED_HEADER = "\n\n**Merged findings:**\n"
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -889,11 +894,15 @@ def _group_duplicates(
 def _consolidate_group(
     group: list[Finding],
 ) -> tuple[Finding, list[str]]:
-    """Select the representative finding and merge metadata from duplicates.
+    """Select the representative finding and fold the duplicates into it.
 
-    Keeps the finding with the longest description. Merges unique
-    evidence_refs, sources, and MITRE IDs from all group members.
-    Elevates severity to the highest in the group.
+    Keeps the finding with the longest description as the survivor. The
+    merge is lossless for everything the report is built from: the
+    survivor gets the union of ``evidence_refs``, ``sources`` and
+    ``mitre_attack_ids``, the widest ``event_time_start``/``event_time_end``,
+    the highest severity and confidence, and every absorbed finding's
+    title and description appended under a ``Merged findings`` section
+    (with its finding_id, so the audit trail survives the delete).
 
     Args:
         group: List of similar findings to consolidate.
@@ -903,11 +912,14 @@ def _consolidate_group(
     """
     best = max(group, key=lambda f: len(f.description))
     to_delete: list[str] = []
+    absorbed: list[str] = []
 
     all_sources: set[str] = set()
     all_refs: set[str] = set()
     all_mitre: set[str] = set()
     highest_severity = best.severity
+    starts = [f.event_time_start for f in group if f.event_time_start]
+    ends = [f.event_time_end or f.event_time_start for f in group if f.event_time_start]
 
     for f in group:
         all_sources.update(f.sources)
@@ -917,11 +929,22 @@ def _consolidate_group(
             highest_severity = f.severity
         if f.finding_id != best.finding_id:
             to_delete.append(f.finding_id)
+            absorbed.append(
+                f"- **{f.title}** ({f.finding_id}, {f.severity}, {f.confidence}): "
+                f"{f.description.strip()}"
+            )
 
     best.sources = sorted(all_sources)
     best.evidence_refs = sorted(all_refs)
     best.mitre_attack_ids = sorted(all_mitre)
     best.severity = highest_severity
+    if any(f.confidence == "confirmed" for f in group):
+        best.confidence = "confirmed"
+    if starts:
+        best.event_time_start = min(starts)
+        best.event_time_end = max(ends)
+    if absorbed:
+        best.description = best.description.rstrip() + _MERGED_HEADER + "\n".join(absorbed)
 
     return best, to_delete
 
@@ -937,42 +960,97 @@ def deduplicate_findings(
 
     Groups findings by evidence overlap, source overlap, time window
     overlap, MITRE technique overlap, title similarity, and IOC overlap.
-    For each duplicate group, keeps the most detailed finding and merges
-    system-specific metadata from the others.
+    For each duplicate group, keeps the most detailed finding and folds
+    the others into it: union of evidence_refs, sources and MITRE ids,
+    widest time range, highest severity and confidence, and each absorbed
+    finding's title and description appended under a "Merged findings"
+    section. Absorbed findings are deleted; their text and evidence live
+    on in the survivor.
+
+    Always call with dry_run=True first and review ``groups`` before
+    applying. Keep the default threshold: lowering it merges findings
+    that describe different events into one aggregate. A live call
+    (dry_run=False) is refused below the default threshold, and refused
+    when it would absorb more than 25% of the case's findings.
 
     Args:
         case_id: Active case identifier.
         similarity_threshold: Minimum combined similarity score (0.0 to
-            1.0) to consider two findings as duplicates. Default 0.4.
+            1.0) to consider two findings as duplicates. Default 0.4;
+            values below 0.4 are only allowed with dry_run=True.
         dry_run: If True, return the proposed groups without modifying
             findings.
 
     Returns:
-        Dict with ``groups`` (proposed or applied merge groups),
-        ``merged_count`` (findings removed), and ``kept_count``
-        (findings retained).
+        Dict with ``groups`` (proposed or applied merge groups, each with
+        ``representative_id``, ``merged_ids`` and ``merged_titles``),
+        ``absorbed`` (representative_id -> absorbed finding ids),
+        ``merged_count`` (findings removed), ``kept_count`` (findings
+        retained) and a human-readable ``summary``.
     """
     ctx = get_ctx()
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
+    params: dict[str, object] = {
+        "case_id": case_id,
+        "similarity_threshold": similarity_threshold,
+        "dry_run": dry_run,
+    }
+
+    if similarity_threshold < _MIN_DEDUP_THRESHOLD and not dry_run:
+        return error_response(
+            tc_id,
+            "deduplicate_findings",
+            params,
+            f"similarity_threshold={similarity_threshold} is below the minimum "
+            f"{_MIN_DEDUP_THRESHOLD} for a live merge. Low thresholds merge findings "
+            "that describe different events into one aggregate.",
+            error_type="invalid_params",
+            suggestion=(
+                f"Re-run with similarity_threshold>={_MIN_DEDUP_THRESHOLD}, or use "
+                "dry_run=True to preview. To combine two specific findings, edit one "
+                "with update_finding and delete the other with delete_finding."
+            ),
+        )
 
     findings = ctx.db.get_findings()
     groups = _group_duplicates(findings, similarity_threshold)
 
     multi_groups = [g for g in groups if len(g) > 1]
+    would_merge = sum(len(g) - 1 for g in multi_groups)
+    max_merge = int(len(findings) * _MAX_DEDUP_MERGE_FRACTION)
+    if would_merge > max_merge and not dry_run:
+        return error_response(
+            tc_id,
+            "deduplicate_findings",
+            params,
+            f"Refused: this call would absorb {would_merge} of {len(findings)} findings "
+            f"(limit {max_merge}, {_MAX_DEDUP_MERGE_FRACTION:.0%} per call). That is "
+            "almost certainly over-merging distinct findings into aggregates.",
+            error_type="invalid_params",
+            suggestion=(
+                "Run with dry_run=True and review the proposed groups. Merge only true "
+                "duplicates, one pair at a time, with update_finding + delete_finding."
+            ),
+        )
+
     merged_count = 0
     kept_count = len(findings)
     group_summaries: list[dict[str, Any]] = []
+    absorbed: dict[str, list[str]] = {}
 
     for group in multi_groups:
+        titles = {f.finding_id: f.title for f in group}
         representative, delete_ids = _consolidate_group(group)
         affected_systems = sorted({s for f in group for s in f.sources})
         suffix = f"\n\n**Affected Systems:** {', '.join(affected_systems)}"
+        absorbed[representative.finding_id] = delete_ids
 
         group_summary: dict[str, Any] = {
             "representative_id": representative.finding_id,
             "representative_title": representative.title,
             "merged_ids": delete_ids,
+            "merged_titles": [titles[fid] for fid in delete_ids],
             "affected_systems": affected_systems,
             "group_size": len(group),
         }
@@ -985,9 +1063,12 @@ def deduplicate_findings(
                 representative.finding_id,
                 description=representative.description,
                 severity=representative.severity,
+                confidence=representative.confidence,
                 sources=representative.sources,
                 evidence_refs=representative.evidence_refs,
                 mitre_attack_ids=representative.mitre_attack_ids,
+                event_time_start=representative.event_time_start,
+                event_time_end=representative.event_time_end,
             )
             for fid in delete_ids:
                 ctx.db.delete_finding(fid)
@@ -996,26 +1077,32 @@ def deduplicate_findings(
     if not dry_run:
         kept_count = len(findings) - merged_count
 
+    verb = "would be absorbed" if dry_run else "absorbed"
     result: dict[str, Any] = {
         "tool_call_id": tc_id,
         "status": "success",
         "dry_run": dry_run,
         "groups": group_summaries,
-        "merged_count": merged_count if not dry_run else 0,
-        "would_merge_count": sum(len(g["merged_ids"]) for g in group_summaries),
+        "absorbed": absorbed,
+        "merged_count": merged_count,
+        "would_merge_count": would_merge,
         "kept_count": kept_count,
         "total_groups": len(multi_groups),
+        "summary": (
+            f"{would_merge} of {len(findings)} findings {verb} into "
+            f"{len(multi_groups)} survivor(s). Absorbed findings keep their text and "
+            "evidence in the survivor's 'Merged findings' section; review with "
+            "get_findings."
+        ),
     }
 
     elapsed = (time.monotonic() - t0) * 1000
+    if not dry_run:
+        params["absorbed"] = absorbed
     ctx.audit.log_tool_call(
         tool_call_id=tc_id,
         tool_name="deduplicate_findings",
-        params={
-            "case_id": case_id,
-            "similarity_threshold": similarity_threshold,
-            "dry_run": dry_run,
-        },
+        params=params,
         output_hash=hash_output(result),
         duration_ms=elapsed,
     )

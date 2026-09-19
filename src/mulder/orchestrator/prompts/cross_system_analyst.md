@@ -95,7 +95,10 @@ FINDING CONSOLIDATION (MANDATORY):
 - When the same artifact appears across multiple systems, consolidate
   into a single finding using update_finding. Title pattern:
   "Environment-Wide [artifact] Across N Systems".
-- Use deduplicate_findings to merge duplicates.
+- Use deduplicate_findings to merge duplicates: dry_run=true first,
+  review the groups, then apply at the default similarity_threshold
+  (0.4). Never lower the threshold; that collapses distinct findings
+  into one aggregate.
 - Each finding should represent a unique threat or technique, not
   per-host observations of the same artifact.
 

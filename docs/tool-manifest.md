@@ -1773,15 +1773,15 @@ Retrieve paginated findings submitted in this case.
 
 ### deduplicate_findings
 
-Identify and consolidate duplicate findings across systems.
+Identify and consolidate duplicate findings across systems. Merges are lossless: the survivor gets the union of evidence_refs, sources and MITRE ids, the widest time range, the highest severity and confidence, and each absorbed finding's title and description under a "Merged findings" section. A live call is refused below the default threshold or when it would absorb more than 25% of findings; use `dry_run=true` first.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | case_id | str | yes | Active case identifier |
-| similarity_threshold | float | no | Minimum similarity score (default 0.4) |
+| similarity_threshold | float | no | Minimum similarity score (default 0.4; lower only with dry_run) |
 | dry_run | bool | no | Preview without modifying (default False) |
 
-**Returns:** `groups[]`, `merged_count`, `kept_count`
+**Returns:** `groups[]` (with `merged_ids`, `merged_titles`), `absorbed`, `merged_count`, `would_merge_count`, `kept_count`, `summary`
 
 **Roles:** `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT`
 
