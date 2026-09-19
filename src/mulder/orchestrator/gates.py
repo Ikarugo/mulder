@@ -343,6 +343,10 @@ def validate_narrative(
         )
         if not gate_passed:
             gaps.append(f"{gate_name}: {gate_detail}")
+        elif gate.get("advisory"):
+            # Passed with a warning: surfaced in the log, never a gap, so
+            # it cannot trigger a retry or fail the run.
+            logger.warning("Narrative gate: %s: %s", gate_name, gate_detail)
 
     # Fail when no checks were evaluated (prevents vacuous pass)
     if not checks:

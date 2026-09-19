@@ -160,6 +160,26 @@ class TestValidateNarrativeDeferral:
         result = validate_narrative(summary={"remaining_work": []}, readiness=readiness)
         assert not result.passed
 
+    def test_advisory_gate_passes_without_gaps(self) -> None:
+        """An advisory readiness gate is logged, never a gap, so no retry follows."""
+        readiness = {
+            "gates": [
+                {"name": "minimum_findings", "passed": True, "detail": "3 findings"},
+                {
+                    "name": "evidence_citation_coverage",
+                    "passed": True,
+                    "advisory": True,
+                    "detail": "Advisory: 18.8% of evidence sources cited (3/16 distinct names)",
+                },
+            ]
+        }
+        result = validate_narrative(summary={"remaining_work": []}, readiness=readiness)
+        assert result.passed
+        assert result.gaps == []
+        check = next(c for c in result.checks if c.name == "evidence_citation_coverage")
+        assert check.passed
+        assert "18.8%" in check.detail
+
 
 class TestExtractionRetryFailure:
     """Tests for validate_extraction retry-aware failure tracking."""

@@ -33,7 +33,38 @@ logger = logging.getLogger(__name__)
 _MIDNIGHT_RE = re.compile(r"T00:00:00(?:Z|[+-]00:?00)?$")
 
 _MIN_NON_NEGATIVE_FINDINGS = 3
-_MIN_EVIDENCE_CITATION_PCT = 50.0
+
+# evidence_citation_coverage: below _CITATION_ADVISORY_PCT the gate still
+# passes but carries an advisory; below _MIN_CITED_SOURCES distinct cited
+# sources it blocks. An absolute floor rather than a fraction so breadth of
+# extraction (hundreds of feature files) is not penalised (issue #221).
+_CITATION_ADVISORY_PCT = 25.0
+_MIN_CITED_SOURCES = 3
+
+# Sources that are bookkeeping or derived from the run itself rather than
+# evidence a finding would cite. Excluded from the citation denominator.
+_AUXILIARY_SOURCES = frozenset(
+    {"bulk.bulk_extractor", "bulk.duplicates", "composite.correlation", "enrichment.iocs"}
+)
+_AUXILIARY_PREFIXES = ("registry.query.",)
+_AUXILIARY_SUFFIXES = (".stats", ".manifest", ".manifest.json")
+
+
+def is_evidence_source(source: SourceRow) -> bool:
+    """Return True when *source* is evidence a finding could cite.
+
+    Empty sources, run bookkeeping (extractor reports, stats, manifests),
+    ad-hoc registry query caches, and outputs derived from the findings
+    themselves (IOC enrichment, correlation) are not.
+    """
+    name = source.source_name
+    return (
+        source.line_count > 0
+        and name not in _AUXILIARY_SOURCES
+        and not name.startswith(_AUXILIARY_PREFIXES)
+        and not name.endswith(_AUXILIARY_SUFFIXES)
+    )
+
 
 # Findings the timestamp_coverage gate leaves alone: negative findings and
 # state-not-event severities. Keep in step with _evaluate_finalize_gates.
@@ -141,40 +172,52 @@ def _evaluate_finalize_gates(
         )
     gates.append({"name": "audit_tools_called", "passed": passed, "detail": detail})
 
-    # Gate 5: Evidence citation coverage (advisory, not blocking)
-    # A low citation percentage is a signal to investigate more sources,
-    # NOT an instruction to manufacture findings. Only submit findings
-    # when the evidence genuinely warrants it. This gate passes at 25%
-    # to catch cases where major evidence categories were overlooked,
-    # without pressuring the analyst to cite every source.
+    # Gate 5: Evidence citation coverage. Measured over distinct
+    # evidence-bearing source names (rows repeat per device and per query,
+    # and findings cite by name). A low percentage is a signal to review
+    # uncited sources, NOT an instruction to manufacture findings, so it
+    # is advisory; only a degenerate run that cites fewer than
+    # _MIN_CITED_SOURCES distinct sources blocks.
     finding_source_names: set[str] = set()
     for f in findings:
         finding_source_names.update(f.sources)
 
-    non_empty_sources = [s for s in sources if s.line_count > 0]
-    total_non_empty = len(non_empty_sources)
-    if total_non_empty > 0:
-        cited_count = sum(
-            1 for s in non_empty_sources if source_is_cited(s.source_name, finding_source_names)
+    evidence_names = {s.source_name for s in sources if is_evidence_source(s)}
+    total = len(evidence_names)
+    advisory = False
+    if total > 0:
+        cited_count = sum(1 for n in evidence_names if source_is_cited(n, finding_source_names))
+        coverage_pct = round(cited_count / total * 100, 1)
+        passed = cited_count >= min(_MIN_CITED_SOURCES, total)
+        advisory = passed and coverage_pct < _CITATION_ADVISORY_PCT
+        figure = (
+            f"{coverage_pct}% of evidence sources cited ({cited_count}/{total} distinct names)"
         )
-        coverage_pct = round(cited_count / total_non_empty * 100, 1)
-        passed = coverage_pct >= 25.0
-        if passed:
+        if not passed:
             detail = (
-                f"{coverage_pct}% of non-empty sources cited in findings "
-                f"({cited_count}/{total_non_empty})"
+                f"Only {cited_count} distinct evidence source(s) cited; need at least "
+                f"{_MIN_CITED_SOURCES}. {figure}. Review uncited sources with "
+                f"audit_evidence_coverage and cite what the findings actually rest on."
             )
-        else:
+        elif advisory:
             detail = (
-                f"Only {coverage_pct}% of non-empty sources are cited "
-                f"({cited_count}/{total_non_empty}). Review uncited sources "
-                f"to verify nothing was missed, but do NOT create findings "
+                f"Advisory: {figure}, below {_CITATION_ADVISORY_PCT:g}%. Review uncited "
+                f"sources to verify nothing was missed, but do NOT create findings "
                 f"just to increase this percentage."
             )
+        else:
+            detail = figure
     else:
         passed = True
-        detail = "No non-empty sources to check"
-    gates.append({"name": "evidence_citation_coverage", "passed": passed, "detail": detail})
+        detail = "No evidence sources to check"
+    gate: dict[str, object] = {
+        "name": "evidence_citation_coverage",
+        "passed": passed,
+        "detail": detail,
+    }
+    if advisory:
+        gate["advisory"] = True
+    gates.append(gate)
 
     return gates
 

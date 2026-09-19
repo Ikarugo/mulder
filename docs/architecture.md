@@ -222,6 +222,8 @@ flowchart LR
     reportGate --- reportChecks["finalize_report called successfully"]
 ```
 
+The narrative gate mirrors `check_finalize_readiness`: `minimum_findings`, `timestamp_coverage`, and `audit_tools_called` block; `narrative_submitted` is deferred to the report phase. `evidence_citation_coverage` is measured over *distinct evidence-bearing source names* (rows repeat per device and per registry query, and bookkeeping sources such as `*.stats`, `*.manifest`, `registry.query.*`, `bulk.bulk_extractor`, `bulk.duplicates`, `composite.correlation`, and `enrichment.iocs` are excluded). It blocks only when fewer than 3 distinct sources are cited; below 25% it passes with `advisory: true` and the figure in its detail, which the orchestrator logs as a warning. An advisory result never refuses `finalize_report`, never triggers a retry, and never sets the exit code (issue #221).
+
 When a gate fails, the orchestrator retries the phase with:
 - The same turn limits as the original attempt
 - Gap-specific instructions in single-mode retry prompts and in split-mode remediation sessions
