@@ -26,6 +26,7 @@ Try-it-out instructions for running Mulder, the forensic investigation platform.
     - [Provider Prefixes](#provider-prefixes)
     - [Mixing Providers Across Roles](#mixing-providers-across-roles)
     - [Local Models with Ollama](#local-models-with-ollama)
+    - [Thinking Through the Proxy](#thinking-through-the-proxy)
     - [Custom LiteLLM Configuration](#custom-litellm-configuration)
   - [Case Briefing](#case-briefing)
     - [What to Include](#what-to-include)
@@ -388,11 +389,29 @@ Custom proxy YAML is used as supplied; configure its `litellm_params.model` with
 `ollama_chat/` too. Set `api_base` there if Ollama is at a different address, such
 as `http://host.docker.internal:11434` for a host server accessed from Docker Desktop.
 
-For a model that supports tools but not extended thinking, add `--no-thinking`.
-This disables thinking for every phase and utility query and overrides `--effort`.
-Without the flag, the SDK's default thinking behavior and existing effort settings
-are preserved. The model/provider must support disabling thinking; this option
-does not establish that a model can complete an investigation reliably.
+### Thinking Through the Proxy
+
+Thinking is on by default for every proxy-routed model that LiteLLM's model
+map says supports reasoning (`bedrock/deepseek.v3.2`, Qwen3, Kimi K2 thinking,
+gpt-oss, OpenAI o-series, ...). The auto-generated config adds
+`allowed_openai_params: [reasoning_effort]` to those models so the
+`reasoning_effort` that LiteLLM derives from Claude Code's `--effort` reaches
+the provider unchanged (without it, LiteLLM rewrites it into an Anthropic
+`thinking` block that non-Claude models on Bedrock silently ignore). Such models
+also get a 32768-token output cap instead of 8192, because reasoning tokens
+count against it. Phase queries run at `--effort` (`max` and `xhigh` reach
+Bedrock as `high`); utility queries run at `low`, which DeepSeek treats as
+non-reasoning.
+
+Models LiteLLM does not list as reasoning-capable are served without it and a
+warning is logged at proxy start. A custom `--proxy-config` is used verbatim;
+add `allowed_openai_params: [reasoning_effort]` to its `litellm_params` yourself.
+
+To turn thinking off, add `--no-thinking`. This disables thinking for every
+phase and utility query, overrides `--effort`, and serves every proxy model
+without the reasoning passthrough. The model/provider must support disabling
+thinking; this option does not establish that a model can complete an
+investigation reliably.
 
 ### Custom LiteLLM Configuration
 
