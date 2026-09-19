@@ -186,7 +186,10 @@ def test_walk_reports_mismatches_and_indexes_them() -> None:
     assert "search(query, source='tsk.masquerade')" in str(resp["hint"])
     preview = str(resp["preview"])
     assert preview.startswith(
-        '{"mismatches": 2, "hits": [{"path": "$OrphanFiles/design/winter_storm.amr"'
+        '{"mismatches": 2, "partitions_scanned": [{"partition_offset": 128, '
+        '"description": "explicit", "files_listed": 5, "mismatches": 2}], '
+        '"partitions_skipped": [], "files_listed": 5, "files_sampled": 4, "truncated": false, '
+        '"hits": [{"path": "$OrphanFiles/design/winter_storm.amr"'
     )
 
 
@@ -230,3 +233,73 @@ def test_registered_for_extract_executor_only() -> None:
 def test_prompts_mention_the_tool() -> None:
     assert "detect_masquerading" in EXTRACTION.planner_system_prompt
     assert "tsk.masquerade" in EXTRACTION.analyst_system_prompt
+
+
+MMLS_TWO = (
+    "DOS Partition Table\n"
+    "Offset Sector: 0\n"
+    "Units are in 512-byte sectors\n"
+    "\n"
+    "     Slot    Start        End          Length       Description\n"
+    "000:000   0000000000   0000000000   0000000001   Primary Table (#0)\n"
+    "001:000   0000000000   0000000127   0000000128   Unallocated\n"
+    "002:000   0000000128   0000409727   0000409600   NTFS (0x07)\n"
+    "003:001   0000409728   0007864319   0007454592   Win95 FAT32 (0x0B)\n"
+)
+
+
+def test_no_offset_scans_every_partition_and_reports_skipped() -> None:
+    """Issue #227: RM2 has an empty NTFS partition before the FAT32 one holding the hits."""
+
+    def fake_fls(cmd: list[str], **_: Any) -> MagicMock:
+        offset = cmd[cmd.index("-o") + 1]
+        if offset == "128":
+            return MagicMock(returncode=0, stdout=b"", stderr=b"")
+        if offset == "409728":
+            return MagicMock(returncode=0, stdout=FLS_LONG.encode(), stderr=b"")
+        return MagicMock(returncode=1, stdout=b"", stderr=b"no fs")
+
+    with (
+        patch(f"{MOD}.subprocess.run", side_effect=fake_fls) as run,
+        patch(f"{MOD}._partition_table_text", return_value=MMLS_TWO),
+        patch(f"{MOD}._read_head", side_effect=lambda _i, _o, inode, _n: HEADS[inode]),
+        patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),
+        patch(f"{MOD}.sources_already_indexed", return_value=[]),
+        patch(f"{MOD}.extract_and_index", return_value={}) as index,
+    ):
+        resp = _tool("/ev/rm2.E01")
+
+    # Table and unallocated rows are not filesystems; both real partitions get an fls call.
+    assert [c.args[0][c.args[0].index("-o") + 1] for c in run.call_args_list] == ["128", "409728"]
+    preview = str(resp["preview"])
+    assert '"mismatches": 2' in preview
+    assert (
+        '"partitions_scanned": [{"partition_offset": 128, "description": "ntfs (0x07)", '
+        '"files_listed": 0, "mismatches": 0}, {"partition_offset": 409728, '
+        '"description": "win95 fat32 (0x0b)", "files_listed": 5, "mismatches": 2}]'
+    ) in preview
+    assert '"partitions_skipped": []' in preview
+    assert all(line.endswith("| offset=409728") for line in index.call_args.args[0].splitlines())
+
+
+def test_unopenable_partition_is_reported_not_silenced() -> None:
+    def fake_fls(cmd: list[str], **_: Any) -> MagicMock:
+        if cmd[cmd.index("-o") + 1] == "128":
+            return MagicMock(returncode=1, stdout=b"", stderr=b"Cannot determine file system type")
+        return MagicMock(returncode=0, stdout=FLS_LONG.encode(), stderr=b"")
+
+    with (
+        patch(f"{MOD}.subprocess.run", side_effect=fake_fls),
+        patch(f"{MOD}._partition_table_text", return_value=MMLS_TWO),
+        patch(f"{MOD}._read_head", side_effect=lambda _i, _o, inode, _n: HEADS[inode]),
+        patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),
+        patch(f"{MOD}.sources_already_indexed", return_value=[]),
+        patch(f"{MOD}.extract_and_index", return_value={}),
+    ):
+        resp = _tool("/ev/rm2.E01")
+    assert resp["status"] == "success"
+    preview = str(resp["preview"])
+    assert (
+        '"partitions_skipped": [{"partition_offset": 128, "description": "ntfs (0x07)", '
+        '"reason": "fls exited 1: Cannot determine file system type"}]'
+    ) in preview

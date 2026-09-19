@@ -90,6 +90,8 @@ def _resolve_image_and_offset() -> tuple[str, int]:
     Returns:
         Tuple of ``(image_path, primary_partition_offset)``.
     """
+    from mulder.server.tools.extract.tsk import _partition_table_text
+
     ctx = get_ctx()
     sources = ctx.db.get_sources()
 
@@ -101,10 +103,7 @@ def _resolve_image_and_offset() -> tuple[str, int]:
 
     if part_src:
         image_path = part_src.source_path
-        windows = ctx.db.get_windows_by_source("tsk.partitions")
-
-        mmls_text = "\n".join(w.raw_text for w in windows)
-        for start, length, desc in parse_mmls_rows(mmls_text):
+        for start, length, desc in parse_mmls_rows(_partition_table_text(image_path)):
             if any(ind in desc for ind in ("ntfs", "0x07", "hfs", "apfs")) and length > 0:
                 offset = start
                 break
