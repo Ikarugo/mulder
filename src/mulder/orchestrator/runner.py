@@ -509,13 +509,14 @@ class Orchestrator:
                 raise
             accumulated_turns += phase_result.turns_used
 
-            # Auto-compaction for context exhaustion
+            # Continuation for context overflow or turn-limit exhaustion
             compaction_count = 0
             while phase_result.context_exhausted and compaction_count < self._max_compactions:
                 compaction_count += 1
+                why = "Ran out of turns" if phase_result.turns_exhausted else "Auto-compacting"
                 self.dashboard.log_info(
-                    f"Auto-compacting: restarting with DB state "
-                    f"(compaction #{compaction_count}/{self._max_compactions})"
+                    f"{why}: restarting with DB state "
+                    f"(continuation #{compaction_count}/{self._max_compactions})"
                 )
                 compact_prompt = self._build_compaction_prompt(phase, effective_vars)
                 continuation = await self._session.execute(
@@ -530,6 +531,7 @@ class Orchestrator:
                 phase_result.messages.extend(continuation.messages)
                 phase_result.tool_names.extend(continuation.tool_names)
                 phase_result.context_exhausted = continuation.context_exhausted
+                phase_result.turns_exhausted = continuation.turns_exhausted
                 phase_result.turns_used = accumulated_turns
 
             gate = await self._validate_phase(phase, phase_result)
@@ -569,8 +571,11 @@ class Orchestrator:
 
         The three roles run in sequence. The analyst may request follow-up
         iterations (up to ``phase.max_follow_ups``). Gate validation runs
-        after the analyst completes, and the entire cycle retries on gate
-        failure up to ``phase.max_retries`` times.
+        after the analyst completes. When the gate fails, the next attempt
+        is an analyst-only remediation session handed the gate's gap list;
+        if that also fails, the attempt after it is a full cycle whose
+        planner sees the gaps as a follow-up request. Attempts are bounded
+        by ``phase.max_retries`` whatever their shape.
 
         Args:
             phase: Phase configuration with split-mode fields populated.
@@ -603,103 +608,114 @@ class Orchestrator:
             )
 
         combined_result = PhaseResult(phase_name=phase.name)
+        task_sys = (prompt_vars or {}).get("system_name", "") or phase.name
+        gate_gaps: list[str] = []
+        remediate_next = False
 
         for attempt in range(1 + phase.max_retries):
             if attempt > 0:
-                task_label = (prompt_vars or {}).get("system_name", "") or phase.name
-                self.dashboard.clear_system_tasks(task_label)
+                self.dashboard.clear_system_tasks(task_sys)
 
             follow_up_count = 0
-            follow_up_context: str = ""
+            follow_up_context: str = json.dumps({"gate_failure": gate_gaps}) if gate_gaps else ""
             follow_up_history: list[dict[str, Any]] = []
             executor_idle = False
+            remediating = remediate_next
+            remediate_next = False
 
-            while True:
-                try:
-                    # Step 1: Planner
-                    self._update_dashboard_sub_step(phase, "Planning", log_prefix)
-                    plan = await self._roles.run_planner(
-                        phase, prompt_vars, follow_up_context, log_prefix
-                    )
-
-                    if plan is None:
-                        combined_result.success = False
-                        return combined_result
-
-                    combined_result.plans_executed += 1
-
-                    # Step 2: Executor
-                    self._update_dashboard_sub_step(phase, "Executing", log_prefix)
-                    task_sys = (prompt_vars or {}).get("system_name", "") or phase.name
-                    exec_results = await self._roles.run_executor(
-                        phase, plan, log_prefix, task_system=task_sys
-                    )
-
-                    if exec_results.tool_calls == 0:
-                        # Nothing was executed, so there is nothing for the
-                        # analyst to interpret; running it anyway makes it do
-                        # the extraction itself with whatever tools it has.
-                        # Fail this attempt and let the retry loop re-plan.
-                        combined_result.turns_used += plan.turns_used + exec_results.turns_used
-                        pfx = f"[{log_prefix}] " if log_prefix else ""
-                        self.dashboard.log_gate_fail(
-                            f"{pfx}Executor made no tool calls; skipping analyst "
-                            f"(attempt {attempt + 1}/{1 + phase.max_retries})"
+            if remediating:
+                # The gate named exactly what is missing; the analyst's own
+                # tools can fix that, so try it before paying for a re-plan.
+                self._update_dashboard_sub_step(phase, "Remediating", log_prefix)
+                fix = await self._roles.run_remediation(phase, gate_gaps, log_prefix, task_sys)
+                combined_result.turns_used += fix.turns_used
+                combined_result.messages.extend(fix.messages)
+            else:
+                while True:
+                    try:
+                        # Step 1: Planner
+                        self._update_dashboard_sub_step(phase, "Planning", log_prefix)
+                        plan = await self._roles.run_planner(
+                            phase, prompt_vars, follow_up_context, log_prefix
                         )
-                        logger.warning(
-                            "Phase '%s' executor made no tool calls (attempt %d/%d)",
-                            phase.name,
-                            attempt + 1,
-                            1 + phase.max_retries,
+
+                        if plan is None:
+                            combined_result.success = False
+                            return combined_result
+
+                        combined_result.plans_executed += 1
+
+                        # Step 2: Executor
+                        self._update_dashboard_sub_step(phase, "Executing", log_prefix)
+                        exec_results = await self._roles.run_executor(
+                            phase, plan, log_prefix, task_system=task_sys
                         )
-                        executor_idle = True
-                        break
 
-                    # Step 2.5: Wait for all background batches to finish
-                    await self._roles.ensure_batches_complete(exec_results, log_prefix)
+                        if exec_results.tool_calls == 0:
+                            # Nothing was executed, so there is nothing for the
+                            # analyst to interpret; running it anyway makes it do
+                            # the extraction itself with whatever tools it has.
+                            # Fail this attempt and let the retry loop re-plan.
+                            combined_result.turns_used += plan.turns_used + exec_results.turns_used
+                            pfx = f"[{log_prefix}] " if log_prefix else ""
+                            self.dashboard.log_gate_fail(
+                                f"{pfx}Executor made no tool calls; skipping analyst "
+                                f"(attempt {attempt + 1}/{1 + phase.max_retries})"
+                            )
+                            logger.warning(
+                                "Phase '%s' executor made no tool calls (attempt %d/%d)",
+                                phase.name,
+                                attempt + 1,
+                                1 + phase.max_retries,
+                            )
+                            executor_idle = True
+                            break
 
-                    # Step 3: Analyst
-                    self._update_dashboard_sub_step(phase, "Analyzing", log_prefix)
-                    analyst_out = await self._roles.run_analyst(
-                        phase,
-                        plan,
-                        exec_results,
-                        prompt_vars,
-                        log_prefix,
-                        task_system=task_sys,
+                        # Step 2.5: Wait for all background batches to finish
+                        await self._roles.ensure_batches_complete(exec_results, log_prefix)
+
+                        # Step 3: Analyst
+                        self._update_dashboard_sub_step(phase, "Analyzing", log_prefix)
+                        analyst_out = await self._roles.run_analyst(
+                            phase,
+                            plan,
+                            exec_results,
+                            prompt_vars,
+                            log_prefix,
+                            task_system=task_sys,
+                        )
+                    except (AuthenticationError, ModelNotAvailableError):
+                        raise
+
+                    combined_result.turns_used += (
+                        plan.turns_used + exec_results.turns_used + analyst_out.turns_used
                     )
-                except (AuthenticationError, ModelNotAvailableError):
-                    raise
+                    combined_result.messages.extend(analyst_out.messages)
 
-                combined_result.turns_used += (
-                    plan.turns_used + exec_results.turns_used + analyst_out.turns_used
-                )
-                combined_result.messages.extend(analyst_out.messages)
+                    # Check for follow-up request
+                    if analyst_out.follow_up_request and follow_up_count < phase.max_follow_ups:
+                        follow_up_count += 1
+                        follow_up_history.append(analyst_out.follow_up_request)
+                        follow_up_context = json.dumps(
+                            {
+                                "previous_follow_ups": follow_up_history[:-1],
+                                "current_request": analyst_out.follow_up_request,
+                            }
+                        )
+                        self.dashboard.log_info(
+                            f"Follow-up {follow_up_count}/{phase.max_follow_ups}: "
+                            f"{analyst_out.follow_up_request.get('reason', '')}"
+                        )
+                        continue
 
-                # Check for follow-up request
-                if analyst_out.follow_up_request and follow_up_count < phase.max_follow_ups:
-                    follow_up_count += 1
-                    follow_up_history.append(analyst_out.follow_up_request)
-                    follow_up_context = json.dumps(
-                        {
-                            "previous_follow_ups": follow_up_history[:-1],
-                            "current_request": analyst_out.follow_up_request,
-                        }
-                    )
-                    self.dashboard.log_info(
-                        f"Follow-up {follow_up_count}/{phase.max_follow_ups}: "
-                        f"{analyst_out.follow_up_request.get('reason', '')}"
-                    )
-                    continue
-
-                break
+                    break
 
             if executor_idle:
                 continue
 
             combined_result.follow_ups_used = follow_up_count
 
-            # Gate validation after analyst completes
+            # Gate validation after the analyst (or remediation) completes
             gate = await self._validate_phase(phase, combined_result)
             combined_result.gate_result = gate
 
@@ -724,8 +740,10 @@ class Orchestrator:
                 attempt + 1,
                 gate.gaps,
             )
-            # Reset for retry
-            follow_up_context = ""
+            gate_gaps = list(gate.gaps)
+            # Alternate: a failed full cycle gets a cheap remediation next;
+            # a failed remediation gets a full re-plan next.
+            remediate_next = not remediating
 
         self.dashboard.log_gate_fail(f"{phase.name} FAILED after {1 + phase.max_retries} attempts")
         combined_result.success = False

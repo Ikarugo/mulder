@@ -188,9 +188,9 @@ they can reach validation without interrupting the session.
 
 When a quality gate fails after a phase completes, the orchestrator retries with the same turn limits:
 
-1. **Gap-specific remediation**: Single-mode retries include the gate's reported gaps in the next prompt. Split-mode retries start a new planner/executor/analyst cycle.
+1. **Gap-specific remediation**: Single-mode retries include the gate's reported gaps in the next prompt. Split-mode retries alternate: the attempt after a failed full cycle is an analyst-only remediation session that receives the gap list verbatim (`GATE FAILED: ...`) and is told to fix exactly those items with `update_finding` / `submit_finding` rather than re-run extraction; if that still fails, the next attempt is a full planner/executor/analyst cycle whose planner sees the gaps as a follow-up request. Every attempt, whatever its shape, counts against `max_retries`.
 2. **Follow-up cycles**: Within a single attempt, the analyst can request additional planner/executor iterations (capped at `max_follow_ups`) when it identifies gaps that need more tool execution
-3. **Auto-compaction on exhaustion**: If context is exhausted mid-phase, the orchestrator restarts with a compact prompt that preserves state via the database rather than failing immediately, up to `--max-compactions` times per role session
+3. **Continuation on exhaustion**: If a role session ends without a final answer, either because the provider rejected the prompt as too long or because the CLI stopped at `max_turns` (`ResultMessage.subtype == "error_max_turns"`), the orchestrator restarts it with a compact prompt that preserves state via the database rather than failing immediately, up to `--max-compactions` times per role session. Turn-limit continuations are logged as "ran out of turns" so they are distinguishable from context overflow.
 
 The retry system is bounded: each phase allows up to 2 retries (configurable), after which it reports failure and the investigation proceeds with partial results.
 
@@ -219,7 +219,7 @@ flowchart LR
 
 When a gate fails, the orchestrator retries the phase with:
 - The same turn limits as the original attempt
-- Gap-specific instructions in single-mode retry prompts
+- Gap-specific instructions in single-mode retry prompts and in split-mode remediation sessions
 - Up to 2 retries per phase (configurable)
 - Consecutive failure tracking prevents indefinite silent auto-passes
 

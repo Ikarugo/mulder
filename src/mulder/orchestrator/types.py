@@ -121,8 +121,12 @@ class PhaseResult:
         gate_result: Validation gate outcome, if a gate was evaluated.
         plans_executed: Number of plans executed in this phase.
         follow_ups_used: Number of follow-up iterations used.
-        context_exhausted: True if the session ended due to context
-            window limits (prompt too long or max turns reached).
+        context_exhausted: True if the session ended without a final
+            answer and needs a continuation: the provider rejected the
+            prompt as too long, or the CLI stopped at ``max_turns``.
+        turns_exhausted: True when the reason was the turn limit
+            (``ResultMessage.subtype == "error_max_turns"``) rather than
+            a context overflow. Implies ``context_exhausted``.
         batch_ids: Batch IDs captured structurally from start_extraction_batch
             tool result blocks during the session.
     """
@@ -137,6 +141,7 @@ class PhaseResult:
     plans_executed: int = 0
     follow_ups_used: int = 0
     context_exhausted: bool = False
+    turns_exhausted: bool = False
     batch_ids: set[str] = field(default_factory=set)
 
 
