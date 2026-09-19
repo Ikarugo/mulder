@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import logging
 import re
+import shlex
 import shutil
+import string
 import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -186,16 +188,71 @@ def _raw_dir(mount_point: Path) -> Path:
 
 
 def _run(cmd: list[str], timeout: int) -> bool:
-    """Run *cmd*; return True on exit 0, logging stderr otherwise."""
+    """Run *cmd*; return True on exit 0, logging its output and argv otherwise.
+
+    xmount reports errors on stdout, so stdout is logged when stderr is empty.
+    """
     try:
         proc = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         logger.warning("%s failed: %s", cmd[0], exc)
         return False
     if proc.returncode != 0:
-        stderr = proc.stderr.decode("utf-8", errors="replace").strip()[:300]
-        logger.warning("%s exited %d: %s", cmd[0], proc.returncode, stderr)
+        output = (proc.stderr.strip() or proc.stdout).decode("utf-8", errors="replace")
+        output = " ".join(output.split())[:600]
+        logger.warning(
+            "%s exited %d: %s (argv: %s)", cmd[0], proc.returncode, output, shlex.join(cmd)
+        )
     return proc.returncode == 0
+
+
+#: First segment of an EWF (EnCase ``.E01``) or SMART (``.s01``) image, both of
+#: which xmount's ewf input library reads.  EWF2 (``.Ex01``) is deliberately
+#: absent: xmount 0.7.6 rejects it ("not valid EWF files").
+_EWF_FIRST_SEGMENT = re.compile(r"\.[es]01$", re.IGNORECASE)
+
+
+def _next_ewf_suffix(suffix: str) -> str:
+    """libewf's segment naming: ``.E01``..``.E99``, ``.EAA``..``.EZZ``, ``.FAA``..``.ZZZ``."""
+    if suffix[-2:].isdigit():
+        if suffix[-2:] != "99":
+            return f"{suffix[:-2]}{int(suffix[-2:]) + 1:02d}"
+        return suffix[:-2] + ("AA" if suffix[-3].isupper() else "aa")
+    letters = string.ascii_uppercase if suffix[-1].isupper() else string.ascii_lowercase
+    n = 0
+    for char in suffix[-3:]:
+        n = n * 26 + letters.index(char)
+    n += 1
+    tail = ""
+    for _ in range(3):
+        tail = letters[n % 26] + tail
+        n //= 26
+    return suffix[:-3] + tail
+
+
+def _ewf_segments(first: Path) -> list[Path]:
+    """Every segment file of the EWF image starting at *first*, in order.
+
+    xmount does not find ``.E02``... itself: its ``--in`` help says "If your
+    image is split into multiple files, you have to specify them all!", and
+    they must be in order.  Walks the names until one is missing; a gap in
+    the middle is logged, since xmount will then fail to read the end of the
+    data.
+    """
+    segments = [first]
+    while (nxt := segments[-1].with_suffix(_next_ewf_suffix(segments[-1].suffix))).exists():
+        segments.append(nxt)
+    sibling = re.compile(re.escape(first.stem + first.suffix[:2]) + r"\w\w$")
+    strays = sum(1 for p in first.parent.iterdir() if sibling.match(p.name)) - len(segments)
+    if strays > 0:
+        logger.warning(
+            "%s is missing but %d later segment(s) exist; mounting %d segment(s) up to %s",
+            nxt.name,
+            strays,
+            len(segments),
+            segments[-1].name,
+        )
+    return segments
 
 
 def _mount_image(image_path: Path, mount_point: Path) -> bool:
@@ -207,7 +264,8 @@ def _mount_image(image_path: Path, mount_point: Path) -> bool:
     1. ``xmount`` exposes the preferred partition (see
        :func:`_detect_mount_offset`) as a flat ``.dd`` file in a sibling
        directory ``<mount_point>.raw`` (libfuse2 drivers refuse a non-empty
-       mount point, so it cannot live inside).  It reads E01 natively.
+       mount point, so it cannot live inside).  It reads E01 natively, given
+       every segment (see :func:`_ewf_segments`).
     2. A FUSE filesystem driver (ntfs-3g, fuse2fs) mounts that file at
        *mount_point*.
 
@@ -223,8 +281,9 @@ def _mount_image(image_path: Path, mount_point: Path) -> bool:
 
     raw_dir = _raw_dir(mount_point)
     raw_dir.mkdir(parents=True, exist_ok=True)
-    in_type = "ewf" if image_path.suffix.lower() == ".e01" else "raw"
-    cmd = ["xmount", "--in", in_type, str(image_path), "--out", "raw"]
+    is_ewf = _EWF_FIRST_SEGMENT.search(image_path.name) is not None
+    inputs = _ewf_segments(image_path) if is_ewf else [image_path]
+    cmd = ["xmount", "--in", "ewf" if is_ewf else "raw", *map(str, inputs), "--out", "raw"]
     offset_bytes = _detect_mount_offset(str(image_path))
     if offset_bytes > 0:
         cmd += ["--offset", str(offset_bytes)]
