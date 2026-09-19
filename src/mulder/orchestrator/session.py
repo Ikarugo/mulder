@@ -429,7 +429,11 @@ class SessionExecutor:
 
         The workspace ``.mcp.json`` is handed to the CLI explicitly (with
         ``strict_mcp_config``) so the session does not depend on project
-        MCP approval state or pick up unrelated user-level servers.
+        MCP approval state or pick up unrelated user-level servers. When
+        the run is pinned to a case (``MULDER_CASE_ID`` in *env*, set by the
+        orchestrator) the ``mulder`` server is started with ``--case-id``
+        so query tools work before the model calls ``open_case``
+        (issue #230); other servers in ``.mcp.json`` are kept.
 
         Args:
             allowed_tools: Role allowlist for this session.
@@ -441,6 +445,18 @@ class SessionExecutor:
             Keyword arguments for ``ClaudeAgentOptions``.
         """
         mcp_config = Path(self._cwd) / ".mcp.json"
+        servers: dict[str, Any] | str = str(mcp_config) if mcp_config.is_file() else {}
+        case_id = self._env.get("MULDER_CASE_ID", "")
+        if case_id:
+            if mcp_config.is_file():
+                servers = dict(json.loads(mcp_config.read_text()).get("mcpServers") or {})
+            else:
+                servers = {}
+            servers["mulder"] = {
+                "type": "stdio",
+                "command": "mulder",
+                "args": ["serve", "--case-id", case_id],
+            }
         return {
             # ``[]`` disables every Claude Code built-in (Read, Grep, Glob,
             # Write, Edit, WebFetch, Task, ...) while MCP tools stay loaded,
@@ -461,8 +477,8 @@ class SessionExecutor:
                 **self._env,
                 **_SESSION_ENV,
             },
-            "mcp_servers": str(mcp_config) if mcp_config.is_file() else {},
-            "strict_mcp_config": mcp_config.is_file(),
+            "mcp_servers": servers,
+            "strict_mcp_config": bool(servers),
         }
 
     async def execute(
