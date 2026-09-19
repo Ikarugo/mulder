@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 from mulder.orchestrator.gates import (
     validate_catalog,
     validate_cross_system,
@@ -12,28 +14,44 @@ from mulder.orchestrator.gates import (
 
 
 class TestValidateReport:
-    """Tests for validate_report gate function."""
+    """The report gate keys on the report file, not on the tool having been called (#211)."""
 
-    def test_passes_when_finalize_report_called(self) -> None:
-        """Tool list containing 'finalize_report' passes gate."""
-        result = validate_report(["open_case", "finalize_report"])
-        assert result.passed
+    def test_passes_when_report_exists(self, tmp_path: Path) -> None:
+        report = tmp_path / "case.report.md"
+        report.write_text("# Report")
+        assert validate_report(["open_case", "finalize_report"], report).passed
 
-    def test_fails_on_empty_tool_list(self) -> None:
-        """Empty tool list fails gate."""
-        result = validate_report([])
+    def test_fails_when_called_but_refused(self, tmp_path: Path) -> None:
+        """The benchmark defect: finalize_report called, readiness refused, no file."""
+        readiness = {
+            "ready_to_finalize": False,
+            "gates": [
+                {"name": "minimum_findings", "passed": True, "detail": "ok"},
+                {"name": "source_coverage", "passed": False, "detail": "cited 3 of 40 sources"},
+            ],
+        }
+        result = validate_report(["finalize_report"], tmp_path / "case.report.md", readiness)
         assert not result.passed
+        assert "source_coverage: cited 3 of 40 sources" in result.gaps[0]
+        assert "minimum_findings" not in result.gaps[0]
 
-    def test_fails_when_finalize_report_absent(self) -> None:
-        """Tool list without finalize_report fails gate."""
-        result = validate_report(["open_case", "get_investigation_summary"])
+    def test_refused_without_readiness_points_at_check(self, tmp_path: Path) -> None:
+        result = validate_report(["finalize_report"], tmp_path / "case.report.md", None)
         assert not result.passed
+        assert "check_finalize_readiness" in result.gaps[0]
 
-    def test_passes_with_many_tools(self) -> None:
-        """finalize_report among many tools still passes."""
-        tools = ["open_case", "submit_finding", "finalize_report", "search"]
-        result = validate_report(tools)
-        assert result.passed
+    def test_fails_when_finalize_report_never_called(self, tmp_path: Path) -> None:
+        result = validate_report(["open_case"], tmp_path / "case.report.md")
+        assert not result.passed
+        assert result.gaps == [
+            "The report was not finalized. Call finalize_report to generate it."
+        ]
+
+    def test_stale_report_from_an_earlier_run_does_not_count(self, tmp_path: Path) -> None:
+        report = tmp_path / "case.report.md"
+        report.write_text("# Old")
+        old = report.stat().st_mtime
+        assert not validate_report(["finalize_report"], report, started_at=old + 60).passed
 
 
 class TestValidateCatalog:
