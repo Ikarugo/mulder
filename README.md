@@ -65,7 +65,7 @@ On first run mulder creates a working directory at `~/.mulder/workspace` (overri
 ### Run with Docker (everything preinstalled)
 
 ```bash
-docker pull ghcr.io/calebevans/mulder:1.5.1
+docker pull ghcr.io/calebevans/mulder:1.5.2
 ```
 
 ```bash
@@ -75,7 +75,7 @@ docker run -it --privileged \
   -v /path/to/evidence:/evidence:ro \
   -v ~/mulder-cases:/home/mulder/.mulder/cases \
   -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY \
-  ghcr.io/calebevans/mulder:1.5.1
+  ghcr.io/calebevans/mulder:1.5.2
 ```
 
 ```bash
@@ -156,7 +156,6 @@ Each investigation produces:
 | [Tool Manifest](https://github.com/calebevans/mulder/blob/main/docs/tool-manifest.md) | API reference for all MCP tools |
 | [Adding Tools](https://github.com/calebevans/mulder/blob/main/docs/adding-tools.md) | Contributor guide for adding new forensic tools |
 | [Glossary](https://github.com/calebevans/mulder/blob/main/docs/glossary.md) | Terminology and definitions |
-| [v1.5.1 Release Notes](https://github.com/calebevans/mulder/blob/main/docs/releases/v1.5.1.md) | Fixes, new investigation options, and upgrade notes |
 
 ## License
 
