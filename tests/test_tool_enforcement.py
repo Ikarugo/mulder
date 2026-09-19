@@ -282,7 +282,73 @@ async def test_run_executor_reports_tool_calls() -> None:
     with patch.object(orch._session, "execute", side_effect=mock_execute):
         results = await orch._roles.run_executor(EXTRACTION, _plan("run_mmls"))
 
-    assert results.tool_calls == 2
+    assert results.tool_calls == 1
+
+
+@pytest.mark.asyncio()
+@pytest.mark.parametrize(
+    ("tool_names", "expected"),
+    [
+        (["open_case", "wait", "wait_all", "check_extraction_status", "get_completed_results"], 0),
+        (["open_case", "start_extraction_batch", "wait"], 1),
+        (["open_case", "run_parallel"], 1),
+        (["list_cases", "open_case", "run_mmls"], 1),
+    ],
+)
+async def test_run_executor_counts_only_extraction_calls(
+    tool_names: list[str], expected: int
+) -> None:
+    with patch("mulder.orchestrator.runner.InvestigationDashboard"):
+        orch = Orchestrator("/evidence")
+    orch._case_id = "case"
+
+    async def mock_execute(**kwargs: object) -> PhaseResult:
+        return PhaseResult(
+            phase_name="query", success=False, messages=[], tool_names=tool_names, turns_used=2
+        )
+
+    with patch.object(orch._session, "execute", side_effect=mock_execute):
+        results = await orch._roles.run_executor(EXTRACTION, _plan("run_mmls"))
+
+    assert results.tool_calls == expected
+
+
+@pytest.mark.asyncio()
+async def test_control_only_executor_is_retried() -> None:
+    """open_case + wait with no extraction call is idle; one real call is not."""
+    with patch("mulder.orchestrator.runner.InvestigationDashboard"):
+        orch = Orchestrator("/evidence")
+    orch._case_id = "case"
+    sessions = iter([["open_case", "wait"], ["open_case", "run_mmls"]])
+    analyst_calls = 0
+
+    async def mock_execute(**kwargs: object) -> PhaseResult:
+        return PhaseResult(
+            phase_name="q", success=False, messages=[], tool_names=next(sessions), turns_used=1
+        )
+
+    async def mock_analyst(*args: object, **kwargs: object) -> AnalystResult:
+        nonlocal analyst_calls
+        analyst_calls += 1
+        return AnalystResult(
+            findings_submitted=1, follow_up_request=None, messages=["done"], turns_used=1
+        )
+
+    with (
+        patch.object(orch._session, "execute", side_effect=mock_execute),
+        patch.object(orch._roles, "run_planner", return_value=_plan("run_mmls")),
+        patch.object(orch._roles, "run_analyst", side_effect=mock_analyst),
+        patch.object(orch._roles, "ensure_batches_complete", AsyncMock()),
+        patch.object(orch, "_validate_phase", return_value=None),
+    ):
+        result = await orch._run_split_phase(EXTRACTION)
+
+    assert result.success
+    assert analyst_calls == 1
+    cast("MagicMock", orch.dashboard.log_gate_fail).assert_any_call(
+        "Executor made no extraction tool calls; skipping analyst "
+        f"(attempt 1/{1 + EXTRACTION.max_retries})"
+    )
 
 
 def _split_phase_mocks(
@@ -349,7 +415,8 @@ async def test_zero_tool_executor_skips_analyst_and_retries_phase() -> None:
     # Failed attempt's planner + executor turns are still accounted for.
     assert result.turns_used == 2 + 3
     cast("MagicMock", orch.dashboard.log_gate_fail).assert_any_call(
-        f"Executor made no tool calls; skipping analyst (attempt 1/{1 + CROSS_SYSTEM.max_retries})"
+        f"Executor made no extraction tool calls; skipping analyst "
+        f"(attempt 1/{1 + CROSS_SYSTEM.max_retries})"
     )
 
 

@@ -65,6 +65,18 @@ _EXECUTOR_CONTROL_TOOLS: frozenset[str] = frozenset(
     }
 )
 
+_EXECUTOR_PASSIVE_TOOLS: frozenset[str] = frozenset(
+    t.removeprefix("mcp__mulder__")
+    for t in _EXECUTOR_CONTROL_TOOLS
+    if t not in {"mcp__mulder__start_extraction_batch", "mcp__mulder__run_parallel"}
+)
+"""Control tools that extract nothing: open the case, poll, wait, fetch.
+
+Batch launches are deliberately not here: ``start_extraction_batch`` and
+``run_parallel`` are how the executor runs most of its plan, so a session
+consisting of one batch launch plus a wait has done real work.
+"""
+
 _EXECUTOR_TOOLS_SECTION: str = (
     "\n\nEXECUTOR TOOLS: the {phase} executor can call exactly these tools; "
     "a task naming any other tool is dropped from the plan:\n{tools}"
@@ -333,7 +345,7 @@ class RoleRunner:
             ),
             messages=result.messages,
             batch_ids=result.batch_ids,
-            tool_calls=len(result.tool_names),
+            tool_calls=sum(t not in _EXECUTOR_PASSIVE_TOOLS for t in result.tool_names),
         )
 
     async def run_analyst(
