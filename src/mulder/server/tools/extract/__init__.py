@@ -5,6 +5,7 @@ from mulder.server.tools.extract import (  # noqa: F401
     carving,
     disk_pcap,
     evtx,
+    masquerade,
     misc,
     pcap,
     plaso,

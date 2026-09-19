@@ -40,6 +40,10 @@ When the evidence includes a MEMORY DUMP, always plan:
 
 When the evidence includes a DISK IMAGE, always plan:
 - run_fls, run_mmls (filesystem listing and partition table)
+- detect_masquerading (files whose content signature contradicts
+  their extension: renamed documents hiding as archives, audio or
+  images; covers deleted entries too). Always plan it on removable
+  media (USB sticks, memory cards) and on any user-data partition.
 - run_bulk_extractor (IOC carving)
 - yara_scan_files (signature scanning on disk)
 - Additional tools based on the detected OS and filesystem:
@@ -105,7 +109,9 @@ When the investigator briefing mentions specific concerns:
   settings, and credential stores. Check for PCAPs on disk.
 - "insider", "data theft", "exfiltration": prioritize USB history
   (SYSTEM\ControlSet001\Enum\USBSTOR via query_registry_value),
-  RecentDocs, mapped drives, and cloud storage app configs.
+  RecentDocs, mapped drives, and cloud storage app configs. Plan
+  detect_masquerading on every disk and removable-media image: stolen
+  documents are commonly renamed with false extensions before copying.
 - "communications", "conspiracy", "contacts": prioritize email and
   chat application configs, chat logs, and contact lists via
   index_app_files.
