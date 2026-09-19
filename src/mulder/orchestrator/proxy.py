@@ -86,6 +86,8 @@ class ModelSettings:
     max_output_tokens: int = PROXY_REASONING_MAX_OUTPUT_TOKENS
     reasoning: bool = False
     sources: dict[str, str] = field(default_factory=dict)
+    #: Whether LiteLLM's model map knows the model; decides its route.
+    known: bool = False
 
     def __str__(self) -> str:
         src = self.sources.get
@@ -113,7 +115,7 @@ def resolve_settings(
         Settings without a LiteLLM context window; :meth:`ProxyManager.start`
         fills that in from the running proxy.
     """
-    s = ModelSettings(sources=dict(override.sources))
+    s = ModelSettings(sources=dict(override.sources), known=litellm_reasoning is not None)
     if not thinking:
         s.reasoning, s.sources["reasoning"] = False, "--no-thinking"
     elif override.reasoning is not None:
@@ -154,14 +156,24 @@ def is_proxy_model(model_id: str) -> bool:
     return any(model_id.startswith(prefix) for prefix in _LITELLM_PREFIXES)
 
 
-def _litellm_model(model_id: str) -> str:
+def _litellm_model(model_id: str, known: bool = True) -> str:
     """The provider route LiteLLM should use for a public model name.
 
     Ollama models go through the native chat API so streamed tool calls
-    retain their structure; everything else is served as named.
+    retain their structure. Bedrock models LiteLLM's map does not know go
+    through the explicit Converse route: for an unmapped ``bedrock/`` id
+    LiteLLM 1.101.0 infers the provider from the id (``moonshot`` for Kimi)
+    and streams back an empty ``end_turn`` with no error. Everything else
+    is served as named.
+
+    Args:
+        model_id: Public model name.
+        known: Whether LiteLLM's model map knows the model.
     """
     if model_id.startswith("ollama/"):
         return "ollama_chat/" + model_id.removeprefix("ollama/")
+    if model_id.startswith("bedrock/") and not known:
+        return "bedrock/converse/" + model_id.removeprefix("bedrock/")
     return model_id
 
 
@@ -191,7 +203,7 @@ def _build_proxy_config(
             {
                 "model_name": model_id,
                 "litellm_params": {
-                    "model": _litellm_model(model_id),
+                    "model": _litellm_model(model_id, s.known),
                     "max_tokens": s.max_output_tokens,
                     **(_REASONING_PARAMS if s.reasoning else {}),
                 },
@@ -439,13 +451,15 @@ class ProxyManager:
                 "pip install 'litellm[proxy]' or rebuild the Docker image."
             )
 
-        queried = self._thinking and not self._config_path
+        # The route of a bedrock/ model depends on whether LiteLLM knows it,
+        # so the map is consulted whenever the config is ours to generate.
+        queried = not self._config_path
         known = litellm_reasoning(litellm_bin, self._models) if queried else {}
         for model in self._models:
             override = self._overrides.get(model) or ModelOverride()
             s = resolve_settings(override, known.get(model), self._thinking)
             self.settings[model] = s
-            if queried and override.reasoning is None and not s.reasoning:
+            if queried and self._thinking and override.reasoning is None and not s.reasoning:
                 logger.warning(
                     "Thinking is on but LiteLLM reports no reasoning support for %s; "
                     "it will run without reasoning (pass --no-thinking to silence)",

@@ -458,6 +458,14 @@ reasoning does, `max_output_tokens` sets the model's LiteLLM `max_tokens` and
 Proxy start logs one line per model with the effective values and where each
 came from (`litellm`, `config`, `env` or `default`).
 
+An unknown `bedrock/` model is also served through LiteLLM's explicit
+Converse route (`litellm_params.model: bedrock/converse/<id>`, the public
+name is unchanged). For an unmapped id LiteLLM 1.101.0 infers the provider
+from the id itself (`moonshot` for Kimi) and a streaming request, which is
+what Claude Code always sends, comes back as an empty `end_turn` with no
+error; the Converse route streams the thinking and text correctly. Models
+LiteLLM knows keep their id as given.
+
 Where a config file is awkward, such as a container run, the same three keys
 are read from the environment and applied to every proxy model in the run
 (a coarse knob meant for single-model runs; env wins over the file):
