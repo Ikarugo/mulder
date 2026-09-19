@@ -91,6 +91,7 @@ class TestProxyManager:
         assert "8080" in pm.env_overrides["ANTHROPIC_BASE_URL"]
 
     @patch("shutil.which", return_value="/usr/local/bin/litellm")
+    @patch("mulder.orchestrator.proxy.fetch_model_windows", MagicMock(return_value={}))
     @patch("mulder.orchestrator.proxy._wait_for_health", return_value=True)
     @patch("subprocess.Popen")
     def test_start_success(
@@ -124,6 +125,7 @@ class TestProxyManager:
         mock_proc.terminate.assert_called_once()
 
     @patch("shutil.which", return_value="/usr/local/bin/litellm")
+    @patch("mulder.orchestrator.proxy.fetch_model_windows", MagicMock(return_value={}))
     @patch("mulder.orchestrator.proxy._wait_for_health", return_value=True)
     @patch("subprocess.Popen")
     def test_stop_terminates_process(
@@ -145,6 +147,7 @@ class TestProxyManager:
         pm.stop()  # Should not raise
 
     @patch("shutil.which", return_value="/usr/local/bin/litellm")
+    @patch("mulder.orchestrator.proxy.fetch_model_windows", MagicMock(return_value={}))
     @patch("mulder.orchestrator.proxy._wait_for_health", return_value=True)
     @patch("subprocess.Popen")
     def test_context_manager(

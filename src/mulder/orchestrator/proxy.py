@@ -12,6 +12,7 @@ import logging
 import subprocess
 import tempfile
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -32,17 +33,101 @@ _HEALTH_CHECK_TIMEOUT: float = 30.0
 _HEALTH_CHECK_INTERVAL: float = 0.5
 _MASTER_KEY: str = "sk-mulder-proxy"
 
-#: Output tokens reserved per request for proxy-routed models. Doubles as
-#: the LiteLLM ``max_tokens`` default and as ``CLAUDE_CODE_MAX_OUTPUT_TOKENS``
-#: for the session, because the CLI's explicit value (32000 for model IDs
-#: it does not recognise) would otherwise override the proxy default.
+#: Output tokens reserved per request for proxy-routed models LiteLLM
+#: positively reports as non-reasoning. Doubles as the LiteLLM ``max_tokens``
+#: default and as ``CLAUDE_CODE_MAX_OUTPUT_TOKENS`` for the session, because
+#: the CLI's explicit value (32000 for model IDs it does not recognise) would
+#: otherwise override the proxy default.
 PROXY_MAX_OUTPUT_TOKENS: int = 8192
 
-#: Same, for models that reason. Reasoning tokens count against ``max_tokens``
-#: and a truncated reasoning chain yields no tool call, so these get Claude
-#: Code's own default cap (32000, rounded). Claude Code's auto-compact reserve
-#: is ``min(cap, 20000) + 13000``, so going above 20000 costs no more context.
+#: Same, for models that reason and for models LiteLLM's map does not know.
+#: Reasoning tokens count against ``max_tokens`` and a truncated reasoning
+#: chain yields no tool call, so these get Claude Code's own default cap
+#: (32000, rounded). An unknown model may reason unasked (Kimi K3 does) and
+#: one that does not never uses the headroom. Claude Code's auto-compact
+#: reserve is ``min(cap, 20000) + 13000``, so going above 20000 costs no more
+#: context. See issue #203.
 PROXY_REASONING_MAX_OUTPUT_TOKENS: int = 32768
+
+_OVERRIDE_FIELDS: tuple[str, ...] = ("context_window", "max_output_tokens", "reasoning")
+
+
+@dataclass
+class ModelOverride:
+    """User-supplied limits for one proxy model (``--config`` or env).
+
+    ``None`` means "not set"; :attr:`sources` names where each set field
+    came from (``config`` or ``env``) for the startup log.
+    """
+
+    context_window: int | None = None
+    max_output_tokens: int | None = None
+    reasoning: bool | None = None
+    sources: dict[str, str] = field(default_factory=dict)
+
+    def merged_over(self, other: ModelOverride) -> ModelOverride:
+        """A copy of *other* with every field set on ``self`` replacing it."""
+        merged = ModelOverride(sources={**other.sources, **self.sources})
+        for name in _OVERRIDE_FIELDS:
+            mine = getattr(self, name)
+            setattr(merged, name, getattr(other, name) if mine is None else mine)
+        return merged
+
+
+@dataclass
+class ModelSettings:
+    """Effective limits for one proxy model, with the source of each.
+
+    The defaults describe a model nobody knows anything about: no window
+    (Claude Code keeps its own), the reasoning-sized cap, no passthrough.
+    """
+
+    context_window: int | None = None
+    max_output_tokens: int = PROXY_REASONING_MAX_OUTPUT_TOKENS
+    reasoning: bool = False
+    sources: dict[str, str] = field(default_factory=dict)
+
+    def __str__(self) -> str:
+        src = self.sources.get
+        return (
+            f"context_window={self.context_window or 'unknown'} "
+            f"({src('context_window', 'default')}), "
+            f"max_output_tokens={self.max_output_tokens} "
+            f"({src('max_output_tokens', 'default')}), "
+            f"reasoning={self.reasoning} ({src('reasoning', 'default')})"
+        )
+
+
+def resolve_settings(
+    override: ModelOverride, litellm_reasoning: bool | None, thinking: bool = True
+) -> ModelSettings:
+    """Combine an override with what LiteLLM said: override > LiteLLM > default.
+
+    Args:
+        override: User overrides for the model (possibly all unset).
+        litellm_reasoning: ``litellm.supports_reasoning`` for the model, or
+            ``None`` when LiteLLM's map does not know it.
+        thinking: False (``--no-thinking``) forces reasoning off.
+
+    Returns:
+        Settings without a LiteLLM context window; :meth:`ProxyManager.start`
+        fills that in from the running proxy.
+    """
+    s = ModelSettings(sources=dict(override.sources))
+    if not thinking:
+        s.reasoning, s.sources["reasoning"] = False, "--no-thinking"
+    elif override.reasoning is not None:
+        s.reasoning = override.reasoning
+    elif litellm_reasoning is not None:
+        s.reasoning, s.sources["reasoning"] = litellm_reasoning, "litellm"
+    if override.max_output_tokens is not None:
+        s.max_output_tokens = override.max_output_tokens
+    elif litellm_reasoning is False and not s.reasoning:
+        s.max_output_tokens = PROXY_MAX_OUTPUT_TOKENS
+    if override.context_window is not None:
+        s.context_window = override.context_window
+    return s
+
 
 #: LiteLLM's ``/v1/messages`` adapter turns Claude Code's ``thinking`` +
 #: ``output_config.effort`` into ``reasoning_effort``; Bedrock's Converse
@@ -81,35 +166,34 @@ def _litellm_model(model_id: str) -> str:
 
 
 def _build_proxy_config(
-    models: list[str], port: int, reasoning_models: frozenset[str] | set[str] = frozenset()
+    models: list[str], port: int, settings: dict[str, ModelSettings] | None = None
 ) -> dict[str, Any]:
     """Build a LiteLLM proxy configuration for the given models.
 
     Preserves each public model name while routing Ollama models through
     the native chat API so streamed tool calls retain their structure.
-    Models in *reasoning_models* get the raw ``reasoning_effort`` passthrough
-    and the larger output cap (see :data:`_REASONING_PARAMS`).
+    Each model's ``max_tokens`` and raw ``reasoning_effort`` passthrough
+    (see :data:`_REASONING_PARAMS`) come from its :class:`ModelSettings`;
+    a model without settings is served as unknown.
 
     Args:
         models: Unique litellm model IDs to serve.
         port: Port number for the proxy server.
-        reasoning_models: Subset of *models* to serve with reasoning enabled.
+        settings: Effective limits per public model name.
 
     Returns:
         LiteLLM config dict suitable for YAML serialization.
     """
     model_list = []
     for model_id in models:
-        reasoning = model_id in reasoning_models
+        s = (settings or {}).get(model_id) or ModelSettings()
         model_list.append(
             {
                 "model_name": model_id,
                 "litellm_params": {
                     "model": _litellm_model(model_id),
-                    "max_tokens": (
-                        PROXY_REASONING_MAX_OUTPUT_TOKENS if reasoning else PROXY_MAX_OUTPUT_TOKENS
-                    ),
-                    **(_REASONING_PARAMS if reasoning else {}),
+                    "max_tokens": s.max_output_tokens,
+                    **(_REASONING_PARAMS if s.reasoning else {}),
                 },
             }
         )
@@ -132,6 +216,10 @@ _SUPPORTS_REASONING_SCRIPT = """\
 import json, sys, litellm
 def check(m):
     try:
+        litellm.get_model_info(m)
+    except Exception:
+        return None
+    try:
         return bool(litellm.supports_reasoning(model=m))
     except Exception:
         return False
@@ -139,13 +227,15 @@ print(json.dumps({m: check(m) for m in sys.argv[1:]}))
 """
 
 
-def reasoning_models(litellm_bin: str, models: list[str], timeout: float = 60.0) -> set[str]:
-    """Which of *models* LiteLLM's model map says support reasoning.
+def litellm_reasoning(
+    litellm_bin: str, models: list[str], timeout: float = 60.0
+) -> dict[str, bool | None]:
+    """What LiteLLM's model map says about reasoning support for *models*.
 
     Runs :func:`litellm.supports_reasoning` inside LiteLLM's own venv (the
     interpreter next to the ``litellm`` binary) so litellm stays out of
-    mulder's venv. Any failure yields an empty set with a warning, which
-    means "serve without reasoning" rather than "refuse to start".
+    mulder's venv. Any failure yields an empty mapping with a warning, which
+    means "serve as unknown" rather than "refuse to start".
 
     Args:
         litellm_bin: Resolved path of the ``litellm`` executable.
@@ -153,14 +243,15 @@ def reasoning_models(litellm_bin: str, models: list[str], timeout: float = 60.0)
         timeout: Seconds to wait for the check.
 
     Returns:
-        The public names whose LiteLLM route supports reasoning.
+        Public name to ``True``/``False`` for models in LiteLLM's map and
+        ``None`` for models it does not know.
     """
     import json
 
     python = Path(litellm_bin).resolve().parent / "python"
     if not python.exists():
         logger.warning("No interpreter next to %s; serving without reasoning", litellm_bin)
-        return set()
+        return {}
     try:
         proc = subprocess.run(
             [str(python), "-c", _SUPPORTS_REASONING_SCRIPT, *(_litellm_model(m) for m in models)],
@@ -172,8 +263,8 @@ def reasoning_models(litellm_bin: str, models: list[str], timeout: float = 60.0)
         supported = json.loads(proc.stdout)
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         logger.warning("Could not query LiteLLM for reasoning support: %s", exc)
-        return set()
-    return {m for m in models if supported.get(_litellm_model(m)) is True}
+        return {}
+    return {m: supported.get(_litellm_model(m)) for m in models}
 
 
 def _wait_for_health(port: int, timeout: float = _HEALTH_CHECK_TIMEOUT) -> bool:
@@ -276,6 +367,7 @@ class ProxyManager:
         port: int | None = None,
         config_path: str | None = None,
         thinking: bool = True,
+        overrides: dict[str, ModelOverride] | None = None,
     ) -> None:
         """Initialize the proxy manager.
 
@@ -288,6 +380,8 @@ class ProxyManager:
                 and this file is used instead.
             thinking: Enable reasoning for models that support it. False
                 (``--no-thinking``) serves every model without it.
+            overrides: User limits per public model name; they beat
+                whatever LiteLLM reports.
         """
         import os
 
@@ -295,10 +389,11 @@ class ProxyManager:
         self._port = port or int(os.environ.get("MULDER_PROXY_PORT", _DEFAULT_PORT))
         self._config_path = config_path
         self._thinking = thinking
+        self._overrides = overrides or {}
         self._process: subprocess.Popen[bytes] | None = None
         self._temp_config: Path | None = None
-        #: Public names served with reasoning on; filled by :meth:`start`.
-        self.reasoning_models: set[str] = set()
+        #: Effective limits per public model name; filled by :meth:`start`.
+        self.settings: dict[str, ModelSettings] = {}
 
     @property
     def port(self) -> int:
@@ -344,19 +439,23 @@ class ProxyManager:
                 "pip install 'litellm[proxy]' or rebuild the Docker image."
             )
 
+        queried = self._thinking and not self._config_path
+        known = litellm_reasoning(litellm_bin, self._models) if queried else {}
+        for model in self._models:
+            override = self._overrides.get(model) or ModelOverride()
+            s = resolve_settings(override, known.get(model), self._thinking)
+            self.settings[model] = s
+            if queried and override.reasoning is None and not s.reasoning:
+                logger.warning(
+                    "Thinking is on but LiteLLM reports no reasoning support for %s; "
+                    "it will run without reasoning (pass --no-thinking to silence)",
+                    model,
+                )
+
         if self._config_path:
             config_file = self._config_path
         else:
-            if self._thinking:
-                self.reasoning_models = reasoning_models(litellm_bin, self._models)
-                for model in self._models:
-                    if model not in self.reasoning_models:
-                        logger.warning(
-                            "Thinking is on but LiteLLM reports no reasoning support for %s; "
-                            "it will run without reasoning (pass --no-thinking to silence)",
-                            model,
-                        )
-            config = _build_proxy_config(self._models, self._port, self.reasoning_models)
+            config = _build_proxy_config(self._models, self._port, self.settings)
             fd, tmp_path = tempfile.mkstemp(suffix=".yaml", prefix="mulder_litellm_")
             self._temp_config = Path(tmp_path)
             os.close(fd)
@@ -399,9 +498,11 @@ class ProxyManager:
 
         logger.info("LiteLLM proxy is healthy on port %d", self._port)
 
-    def model_windows(self) -> dict[str, int]:
-        """Context window per served model, empty when the proxy cannot say."""
-        return fetch_model_windows(self._port)
+        windows = fetch_model_windows(self._port)
+        for model, s in self.settings.items():
+            if s.context_window is None and model in windows:
+                s.context_window, s.sources["context_window"] = windows[model], "litellm"
+            logger.info("%s: %s", model, s)
 
     def stop(self) -> None:
         """Stop the proxy subprocess and clean up temporary files."""

@@ -27,6 +27,7 @@ Try-it-out instructions for running Mulder, the forensic investigation platform.
     - [Mixing Providers Across Roles](#mixing-providers-across-roles)
     - [Local Models with Ollama](#local-models-with-ollama)
     - [Thinking Through the Proxy](#thinking-through-the-proxy)
+    - [Models LiteLLM does not know](#models-litellm-does-not-know)
     - [Custom LiteLLM Configuration](#custom-litellm-configuration)
   - [Case Briefing](#case-briefing)
     - [What to Include](#what-to-include)
@@ -399,7 +400,8 @@ gpt-oss, OpenAI o-series, ...). The auto-generated config adds
 the provider unchanged (without it, LiteLLM rewrites it into an Anthropic
 `thinking` block that non-Claude models on Bedrock silently ignore). Such models
 also get a 32768-token output cap instead of 8192, because reasoning tokens
-count against it. Phase queries run at `--effort` (`max` and `xhigh` reach
+count against it; so do models LiteLLM's map does not know at all, since they
+may reason unasked (see [Models LiteLLM does not know](#models-litellm-does-not-know)). Phase queries run at `--effort` (`max` and `xhigh` reach
 Bedrock as `high`); utility queries run at `low`, which DeepSeek treats as
 non-reasoning.
 
@@ -421,6 +423,52 @@ phase and utility query, overrides `--effort`, and serves every proxy model
 without the reasoning passthrough. The model/provider must support disabling
 thinking; this option does not establish that a model can complete an
 investigation reliably.
+
+### Models LiteLLM does not know
+
+Mulder asks LiteLLM for each proxy model's context window and reasoning
+support. A model absent from LiteLLM's model map (Bedrock's newest releases
+often are, e.g. `bedrock/us.moonshotai.kimi-k3`) gets no window, so Claude
+Code assumes 200K and never compacts before the provider rejects the request,
+and is served without the reasoning passthrough. Override what LiteLLM cannot
+tell us in the `--config` YAML: add an entry to `models:` keyed by the model
+id exactly as passed to `--model`, with any of `context_window`,
+`max_output_tokens` and `reasoning`. Role assignments and per-model entries
+share the mapping; a string value names a role's model, a mapping value
+describes a model.
+
+```yaml
+models:
+  planner: bedrock/us.moonshotai.kimi-k3
+  executor: bedrock/us.moonshotai.kimi-k3
+  analyst: bedrock/us.moonshotai.kimi-k3
+  bedrock/us.moonshotai.kimi-k3:
+    context_window: 262144
+    max_output_tokens: 32768
+    reasoning: true
+```
+
+Precedence per key is config override, then LiteLLM's value, then the
+default (no window, 32768 output tokens, no reasoning; 8192 output tokens
+only when LiteLLM positively reports a model as non-reasoning). `reasoning:
+true` adds the `reasoning_effort` passthrough exactly as LiteLLM-detected
+reasoning does, `max_output_tokens` sets the model's LiteLLM `max_tokens` and
+`CLAUDE_CODE_MAX_OUTPUT_TOKENS`, and `context_window` sets
+`CLAUDE_CODE_MAX_CONTEXT_TOKENS`. `--no-thinking` still turns reasoning off.
+Proxy start logs one line per model with the effective values and where each
+came from (`litellm`, `config`, `env` or `default`).
+
+Where a config file is awkward, such as a container run, the same three keys
+are read from the environment and applied to every proxy model in the run
+(a coarse knob meant for single-model runs; env wins over the file):
+
+```bash
+docker run ... \
+  -e MULDER_MODEL_CONTEXT_WINDOW=262144 \
+  -e MULDER_MODEL_MAX_OUTPUT_TOKENS=32768 \
+  -e MULDER_MODEL_REASONING=true \
+  mulder investigate /evidence my-case --model bedrock/us.moonshotai.kimi-k3
+```
 
 ### Custom LiteLLM Configuration
 

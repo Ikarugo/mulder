@@ -203,12 +203,12 @@ class Orchestrator:
             models=proxy_models,
             config_path=self._proxy_config,
             thinking=not self._session._no_thinking,
+            overrides={m: self.model_config.override_for(m) for m in proxy_models},
         )
         self._proxy.start()
         self._using_proxy = True
         self._session._using_proxy = True
-        self._session._proxy_windows = self._proxy.model_windows()
-        self._session._proxy_reasoning = set(self._proxy.reasoning_models)
+        self._session._proxy_settings = self._proxy.settings
         self.env.update(self._proxy.env_overrides)
         logger.info(
             "Proxy active; routing %d model(s) through localhost:%d",

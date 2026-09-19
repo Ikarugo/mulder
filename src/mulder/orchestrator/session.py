@@ -30,11 +30,7 @@ from rich.text import Text
 from mulder.orchestrator.display import InvestigationDashboard
 from mulder.orchestrator.errors import AuthenticationError, ModelNotAvailableError
 from mulder.orchestrator.models import ModelConfig
-from mulder.orchestrator.proxy import (
-    PROXY_MAX_OUTPUT_TOKENS,
-    PROXY_REASONING_MAX_OUTPUT_TOKENS,
-    is_proxy_model,
-)
+from mulder.orchestrator.proxy import ModelSettings, is_proxy_model
 from mulder.orchestrator.types import EffortLevel, PhaseResult, extract_json_from_text
 from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
 
@@ -367,11 +363,9 @@ class SessionExecutor:
         self._env = env
         self._effort = effort
         self._using_proxy = using_proxy
-        #: Context window per proxy-routed model, filled by the orchestrator
+        #: Effective limits per proxy-routed model, filled by the orchestrator
         #: from the proxy once it is healthy.
-        self._proxy_windows: dict[str, int] = {}
-        #: Proxy-routed models served with reasoning on; same source.
-        self._proxy_reasoning: set[str] = set()
+        self._proxy_settings: dict[str, ModelSettings] = {}
         self._no_thinking = no_thinking
         self._show_cli_stderr = show_cli_stderr
 
@@ -405,15 +399,10 @@ class SessionExecutor:
         """
         if not is_proxy_model(model):
             return {}
-        cap = (
-            PROXY_REASONING_MAX_OUTPUT_TOKENS
-            if model in self._proxy_reasoning
-            else PROXY_MAX_OUTPUT_TOKENS
-        )
-        env = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(cap)}
-        window = self._proxy_windows.get(model)
-        if window:
-            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(window)
+        settings = self._proxy_settings.get(model) or ModelSettings()
+        env = {"CLAUDE_CODE_MAX_OUTPUT_TOKENS": str(settings.max_output_tokens)}
+        if settings.context_window:
+            env["CLAUDE_CODE_MAX_CONTEXT_TOKENS"] = str(settings.context_window)
         return env
 
     def _shared_options(
