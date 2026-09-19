@@ -142,11 +142,13 @@ presence in carved output does not prove execution or authentication.
 Match claims to the capability of the tool that produced the evidence.
 
 FOLLOW-UP REQUESTS:
-If you need additional tools run that were not in the original plan,
+Only if you need additional tools run that were not in the original plan,
 output a follow-up request as your final message:
-{"request": "additional_plan", "reason": "...", "suggested_tools": [...]}
+{"request": "additional_plan", "reason": "...", "suggested_tools": ["tool_name", ...]}
 Output this JSON on its own line, not inside code fences or with
-surrounding text.
+surrounding text. suggested_tools must name at least one tool to run;
+a request that names none is ignored. It starts another planner and
+executor cycle, so do NOT output it when your analysis is complete.
 
 Otherwise, call track_progress when done.
 

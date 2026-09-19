@@ -182,7 +182,9 @@ class RoleRunner:
             log_prefix: Prefix for dashboard log lines.
 
         Returns:
-            Parsed Plan, or None if the planner failed to produce one.
+            Parsed Plan, or None if the planner failed to produce one. With
+            *follow_up_context* the Plan may have no tasks, meaning the
+            planner found nothing more to run.
         """
         model = self._model_config.resolve(phase.name, "planner")
         effective_vars = dict(prompt_vars or {})
@@ -229,7 +231,9 @@ class RoleRunner:
             log_prefix=log_prefix,
         )
 
-        plan_json = extract_json_plan(result.messages)
+        # On a follow-up cycle an empty plan is a valid answer ("nothing
+        # more to run"), not malformed output to send through JSON repair.
+        plan_json = extract_json_plan(result.messages, allow_empty=bool(follow_up_context))
         if plan_json is None and result.context_exhausted:
             plan_json = await self._request_plan_from_notes(
                 phase, prompt, model, result, log_prefix
