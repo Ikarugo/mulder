@@ -24,26 +24,22 @@ does not report input tokens for Kimi K3.
 
 ### Also tried on v1.5.2, not recommended
 
-Published for completeness; none of these reached more than 5% full match in
-three runs. MiniMax stops after one device and leaves what it saw out of the
-report; DeepSeek and Qwen narrate document timestamps as events and read
-sample-document metadata as targets. Same file set per directory as above.
-
-| Model | Full match | Detection | False positives | Findings | Tool calls | Runtime | Tokens | Report | Scorecard |
-|-------|-----------:|----------:|----------------:|---------:|-----------:|--------:|-------:|--------|-----------|
-| MiniMax M2.5, 3 runs: [1](ndlc-v1.5.2/minimax-m2.5-run1/), [2](ndlc-v1.5.2/minimax-m2.5-run2/), [3](ndlc-v1.5.2/minimax-m2.5-run3/) | Bedrock | 5% (0 to 5) | 55% (55 to 60) | 10% (5 to 10) | 13 / 10 / 11 | 323 / 315 / 300 | 29 / 31 / 19 min | 7.3M / 6.3M / 6.1M in, 123K / 110K / 103K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/minimax-m2.5-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/minimax-m2.5-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/minimax-m2.5-run3/ndlc.report.html) | [1](ndlc-v1.5.2/minimax-m2.5-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/minimax-m2.5-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/minimax-m2.5-run3/ACCURACY-REPORT.md) |
-| DeepSeek V3.2, 3 runs: [1](ndlc-v1.5.2/deepseek-v3.2-run1/), [2](ndlc-v1.5.2/deepseek-v3.2-run2/), [3](ndlc-v1.5.2/deepseek-v3.2-run3/) | Bedrock | 0% (0 to 0) | 60% (50 to 65) | 20% (20 to 25) | 17 / 12 / 17 | 352 / 353 / 491 | 27 / 36 / 40 min | 9.9M / 10.1M / 14.0M in, 61K / 63K / 75K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/deepseek-v3.2-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/deepseek-v3.2-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/deepseek-v3.2-run3/ndlc.report.html) | [1](ndlc-v1.5.2/deepseek-v3.2-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/deepseek-v3.2-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/deepseek-v3.2-run3/ACCURACY-REPORT.md) |
-| Qwen3 235B, 3 runs: [1](ndlc-v1.5.2/qwen3-235b-run1/), [2](ndlc-v1.5.2/qwen3-235b-run2/), [3](ndlc-v1.5.2/qwen3-235b-run3/) | Bedrock | 0% (0 to 10) | 35% (25 to 50) | 10% (5 to 10) | 14 / 3 / 4 | 968 / 205 / 374 | 86 / 33 / 37 min | 58.4M / 13.5M / 17.2M in, 79K / 17K / 33K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/qwen3-235b-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/qwen3-235b-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/qwen3-235b-run3/ndlc.report.html) | [1](ndlc-v1.5.2/qwen3-235b-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/qwen3-235b-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/qwen3-235b-run3/ACCURACY-REPORT.md) |
+Run three times each on the same image and scored the same way, but not
+published: MiniMax M2.5 (5% full match, 55% detection, 10% false positives),
+DeepSeek V3.2 (0% / 60% / 20%) and Qwen3 235B (0% / 35% / 10%). MiniMax stops
+after one device and leaves what it saw out of the report; DeepSeek and Qwen
+narrate document timestamps as events and read sample-document metadata as
+targets.
 
 Tried and dropped: GLM-4.7 (two runs, both collapsed the four images into one
 system at the catalog phase; 10% / 40% / 20%), Kimi K2 Thinking (cannot complete
 the catalog phase in either thinking mode), Devstral 2 123B (ran the case but a
-harness bug, fixed after v1.5.2, blocked its report), Mistral Large 3 (cannot complete the catalog
-phase: it emits a tool call with an empty name that Bedrock then rejects on
-every replay), Qwen3 Coder 480B (0% / 45% / 15%, concluded there was no
-incident), gpt-oss-120b (0% / 20% / 40%, an intrusion narrative with a host
-that does not exist in the evidence), Kimi K2.5 (cannot complete the catalog
-phase).
+harness bug, fixed after v1.5.2, blocked its report), Mistral Large 3 (cannot
+complete the catalog phase: it emits a tool call with an empty name that
+Bedrock then rejects on every replay), Qwen3 Coder 480B (0% / 45% / 15%,
+concluded there was no incident), gpt-oss-120b (0% / 20% / 40%, an intrusion
+narrative with a host that does not exist in the evidence), Kimi K2.5 (cannot
+complete the catalog phase).
 
 ## Earlier investigations (Mulder v1.5.1 and before)
 
