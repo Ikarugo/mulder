@@ -5,8 +5,8 @@ against forensic evidence datasets, unmodified from tool output.
 
 ## NIST Data Leakage Case on Mulder v1.5.2
 
-The same case, evidence, prompts and tools on the v1.5.2 release image, once
-for Claude Opus 4.6 and three times per open-weight model that is recommended and scored item by item against the
+The same case, evidence, prompts and tools on the v1.5.2 release image, three
+times per model and scored item by item against the
 [published NIST answer key](https://cfreds-archive.nist.gov/data_leakage_case/leakage-answers.pdf)
 (20 ground-truth items). Each directory holds the full report (Markdown and
 HTML), the audit log, both execution logs, the scorecard and a README with the
@@ -14,11 +14,11 @@ run's settings.
 
 | Model | Provider | Full match | Detection | False positives | Findings | Tool calls | Runtime | Tokens | Report | Scorecard |
 |-------|----------|-----------:|----------:|----------------:|---------:|-----------:|--------:|-------:|--------|-----------|
-| [Claude Opus 4.6](ndlc-v1.5.2/opus-4.6-run1/) | Anthropic | 45% | 95% | 10% | 23 | 596 | 68 min | 37K in / 239K out | [HTML](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/opus-4.6-run1/ndlc.report.html) | [ACCURACY-REPORT](ndlc-v1.5.2/opus-4.6-run1/ACCURACY-REPORT.md) |
+| Claude Opus 4.6, 3 runs: [1](ndlc-v1.5.2/opus-4.6-run1/), [2](ndlc-v1.5.2/opus-4.6-run2/), [3](ndlc-v1.5.2/opus-4.6-run3/) | Anthropic | 45% (45 to 50) | 95% (90 to 95) | 10% (5 to 10) | 23 / 24 / 24 | 596 / 500 / 630 | 68 / 69 / 79 min | 37K / 27K / 56K uncached in, 239K / 189K / 240K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/opus-4.6-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/opus-4.6-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/opus-4.6-run3/ndlc.report.html) | [1](ndlc-v1.5.2/opus-4.6-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/opus-4.6-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/opus-4.6-run3/ACCURACY-REPORT.md) |
 | Kimi K3, 3 runs: [1](ndlc-v1.5.2/kimi-k3-run1/), [2](ndlc-v1.5.2/kimi-k3-run2/), [3](ndlc-v1.5.2/kimi-k3-run3/) | Bedrock | 35% (35 to 50) | 90% (80 to 95) | 20% (20 to 25) | 12 / 31 / 21 | 827 / 1,271 / 1,063 | 52 / 70 / 60 min | 200K / 180K / 170K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/kimi-k3-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/kimi-k3-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/kimi-k3-run3/ndlc.report.html) | [1](ndlc-v1.5.2/kimi-k3-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/kimi-k3-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/kimi-k3-run3/ACCURACY-REPORT.md) |
 | GLM-5, 3 runs: [1](ndlc-v1.5.2/glm-5-run1/), [2](ndlc-v1.5.2/glm-5-run2/), [3](ndlc-v1.5.2/glm-5-run3/) | Bedrock | 20% (20 to 25) | 75% (75 to 90) | 20% (10 to 25) | 20 / 22 / 20 | 513 / 454 / 362 | 60 / 63 / 61 min | 9.3M / 9.1M / 8.4M in, 157K / 135K / 143K out | [1](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/glm-5-run1/ndlc.report.html), [2](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/glm-5-run2/ndlc.report.html), [3](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/glm-5-run3/ndlc.report.html) | [1](ndlc-v1.5.2/glm-5-run1/ACCURACY-REPORT.md), [2](ndlc-v1.5.2/glm-5-run2/ACCURACY-REPORT.md), [3](ndlc-v1.5.2/glm-5-run3/ACCURACY-REPORT.md) |
 
-Each open-weight model is listed as the median of three runs with the range in parentheses, and per-run counts in run order. Anthropic token counts exclude prompt-cache reads; the proxy models have no
+Each model is listed as the median of three runs with the range in parentheses, and per-run counts in run order. Anthropic token counts exclude prompt-cache reads; the proxy models have no
 prompt caching, so their input counts are the full replayed context. LiteLLM
 does not report input tokens for Kimi K3.
 

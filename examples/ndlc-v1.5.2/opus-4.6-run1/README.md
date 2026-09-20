@@ -1,6 +1,6 @@
 # NDLC on Claude Opus 4.6, run 1 of 3 (Mulder v1.5.2)
 
-Mulder's autonomous investigation of the [NIST CFReDS Data Leakage Case](https://cfreds-archive.nist.gov/data_leakage_case/data-leakage-case.html) using `claude-opus-4-6` directly through the Anthropic API with extended thinking, run on the v1.5.2 release image. This is the reference run for the three open-weight models in this directory, which used the same evidence, prompts, tools and scoring rubric. The original v1.5.1 Opus run of this case is kept in [examples/ndlc](../../ndlc/).
+Mulder's autonomous investigation of the [NIST CFReDS Data Leakage Case](https://cfreds-archive.nist.gov/data_leakage_case/data-leakage-case.html) using `claude-opus-4-6` directly through the Anthropic API with extended thinking, run on the v1.5.2 release image. This is one of three Opus runs, the reference for the open-weight models in this directory, which used the same evidence, prompts, tools and scoring rubric. The original v1.5.1 Opus run of this case is kept in [examples/ndlc](../../ndlc/).
 
 > **Evidence:** PC disk image + 3 removable media (USB x2, CD-R). No memory dumps, no network capture.
 
@@ -15,7 +15,7 @@ Scored against the [published NIST answer key](https://cfreds-archive.nist.gov/d
 | MISSED | 0 | 0% |
 | FALSE POSITIVE | 2 | 10% |
 
-**45% full match, 95% detection rate, 10% false positive rate.** Against the v1.5.1 baseline (60% / 90% / 5%) it gained the full masquerading inventory, the CD-R contents and the network share, and lost exact USB serials, connection times and the deletion window to PARTIAL. One of its two false positives came from a harness defect found by this run (issue #232): the RM1 executor asked for `tsk.masquerade` by name and received RM2's rows.
+**45% full match, 95% detection rate, 10% false positive rate.** See [run 2](../opus-4.6-run2/) (50% / 90% / 10%) and [run 3](../opus-4.6-run3/) (45% / 95% / 5%). Against the v1.5.1 baseline (60% / 90% / 5%) it gained the full masquerading inventory, the CD-R contents and the network share, and lost exact USB serials, connection times and the deletion window to PARTIAL. One of its two false positives came from a harness defect found by this run (issue #232): the RM1 executor asked for `tsk.masquerade` by name and received RM2's rows.
 
 ## What the Model Concluded
 
