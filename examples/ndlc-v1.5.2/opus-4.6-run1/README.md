@@ -1,4 +1,4 @@
-# NDLC on Claude Opus 4.6 (Mulder v1.5.2)
+# NDLC on Claude Opus 4.6, run 1 of 3 (Mulder v1.5.2)
 
 Mulder's autonomous investigation of the [NIST CFReDS Data Leakage Case](https://cfreds-archive.nist.gov/data_leakage_case/data-leakage-case.html) using `claude-opus-4-6` directly through the Anthropic API with extended thinking, run on the v1.5.2 release image. This is the reference run for the three open-weight models in this directory, which used the same evidence, prompts, tools and scoring rubric. The original v1.5.1 Opus run of this case is kept in [examples/ndlc](../../ndlc/).
 
