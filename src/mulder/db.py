@@ -590,6 +590,7 @@ class CaseDB:
         time_end: str | None = None,
         exclude_source_names: list[str] | None = None,
         match: Literal["all", "any"] = "all",
+        source_ids: list[int] | None = None,
     ) -> list[tuple[WindowRow, str]]:
         """Full-text keyword search over raw_text using FTS5.
 
@@ -610,6 +611,8 @@ class CaseDB:
                 only sane order. Taking the *first 20 by time* out of every
                 window containing the word "event" is a different wrong
                 answer, not a fix.
+            source_ids: Optional source_id allowlist, for sources that share
+                a name across evidence images.
         """
         fts = (
             select(
@@ -632,6 +635,8 @@ class CaseDB:
                     sources_t.c.source_name.like(source_name + ".%"),
                 )
             )
+        if source_ids is not None:
+            stmt = stmt.where(windows_t.c.source_id.in_(source_ids))
 
         if time_start is not None:
             stmt = stmt.where(windows_t.c.event_time >= time_start)
@@ -694,6 +699,7 @@ class CaseDB:
         time_start: str | None = None,
         time_end: str | None = None,
         exclude_source_names: list[str] | None = None,
+        source_ids: list[int] | None = None,
     ) -> int:
         """Return the total number of FTS5 matches without fetching rows.
 
@@ -707,6 +713,7 @@ class CaseDB:
             time_start: Optional ISO 8601 lower bound for event_time.
             time_end: Optional ISO 8601 upper bound for event_time.
             exclude_source_names: Optional source name prefixes to exclude.
+            source_ids: Optional source_id allowlist.
         """
         j = windows_t.join(sources_t, windows_t.c.source_id == sources_t.c.source_id)
         stmt = (
@@ -728,6 +735,8 @@ class CaseDB:
                     sources_t.c.source_name.like(source_name + ".%"),
                 )
             )
+        if source_ids is not None:
+            stmt = stmt.where(windows_t.c.source_id.in_(source_ids))
 
         if time_start is not None:
             stmt = stmt.where(windows_t.c.event_time >= time_start)
@@ -900,11 +909,15 @@ class CaseDB:
 
     def get_windows_page(
         self,
-        source_prefix: str,
+        source_prefix: str | None,
         after_id: int = 0,
         limit: int = 500,
+        source_ids: list[int] | None = None,
     ) -> tuple[list[WindowRow], int]:
         """Fetch a page of windows using keyset pagination.
+
+        A falsy *source_prefix* (``None`` or ``""``) means no source
+        filter: the page spans every window in the case.
 
         Uses ``window_id > after_id`` instead of SQL OFFSET, so seeking
         to any position is O(log n) via the primary key index regardless
@@ -913,24 +926,33 @@ class CaseDB:
         Pass ``after_id=0`` for the first page, then pass the last
         ``window_id`` from the previous page to get the next one.
 
+        *source_ids* further restricts to those sources, for names that
+        several evidence images share (``tsk.masquerade`` per image).
+
         Returns ``(windows, total_count)``.
         """
-        source_where = or_(
-            sources_t.c.source_name == source_prefix,
-            sources_t.c.source_name.like(source_prefix + ".%"),
-        )
+        conds = []
+        if source_prefix:
+            conds.append(
+                or_(
+                    sources_t.c.source_name == source_prefix,
+                    sources_t.c.source_name.like(source_prefix + ".%"),
+                )
+            )
+        if source_ids is not None:
+            conds.append(windows_t.c.source_id.in_(source_ids))
 
         count_stmt = (
             select(func.count())
             .select_from(windows_t.join(sources_t, windows_t.c.source_id == sources_t.c.source_id))
-            .where(source_where)
+            .where(*conds)
         )
 
         j = windows_t.join(sources_t, windows_t.c.source_id == sources_t.c.source_id)
         page_stmt = (
             select(windows_t)
             .select_from(j)
-            .where(source_where)
+            .where(*conds)
             .where(windows_t.c.window_id > after_id)
             .order_by(windows_t.c.window_id)
             .limit(limit)
