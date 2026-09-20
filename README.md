@@ -8,7 +8,7 @@ Mulder takes a directory of forensic evidence (disk images, memory dumps, PCAPs,
 
 ## Results
 
-Three models on the [NIST CFReDS Data Leakage Case](https://cfreds-archive.nist.gov/data_leakage_case/data-leakage-case.html) on the v1.5.2 release image, with the same evidence, prompts and tools. Each is scored item by item against the [published NIST answer key](https://cfreds-archive.nist.gov/data_leakage_case/leakage-answers.pdf) (20 ground-truth items; **full match** = the exact fact stated, **detection** = at least related evidence found, **false positives** = claims the answer key contradicts). Every report, log and scorecard is in the repo, unmodified from tool output; the HTML reports are on [GitHub Pages](https://calebevans.github.io/mulder/examples/ndlc-v1.5.2/opus-4.6-run1/ndlc.report.html).
+Three models on the [NIST CFReDS Data Leakage Case](https://cfreds-archive.nist.gov/data_leakage_case/data-leakage-case.html) on the v1.5.2 release image, with the same evidence, prompts and tools. Each is scored item by item against the [published NIST answer key](https://cfreds-archive.nist.gov/data_leakage_case/leakage-answers.pdf) (20 ground-truth items; **full match** = the exact fact stated, **detection** = at least related evidence found, **false positives** = claims the answer key contradicts). Every report, log and scorecard is in the repo, unmodified from tool output.
 
 | Model | Provider | Full match | Detection | False positives | Findings | Tool calls | Runtime | Report | Scorecard |
 |-------|----------|-----------:|----------:|----------------:|---------:|-----------:|--------:|--------|-----------|
