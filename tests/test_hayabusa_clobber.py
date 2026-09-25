@@ -38,6 +38,12 @@ _CSV = (
     "2026-01-01 00:00:00,Suspicious PowerShell,high,WS01,T1059.001\n"
 )
 
+_SCANNED_NOTHING_MATCHED = (
+    "Total event log files: 1\nTotal file size: 68.0 KiB\n\nScanning finished.\n\n"
+    "Results Summary:\n\n"
+    "Events with hits / Total events: 0 / 1,234 (Data reduction: 1,234 events (100.00%))\n"
+)
+
 _REFUSAL = (
     "[ERROR]  The file {path} already exists. Please specify a different "
     "filename or add the -C, --clobber option to overwrite.\n"
@@ -65,7 +71,7 @@ def _invoke(evtx_dir: Path, run: Runner) -> tuple[Any, list[list[str]]]:
             return_value="/usr/bin/hayabusa",
         ),
         patch("mulder.server.tools.hayabusa.sources_already_indexed", return_value=[]),
-        patch("mulder.server.tools.hayabusa.subprocess.run", side_effect=_wrap),
+        patch("mulder.server.helpers.subprocess.run", side_effect=_wrap),
         patch("mulder.server.tools.hayabusa.extract_and_index", return_value={}),
     ):
         result = run_hayabusa.__wrapped__(str(evtx_dir))  # type: ignore[attr-defined]
@@ -157,12 +163,16 @@ def test_a_genuinely_quiet_host_is_still_a_successful_scan(evtx_dir: Path) -> No
     """Narrowness: an empty timeline from a real run stays a success.
 
     Hayabusa writing an empty CSV means no rule matched. That is a real
-    answer and must not be turned into an error by this change.
+    answer and must not be turned into an error by this change. Hayabusa's
+    own report (files scanned, results summary) is what tells that answer
+    apart from a run that never scanned anything.
     """
 
     def _quiet(cmd: list[str], out_path: Path) -> subprocess.CompletedProcess[str]:
         out_path.write_text("")
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout=_SCANNED_NOTHING_MATCHED, stderr=""
+        )
 
     result, _argvs = _invoke(evtx_dir, _quiet)
 

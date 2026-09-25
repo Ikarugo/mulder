@@ -8,7 +8,6 @@ credential extraction for cleartext protocols.
 from __future__ import annotations
 
 import logging
-import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -18,15 +17,18 @@ from mulder.patterns import fls_file_entries
 from mulder.server.app import get_ctx, mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    ToolRun,
     error_response,
     make_tool_call_id,
     require_binary,
+    run_tool,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.tsk import (
     _collect_fls_chunks,
     _triage_redirect,
+    icat_file,
 )
 
 __all__ = ["analyze_disk_pcaps"]
@@ -112,37 +114,23 @@ def _extract_pcap_via_icat(
     Returns:
         True if extraction succeeded with non-empty output.
     """
-    cmd = ["icat"]
-    if offset > 0:
-        cmd.extend(["-o", str(offset)])
-    cmd.extend([image_path, inode_str])
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            timeout=_ICAT_TIMEOUT,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError) as exc:
-        logger.warning("icat extraction failed for inode %s: %s", inode_str, exc)
-        return False
-
-    if proc.returncode != 0 or not proc.stdout:
-        return False
-
-    dest_path.write_bytes(proc.stdout)
-    return True
+    ok, reason = icat_file(image_path, offset, inode_str, dest_path, timeout=_ICAT_TIMEOUT)
+    if reason is not None:
+        logger.warning("icat extraction failed for inode %s: %s", inode_str, reason)
+    return ok
 
 
-def _run_tshark_summary(pcap_path: Path) -> str:
+def _run_tshark_summary(pcap_path: Path, errors: list[dict[str, str]] | None = None) -> str:
     """Run tshark protocol hierarchy and conversation summary.
 
     Args:
         pcap_path: Path to the extracted PCAP file.
+        errors: Receives one ``{"step", "error"}`` entry per tshark run that
+            failed or stopped early. Failures are not part of the returned
+            text: that text is indexed as the capture's content.
 
     Returns:
-        Combined tshark output text, or error description.
+        Combined tshark output text (empty when every run failed).
     """
     parts: list[str] = []
 
@@ -151,29 +139,26 @@ def _run_tshark_summary(pcap_path: Path) -> str:
         (["-q", "-z", "conv,ip"], "IP Conversations"),
         (["-q", "-z", "dns,tree"], "DNS Summary"),
     ]:
-        try:
-            proc = subprocess.run(
-                ["tshark", "-r", str(pcap_path), *args],
-                capture_output=True,
-                text=True,
-                timeout=_TSHARK_TIMEOUT,
-                check=False,
-            )
-            output = proc.stdout.strip()
-            if output:
-                parts.append(f"=== {label} ===\n{output}")
-            elif proc.returncode != 0 and proc.stderr:
-                err_preview = proc.stderr.strip()[:300]
-                parts.append(f"=== {label} ===\n[tshark error: {err_preview}]")
-        except subprocess.TimeoutExpired:
-            parts.append(f"=== {label} ===\n[timed out]")
-        except OSError as exc:
-            parts.append(f"=== {label} ===\n[execution failed: {exc}]")
+        run = run_tool(["tshark", "-r", str(pcap_path), *args], timeout=_TSHARK_TIMEOUT)
+        if run.failed:
+            if errors is not None:
+                errors.append({"step": f"tshark {label}", "error": run.describe()})
+            continue
+        if not run.ok and errors is not None:
+            errors.append({"step": f"tshark {label}", "error": _incomplete(run)})
+        parts.append(f"=== {label} ===\n{run.stdout.strip()}")
 
     return "\n\n".join(parts)
 
 
-def _extract_credentials(pcap_path: Path) -> list[dict[str, str]]:
+def _incomplete(run: ToolRun) -> str:
+    """Message for a run that stopped early after writing output that was kept."""
+    return f"{run.describe()}\nThe output written before that was kept; it may be incomplete."
+
+
+def _extract_credentials(
+    pcap_path: Path, errors: list[dict[str, str]] | None = None
+) -> list[dict[str, str]]:
     """Extract cleartext credentials from a PCAP using tshark filters.
 
     Runs targeted tshark display filters against the PCAP to identify
@@ -182,6 +167,9 @@ def _extract_credentials(pcap_path: Path) -> list[dict[str, str]]:
 
     Args:
         pcap_path: Path to the PCAP file.
+        errors: Receives one ``{"step", "error"}`` entry per filter whose
+            tshark run failed or stopped early, so that "0 credentials" is
+            not reported for a protocol that was never searched.
 
     Returns:
         List of dicts with keys: protocol, raw_data, source_ip,
@@ -207,21 +195,15 @@ def _extract_credentials(pcap_path: Path) -> list[dict[str, str]]:
             "-e",
             "text",
         ]
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=_CREDENTIAL_TIMEOUT,
-                check=False,
-            )
-        except (subprocess.TimeoutExpired, OSError):
+        run = run_tool(cmd, timeout=_CREDENTIAL_TIMEOUT)
+        if run.failed:
+            if errors is not None:
+                errors.append({"step": f"credentials:{protocol}", "error": run.describe()})
             continue
+        if not run.ok and errors is not None:
+            errors.append({"step": f"credentials:{protocol}", "error": _incomplete(run)})
 
-        if result.returncode != 0 or not result.stdout.strip():
-            continue
-
-        for line in result.stdout.strip().splitlines():
+        for line in run.stdout.strip().splitlines():
             fields = line.split("\t")
             credentials.append(
                 {
@@ -259,7 +241,8 @@ def _analyze_single_pcap(
 
     Returns:
         Dict with protocol_summary, ids_alerts (if requested),
-        credentials (if requested), and file metadata.
+        credentials (if requested), file metadata, and ``errors`` (one
+        entry per tool run that failed or stopped early) when any.
     """
     source_name = f"pcap.disk.{Path(filename).stem}"
     result: dict[str, Any] = {
@@ -267,11 +250,15 @@ def _analyze_single_pcap(
         "source_name": source_name,
         "file_size_bytes": pcap_path.stat().st_size,
     }
+    errors: list[dict[str, str]] = []
 
-    protocol_output = _run_tshark_summary(pcap_path)
+    protocol_output = _run_tshark_summary(pcap_path, errors)
     if protocol_output:
         index_summary = extract_and_index(protocol_output, source_name, image_path, "tshark")
         result["protocol_summary"] = index_summary
+    elif errors:
+        # Nothing indexed: tshark could not read this capture.
+        result["protocol_summary"] = {"status": "error", "errors": list(errors)}
     else:
         result["protocol_summary"] = {"status": "no_output"}
 
@@ -279,6 +266,8 @@ def _analyze_single_pcap(
         _parse_eve_json,
         _run_suricata_process,
         _suricata_binary,
+        _suricata_failure,
+        _suricata_rules_warning,
     )
 
     # Gate on the resolved value and exec that same value: gating on
@@ -286,23 +275,38 @@ def _analyze_single_pcap(
     # "[Errno 2]" on any host that installs it anywhere else.
     suricata_bin = _suricata_binary() if run_ids else None
     if suricata_bin is not None:
-        try:
-            with tempfile.TemporaryDirectory(prefix="mulder_suri_disk_") as suri_dir:
-                eve_path = _run_suricata_process(suricata_bin, pcap_path, Path(suri_dir))
+        with tempfile.TemporaryDirectory(prefix="mulder_suri_disk_") as suri_dir:
+            eve_path, run = _run_suricata_process(suricata_bin, pcap_path, Path(suri_dir))
+            failure = _suricata_failure(eve_path, run)
+            if failure is not None:
+                result["ids_alerts"] = {"error": failure}
+                errors.append({"step": "suricata", "error": failure})
+            else:
                 ids_result = _parse_eve_json(eve_path)
                 result["ids_alerts"] = {
                     "total_alerts": ids_result["statistics"]["total_alerts"],
                     "top_signatures": ids_result["statistics"]["top_signatures"][:5],
                 }
-        except (subprocess.TimeoutExpired, OSError) as exc:
-            result["ids_alerts"] = {"error": str(exc)[:200]}
+                if not run.ok:
+                    result["ids_alerts"]["warning"] = _incomplete(run)
+                    errors.append({"step": "suricata", "error": _incomplete(run)})
+                rules_warning = _suricata_rules_warning(run, Path(suri_dir))
+                if rules_warning is not None:
+                    result["ids_alerts"]["warning"] = rules_warning
+                    errors.append({"step": "suricata", "error": rules_warning})
     elif run_ids:
         result["ids_alerts"] = {"skipped": "suricata not available"}
 
     if extract_credentials:
-        creds = _extract_credentials(pcap_path)
+        cred_errors: list[dict[str, str]] = []
+        creds = _extract_credentials(pcap_path, cred_errors)
         result["credentials"] = creds
+        if cred_errors:
+            result["credential_errors"] = cred_errors
+            errors.extend(cred_errors)
 
+    if errors:
+        result["errors"] = errors
     return result
 
 
@@ -484,6 +488,34 @@ def analyze_disk_pcaps(
         "total_credentials_found": len(all_credentials),
         "credentials": all_credentials[:100],
     }
+
+    with_errors = [a for a in pcaps_analyzed if a.get("errors")]
+    if with_errors:
+        cred_failures = sum(len(a.get("credential_errors", [])) for a in pcaps_analyzed)
+        results["pcaps_with_tool_errors"] = len(with_errors)
+        if cred_failures:
+            results["credential_searches_failed"] = cred_failures
+        details = [
+            f"{a['filename']}: {e['step']}: {e['error'].splitlines()[0]}"
+            for a in with_errors
+            for e in a["errors"]
+        ]
+        results["tool_warning"] = (
+            f"Tool runs failed on {len(with_errors)} of {len(pcaps_analyzed)} analyzed "
+            "capture(s): the summaries, alerts or credentials of those steps are missing, "
+            "not empty (see errors in each analysis).\n" + "\n".join(details[:10])
+        )
+    unreadable = [
+        a["filename"]
+        for a in pcaps_analyzed
+        if a.get("protocol_summary", {}).get("status") == "error"
+    ]
+    if pcaps_analyzed and len(unreadable) == len(pcaps_analyzed):
+        results["status"] = "error"
+        results["error_message"] = (
+            f"tshark could not read any of the {len(unreadable)} extracted capture(s): "
+            f"{', '.join(unreadable[:10])}. Nothing was indexed."
+        )
 
     return tool_response(
         tc_id,

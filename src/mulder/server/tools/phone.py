@@ -31,6 +31,8 @@ from mulder.server.helpers import (
     make_tool_call_id,
     readonly_sqlite_uri,
     require_binary,
+    run_failure_response,
+    run_tool,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
@@ -1148,6 +1150,99 @@ def _parse_leapp_output(
     }
 
 
+def _run_leapp(
+    *,
+    tc_id: str,
+    t0: float,
+    tool_name: str,
+    params: dict[str, object],
+    cmd: list[str],
+    timeout: int,
+    output_dir: Path,
+    platform: str,
+    label: str,
+    source: str,
+    extraction_path: str,
+    artifact_filter: list[str] | None,
+) -> dict[str, object]:
+    """Run ALEAPP/iLEAPP, index what it wrote, and say how the run ended.
+
+    The exit code, stdout and stderr used to be discarded: a LEAPP that
+    crashed on its input answered success with "no parseable output" and
+    a hint pointing at a source that was never created.
+    """
+    extractor = label.lower()
+    run = run_tool(cmd, timeout=timeout)
+    result = _parse_leapp_output(output_dir, platform, extraction_path, artifact_filter)
+
+    if result["total_artifacts_parsed"] == 0:
+        if not run.ok:
+            return run_failure_response(
+                tc_id,
+                tool_name,
+                params,
+                run,
+                t0,
+                context=f"{label} produced no parseable output",
+                suggestion=(
+                    "Check input_type against the extraction (fs directory, tar/zip/gz "
+                    f"archive) and that {label}'s requirements are installed."
+                ),
+            )
+        # Exit 0 and no TSV: nothing to index. No source is named, since
+        # none was created.
+        elapsed = (time.monotonic() - t0) * 1000
+        return tool_response(
+            tc_id,
+            tool_name,
+            params,
+            {
+                "status": "no_artifacts",
+                "message": (
+                    f"{label} ran to completion (exit 0) but wrote no TSV output: no "
+                    "artifact module matched this extraction. Nothing was indexed."
+                ),
+                "tool_output": run.tail(),
+            },
+            None,
+            elapsed,
+        )
+
+    text_parts = [
+        f"{label} analysis of {extraction_path}",
+        f"Artifacts parsed: {result['total_artifacts_parsed']}",
+        f"Total records: {result['total_records']}",
+    ]
+    for cat, count in result.get("categories", {}).items():
+        text_parts.append(f"  {cat}: {count} records")
+
+    # Index the parsed rows themselves. Without this the case
+    # database learned that LEAPP found N records and
+    # nothing about what they said -- no phone number, URL,
+    # filename or timestamp was searchable.
+    for artifact in result.get("artifacts", []):
+        text_parts.extend(_leapp_artifact_lines(artifact))
+
+    summary = extract_and_index("\n".join(text_parts), source, extraction_path, extractor)
+
+    # The response stays a bounded preview; the index does not.
+    for artifact in result.get("artifacts", []):
+        artifact["data"] = artifact["data"][:_MAX_LEAPP_RESPONSE_ROWS]
+    summary.update(result)
+    if run.timed_out:
+        summary["timed_out"] = True
+    if not run.ok:
+        # A run that stopped part-way (timeout, crash in one module) still
+        # wrote TSVs for the modules before it: indexed, but flagged.
+        summary["tool_warning"] = (
+            f"{run.describe()}\nThe output written before that was indexed; it may be "
+            "incomplete (modules after the failure did not run)."
+        )
+
+    elapsed = (time.monotonic() - t0) * 1000
+    return tool_response(tc_id, tool_name, params, summary, source, elapsed)
+
+
 @mcp.tool()
 @tool_access(Role.EXTRACT_EXECUTOR)
 def run_aleapp(
@@ -1240,80 +1335,20 @@ def run_aleapp(
             str(output_dir),
         ]
 
-        try:
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=_ALEAPP_TIMEOUT,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            result = _parse_leapp_output(output_dir, "android", extraction_path, artifact_filter)
-            if result["total_artifacts_parsed"] > 0:
-                result["timed_out"] = True
-                text = f"ALEAPP (partial, timed out): {result['total_artifacts_parsed']} artifacts"
-                summary = extract_and_index(text, "phone.aleapp", extraction_path, "aleapp")
-                summary.update(result)
-                elapsed = (time.monotonic() - t0) * 1000
-                return tool_response(tc_id, "run_aleapp", params, summary, "phone.aleapp", elapsed)
-            return error_response(
-                tc_id,
-                "run_aleapp",
-                params,
-                f"ALEAPP timed out after {_ALEAPP_TIMEOUT}s",
-                (time.monotonic() - t0) * 1000,
-                error_type="timeout",
-            )
-        except OSError as exc:
-            return error_response(
-                tc_id,
-                "run_aleapp",
-                params,
-                f"Failed to execute ALEAPP: {exc}",
-                (time.monotonic() - t0) * 1000,
-                error_type="os_error",
-            )
-
-        result = _parse_leapp_output(output_dir, "android", extraction_path, artifact_filter)
-
-        if result["total_artifacts_parsed"] == 0:
-            elapsed = (time.monotonic() - t0) * 1000
-            return tool_response(
-                tc_id,
-                "run_aleapp",
-                params,
-                {"status": "no_artifacts", "message": "ALEAPP produced no parseable output"},
-                "phone.aleapp",
-                elapsed,
-            )
-
-        text_parts = [
-            f"ALEAPP analysis of {extraction_path}",
-            f"Artifacts parsed: {result['total_artifacts_parsed']}",
-            f"Total records: {result['total_records']}",
-        ]
-        for cat, count in result.get("categories", {}).items():
-            text_parts.append(f"  {cat}: {count} records")
-
-        # Index the parsed rows themselves. Without this the case
-        # database learned that ALEAPP found N records and
-        # nothing about what they said -- no phone number, URL,
-        # filename or timestamp was searchable.
-        for artifact in result.get("artifacts", []):
-            text_parts.extend(_leapp_artifact_lines(artifact))
-
-        summary = extract_and_index(
-            "\n".join(text_parts), "phone.aleapp", extraction_path, "aleapp"
+        return _run_leapp(
+            tc_id=tc_id,
+            t0=t0,
+            tool_name="run_aleapp",
+            params=params,
+            cmd=cmd,
+            timeout=_ALEAPP_TIMEOUT,
+            output_dir=output_dir,
+            platform="android",
+            label="ALEAPP",
+            source="phone.aleapp",
+            extraction_path=extraction_path,
+            artifact_filter=artifact_filter,
         )
-
-        # The response stays a bounded preview; the index does not.
-        for artifact in result.get("artifacts", []):
-            artifact["data"] = artifact["data"][:_MAX_LEAPP_RESPONSE_ROWS]
-        summary.update(result)
-
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(tc_id, "run_aleapp", params, summary, "phone.aleapp", elapsed)
 
 
 @mcp.tool()
@@ -1409,77 +1444,17 @@ def run_ileapp(
             str(output_dir),
         ]
 
-        try:
-            subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=_ILEAPP_TIMEOUT,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            result = _parse_leapp_output(output_dir, "ios", extraction_path, artifact_filter)
-            if result["total_artifacts_parsed"] > 0:
-                result["timed_out"] = True
-                text = f"iLEAPP (partial, timed out): {result['total_artifacts_parsed']} artifacts"
-                summary = extract_and_index(text, "phone.ileapp", extraction_path, "ileapp")
-                summary.update(result)
-                elapsed = (time.monotonic() - t0) * 1000
-                return tool_response(tc_id, "run_ileapp", params, summary, "phone.ileapp", elapsed)
-            return error_response(
-                tc_id,
-                "run_ileapp",
-                params,
-                f"iLEAPP timed out after {_ILEAPP_TIMEOUT}s",
-                (time.monotonic() - t0) * 1000,
-                error_type="timeout",
-            )
-        except OSError as exc:
-            return error_response(
-                tc_id,
-                "run_ileapp",
-                params,
-                f"Failed to execute iLEAPP: {exc}",
-                (time.monotonic() - t0) * 1000,
-                error_type="os_error",
-            )
-
-        result = _parse_leapp_output(output_dir, "ios", extraction_path, artifact_filter)
-
-        if result["total_artifacts_parsed"] == 0:
-            elapsed = (time.monotonic() - t0) * 1000
-            return tool_response(
-                tc_id,
-                "run_ileapp",
-                params,
-                {"status": "no_artifacts", "message": "iLEAPP produced no parseable output"},
-                "phone.ileapp",
-                elapsed,
-            )
-
-        text_parts = [
-            f"iLEAPP analysis of {extraction_path}",
-            f"Artifacts parsed: {result['total_artifacts_parsed']}",
-            f"Total records: {result['total_records']}",
-        ]
-        for cat, count in result.get("categories", {}).items():
-            text_parts.append(f"  {cat}: {count} records")
-
-        # Index the parsed rows themselves. Without this the case
-        # database learned that iLEAPP found N records and
-        # nothing about what they said -- no phone number, URL,
-        # filename or timestamp was searchable.
-        for artifact in result.get("artifacts", []):
-            text_parts.extend(_leapp_artifact_lines(artifact))
-
-        summary = extract_and_index(
-            "\n".join(text_parts), "phone.ileapp", extraction_path, "ileapp"
+        return _run_leapp(
+            tc_id=tc_id,
+            t0=t0,
+            tool_name="run_ileapp",
+            params=params,
+            cmd=cmd,
+            timeout=_ILEAPP_TIMEOUT,
+            output_dir=output_dir,
+            platform="ios",
+            label="iLEAPP",
+            source="phone.ileapp",
+            extraction_path=extraction_path,
+            artifact_filter=artifact_filter,
         )
-
-        # The response stays a bounded preview; the index does not.
-        for artifact in result.get("artifacts", []):
-            artifact["data"] = artifact["data"][:_MAX_LEAPP_RESPONSE_ROWS]
-        summary.update(result)
-
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(tc_id, "run_ileapp", params, summary, "phone.ileapp", elapsed)

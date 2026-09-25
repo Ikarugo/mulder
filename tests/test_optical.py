@@ -250,7 +250,7 @@ class TestIsoListing:
 
 
 _TSK_FAIL = subprocess.CompletedProcess(
-    ["fls"], 1, stdout=b"", stderr=b"Possible encryption detected (High entropy (7.65))\n"
+    ["fls"], 1, stdout="", stderr="Possible encryption detected (High entropy (7.65))\n"
 )
 
 
@@ -259,7 +259,7 @@ class TestFlsFallback:
     @patch(f"{_TSK}.sources_already_indexed", return_value=[])
     @patch(f"{_TSK}.require_binary", return_value="/usr/bin/fls")
     @patch(f"{_TSK}._detect_partition_offset", return_value=0)
-    @patch(f"{_TSK}.subprocess.run", return_value=_TSK_FAIL)
+    @patch("mulder.server.helpers.subprocess.run", return_value=_TSK_FAIL)
     @patch(f"{_TSK}.probe_optical", return_value="udf")
     def test_run_fls_names_optical_media(self, probe: MagicMock, *_: MagicMock) -> None:
         from mulder.server.tools.extract.tsk import run_fls
@@ -278,7 +278,7 @@ class TestFlsFallback:
     @patch(f"{_TSK}.sources_already_indexed", return_value=[])
     @patch(f"{_TSK}.require_binary", return_value="/usr/bin/fls")
     @patch(f"{_TSK}._detect_partition_offset", return_value=0)
-    @patch(f"{_TSK}.subprocess.run", return_value=_TSK_FAIL)
+    @patch("mulder.server.helpers.subprocess.run", return_value=_TSK_FAIL)
     @patch(f"{_TSK}.probe_optical", return_value=None)
     def test_run_fls_keeps_tsk_error_for_hard_disks(self, *_: MagicMock) -> None:
         from mulder.server.tools.extract.tsk import run_fls
@@ -291,7 +291,7 @@ class TestFlsFallback:
     @patch(f"{_TSK}.get_ctx")
     @patch(f"{_TSK}._resolve_partition_offset", return_value=0)
     @patch(f"{_TSK}.require_binary", return_value="/usr/bin/fsstat")
-    @patch(f"{_TSK}.subprocess.run", return_value=_TSK_FAIL)
+    @patch("mulder.server.helpers.subprocess.run", return_value=_TSK_FAIL)
     @patch(f"{_TSK}.probe_optical", return_value="udf")
     def test_run_fsstat_and_mmls_redirect(self, *_: MagicMock) -> None:
         from mulder.server.tools.extract.tsk import run_fsstat, run_mmls

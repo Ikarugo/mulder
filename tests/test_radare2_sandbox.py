@@ -44,7 +44,7 @@ def _argv_of(commands: str, target: Path) -> list[str]:
 
     with (
         patch("mulder.server.tools.extract.misc.require_binary", return_value=True),
-        patch("mulder.server.tools.extract.misc.subprocess.run", side_effect=_capture),
+        patch("mulder.server.helpers.subprocess.run", side_effect=_capture),
         patch("mulder.server.tools.extract.misc.extract_and_index", return_value={}),
     ):
         run_radare2.__wrapped__(str(target), commands=commands)  # type: ignore[attr-defined]

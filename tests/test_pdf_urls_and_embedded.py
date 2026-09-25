@@ -165,7 +165,7 @@ def _analyze(pdf: Path, dump: str, **kwargs: Any) -> tuple[dict[str, Any], str]:
         patch("mulder.server.tools.documents._pdfid_script", return_value=Path("pdfid.py")),
         patch("mulder.server.tools.documents._pdf_parser_script", return_value=Path("pp.py")),
         patch("mulder.server.tools.documents._run_pdfid", return_value=[]),
-        patch("mulder.server.tools.documents.subprocess.run", side_effect=_fake_run),
+        patch("mulder.server.helpers.subprocess.run", side_effect=_fake_run),
         patch("mulder.server.tools.documents.extract_and_index", side_effect=_record),
     ):
         result = analyze_pdf.__wrapped__(  # type: ignore[attr-defined]

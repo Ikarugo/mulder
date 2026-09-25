@@ -162,7 +162,7 @@ class TestRunMmls:
         assert result["error_type"] == "binary_missing"
 
     @patch("mulder.server.tools.extract.tsk.require_binary", return_value="/usr/bin/mmls")
-    @patch("mulder.server.tools.extract.tsk.subprocess.run")
+    @patch("mulder.server.helpers.subprocess.run")
     def test_no_partition_table_error(self, mock_run: MagicMock, mock_req: MagicMock) -> None:
         from mulder.server.tools.extract.tsk import run_mmls
 
@@ -179,7 +179,7 @@ class TestRunMmls:
         assert "partition_offset=0" in result["suggestion"]
 
     @patch("mulder.server.tools.extract.tsk.require_binary", return_value="/usr/bin/mmls")
-    @patch("mulder.server.tools.extract.tsk.subprocess.run")
+    @patch("mulder.server.helpers.subprocess.run")
     def test_ewf_error(self, mock_run: MagicMock, mock_req: MagicMock) -> None:
         from mulder.server.tools.extract.tsk import run_mmls
 
@@ -195,7 +195,7 @@ class TestRunMmls:
         assert "suggestion" in result
 
     @patch("mulder.server.tools.extract.tsk.require_binary", return_value="/usr/bin/mmls")
-    @patch("mulder.server.tools.extract.tsk.subprocess.run")
+    @patch("mulder.server.helpers.subprocess.run")
     def test_generic_mmls_error(self, mock_run: MagicMock, mock_req: MagicMock) -> None:
         from mulder.server.tools.extract.tsk import run_mmls
 
@@ -212,7 +212,7 @@ class TestRunMmls:
 
     @patch("mulder.server.tools.extract.tsk.require_binary", return_value="/usr/bin/mmls")
     @patch(
-        "mulder.server.tools.extract.tsk.subprocess.run",
+        "mulder.server.helpers.subprocess.run",
         side_effect=subprocess.TimeoutExpired("mmls", 60),
     )
     def test_timeout(self, mock_run: MagicMock, mock_req: MagicMock) -> None:
@@ -310,7 +310,7 @@ class TestRunFlsRetry:
     @patch("mulder.server.tools.extract.tsk.require_binary", return_value="/usr/bin/fls")
     @patch("mulder.server.tools.extract.tsk.sources_already_indexed", return_value=[])
     @patch("mulder.server.tools.extract.tsk.get_ctx")
-    @patch("mulder.server.tools.extract.tsk.subprocess.run")
+    @patch("mulder.server.helpers.subprocess.run")
     def test_retry_with_mmls_on_offset_zero_failure(
         self,
         mock_run: MagicMock,
@@ -336,8 +336,8 @@ class TestRunFlsRetry:
         fls_fail = subprocess.CompletedProcess(
             args=["fls", "-r", "-p", "/fake/image.E01"],
             returncode=1,
-            stdout=b"",
-            stderr=b"Cannot determine file system type",
+            stdout="",
+            stderr="Cannot determine file system type",
         )
         mmls_success = subprocess.CompletedProcess(
             args=["mmls", "/fake/image.E01"],
@@ -348,8 +348,8 @@ class TestRunFlsRetry:
         fls_success = subprocess.CompletedProcess(
             args=["fls", "-r", "-p", "-o", "2048", "/fake/image.E01"],
             returncode=0,
-            stdout=b"r/r 66-128-3:\tWindows/System32/config/SYSTEM\n",
-            stderr=b"",
+            stdout="r/r 66-128-3:\tWindows/System32/config/SYSTEM\n",
+            stderr="",
         )
         mock_run.side_effect = [fls_fail, mmls_success, fls_success]
 
@@ -365,7 +365,7 @@ class TestRunFlsRetry:
     @patch("mulder.server.tools.extract.tsk.require_binary", return_value="/usr/bin/fls")
     @patch("mulder.server.tools.extract.tsk.sources_already_indexed", return_value=[])
     @patch("mulder.server.tools.extract.tsk.get_ctx")
-    @patch("mulder.server.tools.extract.tsk.subprocess.run")
+    @patch("mulder.server.helpers.subprocess.run")
     def test_offset_zero_succeeds_without_retry(
         self,
         mock_run: MagicMock,
@@ -386,8 +386,8 @@ class TestRunFlsRetry:
         fls_success = subprocess.CompletedProcess(
             args=["fls", "-r", "-p", "/fake/partition.dd"],
             returncode=0,
-            stdout=b"r/r 66-128-3:\tWindows/System32/config/SYSTEM\n",
-            stderr=b"",
+            stdout="r/r 66-128-3:\tWindows/System32/config/SYSTEM\n",
+            stderr="",
         )
         mock_run.return_value = fls_success
 
@@ -402,7 +402,7 @@ class TestRunFlsRetry:
     @patch("mulder.server.tools.extract.tsk.require_binary", return_value="/usr/bin/fls")
     @patch("mulder.server.tools.extract.tsk.sources_already_indexed", return_value=[])
     @patch("mulder.server.tools.extract.tsk.get_ctx")
-    @patch("mulder.server.tools.extract.tsk.subprocess.run")
+    @patch("mulder.server.helpers.subprocess.run")
     def test_explicit_offset_skips_secondary_partitions(
         self,
         mock_run: MagicMock,
@@ -421,8 +421,8 @@ class TestRunFlsRetry:
         fls_success = subprocess.CompletedProcess(
             args=["fls", "-r", "-p", "-o", "2048", "/fake/image.dd"],
             returncode=0,
-            stdout=b"r/r 66-128-3:\tWindows/System32/config/SYSTEM\n",
-            stderr=b"",
+            stdout="r/r 66-128-3:\tWindows/System32/config/SYSTEM\n",
+            stderr="",
         )
         mock_run.return_value = fls_success
 
@@ -443,7 +443,7 @@ class TestRunFlsMultiPartition:
     @patch("mulder.server.tools.extract.tsk.require_binary", return_value="/usr/bin/fls")
     @patch("mulder.server.tools.extract.tsk.sources_already_indexed", return_value=[])
     @patch("mulder.server.tools.extract.tsk.get_ctx")
-    @patch("mulder.server.tools.extract.tsk.subprocess.run")
+    @patch("mulder.server.helpers.subprocess.run")
     def test_indexes_secondary_partitions_on_auto_detect(
         self,
         mock_run: MagicMock,
@@ -467,8 +467,8 @@ class TestRunFlsMultiPartition:
         fls_success = subprocess.CompletedProcess(
             args=["fls", "-r", "-p", "/fake/image.dd"],
             returncode=0,
-            stdout=b"r/r 66-128-3:\tWindows/System32/config/SYSTEM\n",
-            stderr=b"",
+            stdout="r/r 66-128-3:\tWindows/System32/config/SYSTEM\n",
+            stderr="",
         )
         mock_run.return_value = fls_success
 
@@ -476,7 +476,8 @@ class TestRunFlsMultiPartition:
             "/fake/image.dd", partition_offset=None
         )
         assert result["status"] == "success"
-        mock_index_secondary.assert_called_once_with("/fake/image.dd", 0)
+        mock_index_secondary.assert_called_once()
+        assert mock_index_secondary.call_args.args[:2] == ("/fake/image.dd", 0)
 
 
 class TestPartitionTableScoping:

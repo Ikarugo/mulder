@@ -219,6 +219,9 @@ recovered" or "is not present":
 - read files to the end (follow `next_offset`);
 - say in the finding which sources and tools you checked. A tool that
   failed is a gap in coverage, not a negative result: name the error.
+  A response with `status: partial` (or listed in `results_not_clean` by
+  get_completed_results) completed only in part: read its `tool_warning`
+  and `extraction_failures` before relying on what it did not return.
 - run_hindsight: analyze Chrome/Chromium browser artifacts. Use when
   you find browser activity of interest.
 - enrich_iocs: get geolocation and reputation for IP addresses. Use

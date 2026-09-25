@@ -8,6 +8,7 @@ empty results, multiple PCAPs, and corrupt file handling.
 from __future__ import annotations
 
 from pathlib import Path
+from subprocess import CompletedProcess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -99,17 +100,23 @@ class TestDiscoverPcapFiles:
             assert offset == 128
 
 
+def _proc(returncode: int, stdout: str = "", stderr: str = "") -> CompletedProcess[str]:
+    """What ``run_tool`` gets back from ``subprocess.run`` (text mode)."""
+    return CompletedProcess(["tshark"], returncode, stdout=stdout, stderr=stderr)
+
+
+# run_tool calls subprocess.run from mulder.server.helpers.
+_RUN = "mulder.server.helpers.subprocess.run"
+
+
 class TestExtractCredentials:
     """Tests for the _extract_credentials function."""
 
-    @patch("mulder.server.tools.extract.disk_pcap.subprocess.run")
+    @patch(_RUN)
     def test_ftp_credentials_extracted(self, mock_run: MagicMock) -> None:
         """FTP USER/PASS lines are parsed into credential records."""
         ftp_output = "2004-03-15 12:00:00\t192.168.1.10\t10.0.0.1\tUSER admin"
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=ftp_output,
-        )
+        mock_run.return_value = _proc(0, ftp_output)
 
         creds = _extract_credentials(Path("/tmp/test.pcap"))
         ftp_creds = [c for c in creds if c["protocol"] == "ftp_credentials"]
@@ -118,51 +125,49 @@ class TestExtractCredentials:
         assert ftp_creds[0]["dest_ip"] == "10.0.0.1"
         assert "admin" in ftp_creds[0]["raw_data"]
 
-    @patch("mulder.server.tools.extract.disk_pcap.subprocess.run")
+    @patch(_RUN)
     def test_http_basic_auth_extracted(self, mock_run: MagicMock) -> None:
         """HTTP Basic Auth header is captured."""
         http_output = "2004-03-15 13:00:00\t192.168.1.10\t10.0.0.2\tBasic YWRtaW46cGFzcw=="
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout=http_output,
-        )
+        mock_run.return_value = _proc(0, http_output)
 
         creds = _extract_credentials(Path("/tmp/test.pcap"))
         http_creds = [c for c in creds if c["protocol"] == "http_basic_auth"]
         assert len(http_creds) >= 1
         assert "Basic" in http_creds[0]["raw_data"]
 
-    @patch("mulder.server.tools.extract.disk_pcap.subprocess.run")
+    @patch(_RUN)
     def test_empty_credentials_on_encrypted_traffic(self, mock_run: MagicMock) -> None:
         """Returns empty list when no cleartext credentials found."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="",
-        )
+        mock_run.return_value = _proc(0, "")
 
-        creds = _extract_credentials(Path("/tmp/encrypted.pcap"))
+        errors: list[dict[str, str]] = []
+        creds = _extract_credentials(Path("/tmp/encrypted.pcap"), errors)
         assert creds == []
+        assert errors == []
 
-    @patch("mulder.server.tools.extract.disk_pcap.subprocess.run")
+    @patch(_RUN)
     def test_tshark_failure_handled_gracefully(self, mock_run: MagicMock) -> None:
-        """tshark errors do not crash; returns empty list."""
-        mock_run.return_value = MagicMock(
-            returncode=1,
-            stdout="",
-        )
+        """tshark errors do not crash; no credential, and each failure is reported."""
+        mock_run.return_value = _proc(1, "", "tshark: The file isn't a capture file")
 
-        creds = _extract_credentials(Path("/tmp/corrupt.pcap"))
+        errors: list[dict[str, str]] = []
+        creds = _extract_credentials(Path("/tmp/corrupt.pcap"), errors)
         assert creds == []
+        assert len(errors) == len(_CREDENTIAL_FILTERS)
+        assert "isn't a capture file" in errors[0]["error"]
 
-    @patch("mulder.server.tools.extract.disk_pcap.subprocess.run")
+    @patch(_RUN)
     def test_timeout_handled_gracefully(self, mock_run: MagicMock) -> None:
-        """Subprocess timeout does not crash; returns empty list."""
+        """Subprocess timeout does not crash; returns empty list and reports it."""
         from subprocess import TimeoutExpired
 
         mock_run.side_effect = TimeoutExpired(cmd="tshark", timeout=30)
 
-        creds = _extract_credentials(Path("/tmp/huge.pcap"))
+        errors: list[dict[str, str]] = []
+        creds = _extract_credentials(Path("/tmp/huge.pcap"), errors)
         assert creds == []
+        assert errors and "timed out" in errors[0]["error"]
 
     def test_credential_filters_cover_required_protocols(self) -> None:
         """Verify all required protocol filters are defined."""
@@ -177,39 +182,42 @@ class TestExtractCredentials:
 class TestTsharkSummary:
     """Tests for the _run_tshark_summary function."""
 
-    @patch("mulder.server.tools.extract.disk_pcap.subprocess.run")
+    @patch(_RUN)
     def test_produces_protocol_hierarchy(self, mock_run: MagicMock) -> None:
         """Successful tshark run produces protocol hierarchy output."""
-        mock_run.return_value = MagicMock(
-            returncode=0,
-            stdout="Protocol Hierarchy Statistics\n  eth  100.0%\n    ip  100.0%\n",
-            stderr="",
+        mock_run.return_value = _proc(
+            0, "Protocol Hierarchy Statistics\n  eth  100.0%\n    ip  100.0%\n"
         )
 
         output = _run_tshark_summary(Path("/tmp/test.pcap"))
         assert "Protocol Hierarchy" in output
 
-    @patch("mulder.server.tools.extract.disk_pcap.subprocess.run")
+    @patch(_RUN)
     def test_tshark_error_reported(self, mock_run: MagicMock) -> None:
-        """tshark errors are reported in output without crashing."""
-        mock_run.return_value = MagicMock(
-            returncode=2,
-            stdout="",
-            stderr="tshark: The file isn't a capture file",
-        )
+        """tshark errors are reported without crashing, and not as indexed content.
 
-        output = _run_tshark_summary(Path("/tmp/corrupt.pcap"))
-        assert "tshark error" in output
+        The old assertion ("tshark error" in the returned text) encoded the
+        bug: that text is indexed as the capture's protocol summary.
+        """
+        mock_run.return_value = _proc(2, "", "tshark: The file isn't a capture file")
 
-    @patch("mulder.server.tools.extract.disk_pcap.subprocess.run")
+        errors: list[dict[str, str]] = []
+        output = _run_tshark_summary(Path("/tmp/corrupt.pcap"), errors)
+        assert output == ""
+        assert len(errors) == 3
+        assert "exited 2" in errors[0]["error"]
+
+    @patch(_RUN)
     def test_timeout_reported(self, mock_run: MagicMock) -> None:
         """Timeout during tshark is reported without crashing."""
         from subprocess import TimeoutExpired
 
         mock_run.side_effect = TimeoutExpired(cmd="tshark", timeout=120)
 
-        output = _run_tshark_summary(Path("/tmp/large.pcap"))
-        assert "timed out" in output
+        errors: list[dict[str, str]] = []
+        output = _run_tshark_summary(Path("/tmp/large.pcap"), errors)
+        assert output == ""
+        assert "timed out" in errors[0]["error"]
 
 
 class TestAnalyzeDiskPcapsTool:

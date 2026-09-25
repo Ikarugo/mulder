@@ -18,6 +18,7 @@ import time
 from collections import defaultdict
 from collections.abc import Callable, Mapping, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, ParamSpec
 from urllib.parse import quote
@@ -145,14 +146,241 @@ def run_subprocess(
 
     Returns the CompletedProcess on success, or an error message string
     on timeout/OS failure. Callers check ``isinstance(result, str)`` to
-    detect failures.
+    detect failures. Standard input is closed so a tool that prompts (an
+    encrypted archive, a confirmation) fails instead of reading the MCP
+    server's own stdin.
     """
     try:
-        return subprocess.run(cmd, capture_output=True, text=text, timeout=timeout, check=False)
+        return subprocess.run(
+            cmd,
+            capture_output=True,
+            text=text,
+            timeout=timeout,
+            check=False,
+            stdin=subprocess.DEVNULL,
+        )
     except subprocess.TimeoutExpired:
         return f"{cmd[0]} timed out after {timeout}s"
     except OSError as exc:
         return f"Failed to run {cmd[0]}: {exc}"
+
+
+def output_tail(stdout: str | None, stderr: str | None, lines: int = 15) -> str:
+    """The last non-empty lines a tool printed (stdout then stderr), for error messages."""
+    text = "\n".join(part for part in (stdout, stderr) if part)
+    kept = [line.rstrip() for line in text.splitlines() if line.strip()]
+    return "\n".join(kept[-lines:])[-2000:]
+
+
+@dataclass
+class ToolRun:
+    """What one run of an external program did.
+
+    Most tool wrappers used to call ``subprocess.run`` themselves and index
+    whatever stdout held, without looking at the exit code or stderr: a
+    tool that could not open its input was reported as a successful run
+    that found nothing. ``run_tool`` returns this record instead, and
+    :meth:`failed` / :meth:`describe` give every wrapper the same rules.
+    """
+
+    binary: str
+    returncode: int | None
+    stdout: str = ""
+    stderr: str = ""
+    timed_out: bool = False
+    launch_error: str | None = None
+    timeout: int = 0
+
+    @property
+    def ok(self) -> bool:
+        """Exit code 0, no timeout, and the program started."""
+        return self.returncode == 0 and not self.timed_out and self.launch_error is None
+
+    @property
+    def has_output(self) -> bool:
+        """Something other than whitespace on stdout."""
+        return bool(self.stdout.strip())
+
+    @property
+    def failed(self) -> bool:
+        """Did not complete and left nothing usable on stdout.
+
+        A non-zero exit after real output is not a failure: many tools
+        stop on one bad input after writing results for the others (see
+        :meth:`warning`).
+        """
+        return not self.ok and not self.has_output
+
+    @property
+    def error_type(self) -> str:
+        """``error_type`` for :func:`error_response`."""
+        if self.timed_out:
+            return "timeout"
+        if self.launch_error is not None:
+            return "binary_missing" if "No such file" in self.launch_error else "tool_failed"
+        return "tool_failed"
+
+    def tail(self, lines: int = 15) -> str:
+        """The last lines the program printed."""
+        return output_tail(self.stdout, self.stderr, lines)
+
+    def describe(self) -> str:
+        """One message with the exit status and the program's own last lines."""
+        if self.launch_error is not None:
+            return f"{self.binary} could not be started: {self.launch_error}"
+        if self.timed_out:
+            message = f"{self.binary} timed out after {self.timeout}s"
+        else:
+            message = f"{self.binary} exited {self.returncode}"
+        tail = self.tail()
+        return message + (f". Tool output (last lines):\n{tail}" if tail else " with no output")
+
+    def warning(self) -> str | None:
+        """For a run that did not complete but produced output: say so."""
+        if self.ok or not self.has_output:
+            return None
+        return (
+            f"{self.describe()}\nThe output written before that was indexed; it may be incomplete."
+        )
+
+
+def run_tool(
+    cmd: Sequence[str],
+    *,
+    timeout: int = TOOL_TIMEOUT,
+    cwd: str | Path | None = None,
+    env: Mapping[str, str] | None = None,
+    input_text: str | None = None,
+) -> ToolRun:
+    """Run an external program and return a :class:`ToolRun`; never raises.
+
+    Output is decoded as UTF-8 with replacement (a tool printing a Windows
+    path in cp1252 must not crash the wrapper), and standard input is
+    closed unless *input_text* is given.
+    """
+    binary = Path(str(cmd[0])).name if cmd else "?"
+    try:
+        proc = subprocess.run(
+            list(cmd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+            check=False,
+            cwd=cwd,
+            env=dict(env) if env is not None else None,
+            input=input_text,
+            stdin=None if input_text is not None else subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired as exc:
+        return ToolRun(
+            binary,
+            None,
+            _as_text(exc.stdout),
+            _as_text(exc.stderr),
+            timed_out=True,
+            timeout=timeout,
+        )
+    except OSError as exc:
+        return ToolRun(binary, None, launch_error=str(exc), timeout=timeout)
+    return ToolRun(binary, proc.returncode, proc.stdout or "", proc.stderr or "", timeout=timeout)
+
+
+def _as_text(value: object) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return value if isinstance(value, str) else ""
+
+
+# ---------------------------------------------------------------------------
+# Failure memory: do not run the same failing command twice
+# ---------------------------------------------------------------------------
+
+
+def failure_key(tool_name: str, evidence: str, *parts: object) -> str:
+    """Key under which a failure of *tool_name* on *evidence* is remembered."""
+    suffix = ":".join(str(p) for p in parts if p not in (None, ""))
+    return f"tool_failed:{tool_name}:{evidence}" + (f":{suffix}" if suffix else "")
+
+
+def previous_failure(key: str) -> str | None:
+    """The message of an earlier failure recorded under *key*, if any."""
+    if not has_ctx():
+        return None
+    try:
+        value = get_ctx().db.get_kv(key)
+    except Exception:
+        return None
+    return str(value) if value else None
+
+
+def remember_failure(key: str, message: str) -> None:
+    """Record that a run failed, so an identical run is not attempted again."""
+    if not has_ctx():
+        return
+    try:
+        get_ctx().db.set_kv(key, message[:2000])
+    except Exception:  # noqa: BLE001 - memory is best effort
+        return
+
+
+def repeated_failure_response(
+    tc_id: str,
+    tool_name: str,
+    params: Mapping[str, object],
+    key: str,
+    t0: float | None = None,
+) -> dict[str, object] | None:
+    """An error response when the same run already failed, unless ``force`` is set."""
+    if params.get("force"):
+        return None
+    previous = previous_failure(key)
+    if not previous:
+        return None
+    return error_response(
+        tc_id,
+        tool_name,
+        params,
+        f"Not run again: this already failed on the same input. {previous}",
+        (time.monotonic() - t0) * 1000 if t0 is not None else 0,
+        error_type="tool_failed",
+        suggestion=(
+            "Running it again on the same input fails the same way. Record the gap and "
+            "use other sources, or pass force=True after changing the input or the setup."
+        ),
+    )
+
+
+def run_failure_response(
+    tc_id: str,
+    tool_name: str,
+    params: Mapping[str, object],
+    run: ToolRun,
+    t0: float | None = None,
+    *,
+    memory_key: str | None = None,
+    context: str = "",
+    suggestion: str | None = None,
+) -> dict[str, object]:
+    """The error response for a failed :class:`ToolRun`, remembered under *memory_key*.
+
+    A missing binary and a timeout are not remembered: installing the tool
+    or a machine under less load makes the same run succeed (the job runner
+    retries timed-out jobs with the same arguments).
+    """
+    message = (f"{context}: " if context else "") + run.describe()
+    if memory_key is not None and run.error_type not in ("binary_missing", "timeout"):
+        remember_failure(memory_key, message)
+    return error_response(
+        tc_id,
+        tool_name,
+        params,
+        message,
+        (time.monotonic() - t0) * 1000 if t0 is not None else 0,
+        error_type=run.error_type,
+        suggestion=suggestion,
+    )
 
 
 def make_tool_call_id() -> str:
@@ -416,12 +644,15 @@ def tool_response(
         )
 
     if source is None:
-        return {
+        full: dict[str, object] = {
             "tool_call_id": tc_id,
             "status": "success",
             "results": results,
             "source": source,
         }
+        if isinstance(results, dict):
+            _propagate_status(full, results)
+        return full
 
     line_count: int | None = None
     windows_indexed: int | None = None
@@ -433,28 +664,125 @@ def tool_response(
         if isinstance(wi, int):
             windows_indexed = wi
 
-    preview = ""
-    if isinstance(results, dict | list):
-        preview = json.dumps(results, default=str)[:_PREVIEW_CHAR_LIMIT]
-    elif isinstance(results, str):
-        preview = results[:_PREVIEW_CHAR_LIMIT]
-
+    preview, preview_truncated = _result_preview(results)
     resp: dict[str, object] = {
         "tool_call_id": tc_id,
         "status": "success",
         "source": source,
-        "preview": preview + ("..." if len(preview) >= _PREVIEW_CHAR_LIMIT else ""),
-        "hint": (
+        "preview": preview,
+    }
+    if preview_truncated:
+        resp["preview_truncated"] = True
+    inner_status = results.get("status") if isinstance(results, dict) else None
+    if isinstance(results, dict) and inner_status == "skipped":
+        resp["hint"] = _skipped_hint(results, params, source)
+    elif windows_indexed == 0:
+        resp["hint"] = (
+            f"Nothing was indexed as '{source}': the tool ran and produced no output "
+            "for this input."
+        )
+    else:
+        resp["hint"] = (
             f"Full output indexed as '{source}'. "
             f"Use search(query, source='{source}') or "
             f"get_raw_output('{source}') to access."
-        ),
-    }
+        )
+    if preview_truncated:
+        resp["hint"] = str(resp["hint"]) + (
+            " The preview above is cut: fields that are not in the indexed output may be "
+            "incomplete there."
+        )
+    if isinstance(results, dict):
+        _propagate_status(resp, results)
     if line_count is not None:
         resp["line_count"] = line_count
     if windows_indexed is not None:
         resp["windows_indexed"] = windows_indexed
     return resp
+
+
+_RESULT_PREVIEW_BUDGET = 4000
+_PREVIEW_LIST_ITEMS = 25
+_PREVIEW_STRING_CHARS = 800
+
+
+def _shrink_for_preview(value: object, depth: int = 0) -> object:
+    """Cut long lists and strings, saying how much was left out."""
+    if isinstance(value, dict):
+        return {k: _shrink_for_preview(v, depth + 1) for k, v in value.items()}
+    if isinstance(value, list | tuple):
+        items = [_shrink_for_preview(v, depth + 1) for v in value[:_PREVIEW_LIST_ITEMS]]
+        if len(value) > _PREVIEW_LIST_ITEMS:
+            items.append(f"[... {len(value) - _PREVIEW_LIST_ITEMS} more items not shown]")
+        return items
+    if isinstance(value, str) and len(value) > _PREVIEW_STRING_CHARS:
+        return value[:_PREVIEW_STRING_CHARS] + (
+            f" [...{len(value) - _PREVIEW_STRING_CHARS} more chars not shown...]"
+        )
+    return value
+
+
+def _result_preview(results: object) -> tuple[str, bool]:
+    """JSON of *results* for the response, and whether any of it was cut.
+
+    The preview used to be the first 500 characters of the JSON. Fields a
+    tool computed but did not index (alerts, per-mode errors, detections,
+    hints) were then invisible past that point, with nothing saying so.
+    """
+    text = results if isinstance(results, str) else json.dumps(results, default=str)
+    if len(text) <= _RESULT_PREVIEW_BUDGET:
+        return text, False
+    if not isinstance(results, str):
+        text = json.dumps(_shrink_for_preview(results), default=str)
+    if len(text) > _RESULT_PREVIEW_BUDGET:
+        text = text[:_RESULT_PREVIEW_BUDGET] + (
+            f" [...{len(text) - _RESULT_PREVIEW_BUDGET} more chars not shown...]"
+        )
+    return text, True
+
+
+#: Statuses a tool puts in its result dict that must not surface as success.
+_ERROR_STATUSES = frozenset({"error", "failed"})
+_PARTIAL_STATUSES = frozenset({"partial", "header_only"})
+
+
+def _propagate_status(resp: dict[str, object], results: Mapping[str, object]) -> None:
+    """Lift an error or partial status out of *results* to the response.
+
+    Tools that index what they got still describe failures in their result
+    dict (a Volatility plugin error, a hive that failed, an external tool
+    that exited non-zero after partial output). The response said
+    ``success`` regardless, and the batch runner marked such jobs completed.
+    """
+    inner = results.get("status")
+    if inner in _ERROR_STATUSES:
+        resp["status"] = "error"
+        resp["error_type"] = str(results.get("error_type") or "tool_failed")
+        resp["error_message"] = str(
+            results.get("error_message") or results.get("error") or "the tool reported an error"
+        )
+    elif inner in _PARTIAL_STATUSES or results.get("tool_warning"):
+        resp["status"] = "partial"
+    if results.get("tool_warning"):
+        resp["tool_warning"] = results["tool_warning"]
+
+
+def _skipped_hint(
+    results: Mapping[str, object], params: Mapping[str, object], source: str | None
+) -> str:
+    existing = results.get("existing_sources")
+    if not existing:
+        # A skip for another reason (not applicable to this evidence...).
+        reason = results.get("reason") or results.get("message")
+        return f"Not run: {reason}" if reason else f"Not run; nothing was indexed as '{source}'."
+    names = ", ".join(str(e) for e in existing) if isinstance(existing, list) else source
+    hint = (
+        f"Not run again: {names} already indexed from this evidence. "
+        f"Query it with search(query, source=...) or get_raw_output(...)."
+    )
+    if "force" in params:
+        hint += " Pass force=True to run it again (for example with other parameters)."
+    return hint
 
 
 def error_response(
@@ -595,6 +923,10 @@ def sources_already_indexed(
     for src in sources:
         if evidence_path and src.source_path != evidence_path:
             continue
+        if src.line_count == 0:
+            # An empty source is a run that indexed nothing: often a failure
+            # recorded as a result. It must not stop the tool from running.
+            continue
         for prefix in source_prefixes:
             if src.source_name.startswith(prefix):
                 existing.append(src.source_name)
@@ -603,14 +935,8 @@ def sources_already_indexed(
 
 
 TOOL_SOURCE_PREFIXES: dict[str, list[str]] = {
-    "run_volatility_batch": ["volatility."],
-    "run_volatility": ["volatility."],
     "run_fls": ["tsk.filelist"],
-    "run_bulk_extractor": ["bulk."],
-    "run_evtx_parser": ["evtx.", "ez.evtx"],
     "run_hayabusa": ["hayabusa."],
-    "run_chainsaw": ["chainsaw."],
-    "run_registry_parser": ["registry."],
     "run_prefetch_parser": ["prefetch.", "ez.prefetch"],
     "run_amcache_parser": ["amcache.", "ez.amcache"],
     "run_shimcache_parser": ["shimcache.", "ez.shimcache"],
@@ -621,7 +947,6 @@ TOOL_SOURCE_PREFIXES: dict[str, list[str]] = {
     "run_shellbags_parser": ["ez.shellbags"],
     "run_srum_parser": ["ez.srum"],
     "parse_cryptnet_url_cache": ["cryptnet.urlcache"],
-    "run_zircolite": ["zircolite."],
     "parse_autoruns": ["autoruns."],
 }
 """Maps extraction tool names to the source prefixes they produce.
@@ -630,6 +955,13 @@ Used by ``start_extraction_batch`` to skip submitting jobs for tools
 whose output sources already exist in the case database. Tools not
 listed here are always submitted (they either lack idempotency checks
 or produce unique per-invocation sources).
+
+Tools whose own skip depends on their parameters are deliberately not
+listed, so the batch lets the tool decide: Volatility (per plugin), the
+registry parser (per hive), Chainsaw (per mode), Zircolite (per log
+format), bulk_extractor (a timed-out run must be re-run) and the EVTX
+parser (its extracted files may be gone). A prefix match here used to
+skip them all as soon as any one of their sources existed.
 """
 
 
@@ -717,22 +1049,12 @@ def run_cli_tool(
             error_type="file_not_found",
         )
 
-    result = run_subprocess(cmd, timeout=timeout)
-    if isinstance(result, str):
-        return error_response(tc_id, tool_name, params, result, error_type="timeout")
-    proc = result
+    run = run_tool(cmd, timeout=timeout)
+    if run.failed:
+        return run_failure_response(tc_id, tool_name, params, run, t0)
 
-    if proc.returncode != 0 and not proc.stdout.strip():
-        detail = ((proc.stderr or "").strip() or (proc.stdout or "").strip())[:_PREVIEW_CHAR_LIMIT]
-        return error_response(
-            tc_id,
-            tool_name,
-            params,
-            f"{binary} exited {proc.returncode} and produced no output: {detail}",
-            (time.monotonic() - t0) * 1000,
-            error_type="tool_failed",
-        )
-
-    summary = extract_and_index(proc.stdout.strip(), source_name, source_path, extractor_label)
+    summary = extract_and_index(run.stdout.strip(), source_name, source_path, extractor_label)
+    if (warning := run.warning()) is not None:
+        summary["tool_warning"] = warning
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, tool_name, params, summary, source_name, elapsed)

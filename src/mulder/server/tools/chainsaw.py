@@ -585,8 +585,14 @@ def run_chainsaw(
         "force": force,
     }
 
-    if not force:
-        existing = sources_already_indexed(["chainsaw."], evidence_path=evidence_path)
+    # The skip is per mode: a hunt says nothing about SRUM or a search, and a
+    # search or a time-bounded run is a different question every time.
+    if not force and mode != "search" and not (time_range_start or time_range_end):
+        existing = [
+            e
+            for e in sources_already_indexed([f"chainsaw.{mode}"], evidence_path=evidence_path)
+            if e == f"chainsaw.{mode}"
+        ]
         if existing:
             return tool_response(
                 tc_id,

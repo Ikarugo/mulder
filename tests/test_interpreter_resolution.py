@@ -211,7 +211,7 @@ class TestZircolite:
 
     def test_uses_sys_executable(self, tmp_path: Path) -> None:
         script = str(tmp_path / "zircolite.py")
-        with patch("mulder.server.tools.zircolite.subprocess.run") as mock_run:
+        with patch("mulder.server.helpers.subprocess.run") as mock_run:
             _run_zircolite_process(script, tmp_path / "events.log", "auditd", tmp_path, tmp_path)
         assert mock_run.call_args[0][0][0] == sys.executable
         assert mock_run.call_args[0][0][1] == script
@@ -280,7 +280,7 @@ class TestDidierStevensScripts:
         with (
             patch("mulder.server.tools.documents.Path.exists", return_value=True),
             patch(
-                "mulder.server.tools.documents.subprocess.run",
+                "mulder.server.helpers.subprocess.run",
                 return_value=_completed(),
             ) as mock_run,
         ):
@@ -298,7 +298,7 @@ class TestDidierStevensScripts:
                 return_value="/usr/bin/pdfid",
             ),
             patch(
-                "mulder.server.tools.documents.subprocess.run",
+                "mulder.server.helpers.subprocess.run",
                 return_value=_completed(),
             ) as mock_run,
         ):
@@ -314,7 +314,7 @@ class TestDidierStevensScripts:
         with (
             patch("mulder.server.tools.documents.Path.exists", return_value=True),
             patch(
-                "mulder.server.tools.documents.subprocess.run",
+                "mulder.server.helpers.subprocess.run",
                 return_value=_completed(),
             ) as mock_run,
         ):

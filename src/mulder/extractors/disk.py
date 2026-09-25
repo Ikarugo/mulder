@@ -187,15 +187,21 @@ def _raw_dir(mount_point: Path) -> Path:
     return mount_point.with_name(mount_point.name + ".raw")
 
 
-def _run(cmd: list[str], timeout: int) -> bool:
+def _run(cmd: list[str], timeout: int, problems: list[str] | None = None) -> bool:
     """Run *cmd*; return True on exit 0, logging its output and argv otherwise.
 
     xmount reports errors on stdout, so stdout is logged when stderr is empty.
+    When *problems* is given, the failure is also appended to it, so the
+    caller can tell the agent why the image did not mount.
     """
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=timeout, check=False)
+        proc = subprocess.run(
+            cmd, capture_output=True, timeout=timeout, check=False, stdin=subprocess.DEVNULL
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         logger.warning("%s failed: %s", cmd[0], exc)
+        if problems is not None:
+            problems.append(f"{cmd[0]}: {exc}")
         return False
     if proc.returncode != 0:
         output = (proc.stderr.strip() or proc.stdout).decode("utf-8", errors="replace")
@@ -203,6 +209,8 @@ def _run(cmd: list[str], timeout: int) -> bool:
         logger.warning(
             "%s exited %d: %s (argv: %s)", cmd[0], proc.returncode, output, shlex.join(cmd)
         )
+        if problems is not None:
+            problems.append(f"{cmd[0]} exited {proc.returncode}: {output or 'no output'}")
     return proc.returncode == 0
 
 
@@ -255,7 +263,7 @@ def _ewf_segments(first: Path) -> list[Path]:
     return segments
 
 
-def _mount_image(image_path: Path, mount_point: Path) -> bool:
+def _mount_image(image_path: Path, mount_point: Path, problems: list[str] | None = None) -> bool:
     """Mount *image_path* (E01 or raw) read-only at *mount_point*.
 
     Everything is user-space FUSE, so this works as the unprivileged
@@ -274,9 +282,14 @@ def _mount_image(image_path: Path, mount_point: Path) -> bool:
     has neither (nor does a native install running as a normal user).  There
     is no ``guestmount`` fallback either: libguestfs boots a supermin
     appliance, which needs a kernel image the container does not ship.
+
+    Why a mount failed is appended to *problems* when it is given.
     """
+    if problems is None:
+        problems = []
     if not shutil.which("xmount"):
         logger.error("Could not mount %s: xmount not found", image_path)
+        problems.append("xmount is not installed")
         return False
 
     raw_dir = _raw_dir(mount_point)
@@ -288,7 +301,7 @@ def _mount_image(image_path: Path, mount_point: Path) -> bool:
     if offset_bytes > 0:
         cmd += ["--offset", str(offset_bytes)]
     cmd.append(str(raw_dir))
-    if not _run(cmd, timeout=120):
+    if not _run(cmd, timeout=120, problems=problems):
         logger.error("xmount failed on %s", image_path)
         shutil.rmtree(raw_dir, ignore_errors=True)
         return False
@@ -296,10 +309,19 @@ def _mount_image(image_path: Path, mount_point: Path) -> bool:
     raw_file = next(raw_dir.glob("*.dd"), None)
     if raw_file is not None:
         for driver in _FUSE_DRIVERS:
-            if shutil.which(driver[0]) and _run([*driver, str(raw_file), str(mount_point)], 60):
+            if not shutil.which(driver[0]):
+                problems.append(f"{driver[0]} is not installed")
+                continue
+            if _run([*driver, str(raw_file), str(mount_point)], 60, problems=problems):
                 return True
+    else:
+        problems.append("xmount exposed no partition file")
 
     logger.error("No FUSE filesystem driver could mount %s (offset %d)", image_path, offset_bytes)
+    problems.append(
+        f"no filesystem driver could mount the partition at byte offset {offset_bytes} "
+        "(not NTFS/ext, encrypted, or damaged)"
+    )
     _unmount_path(raw_dir)
     shutil.rmtree(raw_dir, ignore_errors=True)
     return False

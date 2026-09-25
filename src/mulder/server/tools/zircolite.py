@@ -5,7 +5,6 @@ from __future__ import annotations
 import importlib.util
 import json
 import logging
-import subprocess
 import sys
 import tempfile
 import time
@@ -13,11 +12,17 @@ from pathlib import Path
 from typing import Any, Literal
 
 from mulder.assets.paths import asset_display_path, asset_path, asset_search_summary
-from mulder.server.app import mcp
+from mulder.server.app import get_ctx, has_ctx, mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    ToolRun,
     error_response,
+    failure_key,
     make_tool_call_id,
+    remember_failure,
+    repeated_failure_response,
+    run_failure_response,
+    run_tool,
     sources_already_indexed,
     tool_response,
 )
@@ -30,8 +35,11 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _ZIRCOLITE_TIMEOUT = 600
-_STDERR_PREVIEW_CHARS = 500
 _ZIRCOLITE_DIRNAME = "zircolite"
+# Case-DB key listing the log formats zircolite.detections was indexed with,
+# per evidence path. The source name alone does not say which --auditd /
+# --sysmon4linux / --jsononly run produced it.
+_FORMATS_KV_PREFIX = "zircolite_formats:"
 
 
 def _zircolite_script() -> Path | None:
@@ -120,13 +128,36 @@ def _missing_zircolite_modules() -> list[str]:
     return [m for m in _ZIRCOLITE_MODULES if importlib.util.find_spec(m) is None]
 
 
+def _indexed_formats(events_path: str) -> set[str]:
+    """Log formats a previous run on *events_path* was indexed with."""
+    if not has_ctx():
+        return set()
+    try:
+        value = get_ctx().db.get_kv(_FORMATS_KV_PREFIX + events_path)
+        formats = json.loads(value) if value else []
+    except Exception:  # noqa: BLE001 - unknown means "not known to be indexed"
+        return set()
+    return {str(f) for f in formats} if isinstance(formats, list) else set()
+
+
+def _remember_indexed_format(events_path: str, log_format: str) -> None:
+    """Record that *events_path* was indexed with *log_format*."""
+    if not has_ctx():
+        return
+    formats = sorted(_indexed_formats(events_path) | {log_format})
+    try:
+        get_ctx().db.set_kv(_FORMATS_KV_PREFIX + events_path, json.dumps(formats))
+    except Exception:  # noqa: BLE001 - best effort, only affects the skip
+        return
+
+
 def _run_zircolite_process(
     script: str,
     events_path: Path,
     log_format: str,
     ruleset_path: Path,
     output_dir: Path,
-) -> tuple[Path, subprocess.CompletedProcess[str]]:
+) -> tuple[Path, ToolRun]:
     """Execute Zircolite against event logs.
 
     Args:
@@ -137,12 +168,9 @@ def _run_zircolite_process(
         output_dir: Output directory for results.
 
     Returns:
-        Tuple of (path to the JSON results file, the completed process). The
-        caller needs the process to tell a genuinely empty ruleset match from a
-        Zircolite run that never produced results.
-
-    Raises:
-        subprocess.TimeoutExpired: If Zircolite exceeds the timeout.
+        Tuple of (path to the JSON results file, the run). The caller needs
+        the run to tell a genuinely empty ruleset match from a Zircolite run
+        that never produced results.
     """
     output_file = output_dir / "zircolite_results.json"
     format_flags = _FORMAT_FLAGS.get(log_format, [])
@@ -159,14 +187,7 @@ def _run_zircolite_process(
         *format_flags,
     ]
 
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=_ZIRCOLITE_TIMEOUT,
-        check=False,
-    )
-    return output_file, proc
+    return output_file, run_tool(cmd, timeout=_ZIRCOLITE_TIMEOUT)
 
 
 def _build_detection_timeline(
@@ -217,7 +238,8 @@ def _parse_zircolite_output(
             "log_format": log_format,
             "detections": [],
             "total_detections": 0,
-            "total_events_processed": 0,
+            "total_events_processed": None,
+            "total_matches_all_levels": 0,
             "level_counts": {},
             "mitre_coverage": {},
             "timeline": [],
@@ -225,16 +247,20 @@ def _parse_zircolite_output(
 
     try:
         raw_results = json.loads(results_path.read_text(errors="replace"))
-    except (json.JSONDecodeError, OSError):
+    except (json.JSONDecodeError, OSError) as exc:
+        # Not "0 detections": the results could not be read at all. The
+        # caller turns this into an error instead of indexing an empty scan.
         return {
             "events_path": events_path,
             "log_format": log_format,
             "detections": [],
             "total_detections": 0,
-            "total_events_processed": 0,
+            "total_events_processed": None,
+            "total_matches_all_levels": 0,
             "level_counts": {},
             "mitre_coverage": {},
             "timeline": [],
+            "parse_error": f"{type(exc).__name__}: {exc}",
         }
 
     if not isinstance(raw_results, list):
@@ -295,7 +321,11 @@ def _parse_zircolite_output(
         # bounding the list for the response.
         "detections": detections,
         "total_detections": len(detections),
-        "total_events_processed": sum(level_counts.values()),
+        # Zircolite's JSON holds rule matches only; the number of events it
+        # read is not in it. This used to hold the match count under an
+        # "events processed" label.
+        "total_events_processed": None,
+        "total_matches_all_levels": sum(level_counts.values()),
         "level_counts": level_counts,
         "mitre_coverage": mitre_coverage,
         "timeline": timeline[:200],
@@ -343,17 +373,25 @@ def run_zircolite(
         "force": force,
     }
 
+    previous_formats: set[str] = set()
     if not force:
         existing = sources_already_indexed(["zircolite."], evidence_path=events_path)
-        if existing:
+        previous_formats = _indexed_formats(events_path) if existing else set()
+        # Only a run with the same log_format is a repeat: a run with the
+        # wrong format (the default is auditd) must not block the right one.
+        if existing and log_format in previous_formats:
             return tool_response(
                 tc_id,
                 "run_zircolite",
                 params,
                 {
                     "status": "skipped",
-                    "reason": "Sources already indexed from prior extraction",
+                    "reason": (
+                        f"Zircolite already ran on this evidence with log_format={log_format}. "
+                        "Pass force=True to run it again (e.g. with another ruleset or level)."
+                    ),
                     "existing_sources": existing,
+                    "indexed_log_formats": sorted(previous_formats),
                 },
                 "zircolite",
                 0.0,
@@ -413,54 +451,58 @@ def run_zircolite(
             error_type="invalid_argument",
         )
 
+    memory_key = failure_key("run_zircolite", events_path, log_format, str(effective_ruleset))
+    if (
+        repeated := repeated_failure_response(tc_id, "run_zircolite", params, memory_key, t0)
+    ) is not None:
+        return repeated
+
     with tempfile.TemporaryDirectory(prefix="mulder_zircolite_") as tmpdir:
         output_dir = Path(tmpdir)
-        try:
-            results_path, proc = _run_zircolite_process(
-                str(script),
-                Path(events_path),
-                log_format,
-                effective_ruleset,
-                output_dir,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                "run_zircolite",
-                params,
-                f"Zircolite timed out after {_ZIRCOLITE_TIMEOUT}s",
-                (time.monotonic() - t0) * 1000,
-                error_type="timeout",
-            )
-        except OSError as exc:
-            return error_response(
-                tc_id,
-                "run_zircolite",
-                params,
-                f"Failed to execute Zircolite: {exc}",
-                (time.monotonic() - t0) * 1000,
-                error_type="os_error",
-            )
+        results_path, run = _run_zircolite_process(
+            str(script),
+            Path(events_path),
+            log_format,
+            effective_ruleset,
+            output_dir,
+        )
 
-        if proc.returncode != 0 and not results_path.exists():
-            detail = ((proc.stderr or "").strip() or (proc.stdout or "").strip())[
-                :_STDERR_PREVIEW_CHARS
-            ]
-            return error_response(
+        if not run.ok and not results_path.exists():
+            return run_failure_response(
                 tc_id,
                 "run_zircolite",
                 params,
-                f"Zircolite exited {proc.returncode} and wrote no results file: {detail}",
-                (time.monotonic() - t0) * 1000,
-                error_type="tool_failed",
+                run,
+                t0,
+                memory_key=memory_key,
+                context="Zircolite wrote no results file",
+                suggestion=(
+                    "Check that log_format matches the log (auditd, sysmon_linux, json, evtx) "
+                    "and that the ruleset loads."
+                ),
             )
 
         result = _parse_zircolite_output(results_path, events_path, log_format, sigma_level_filter)
+        if parse_error := result.get("parse_error"):
+            # An unreadable results file is not "0 detections".
+            message = f"Zircolite's results file could not be parsed ({parse_error})"
+            if not run.ok:
+                message += f"; {run.describe()}"
+            remember_failure(memory_key, message)
+            return error_response(
+                tc_id,
+                "run_zircolite",
+                params,
+                message,
+                (time.monotonic() - t0) * 1000,
+                error_type="tool_failed",
+                suggestion="Check log_format and the ruleset; pass force=True to retry.",
+            )
 
         text_parts = [
             f"Zircolite {log_format} analysis of {events_path}",
             f"Total detections: {result['total_detections']}",
-            f"Events processed: {result['total_events_processed']}",
+            f"Rule matches before level filter: {result['total_matches_all_levels']}",
         ]
         for level, count in result.get("level_counts", {}).items():
             text_parts.append(f"  {level}: {count}")
@@ -480,9 +522,18 @@ def run_zircolite(
             "\n".join(text_parts), "zircolite.detections", events_path, "zircolite"
         )
 
+        _remember_indexed_format(events_path, log_format)
+
         # The index holds every detection; the response stays bounded.
         result["detections"] = detections[:_MAX_RESPONSE_DETECTIONS]
         summary.update(result)
+        if previous_formats:
+            summary["previous_log_formats"] = sorted(previous_formats)
+        if not run.ok:
+            summary["tool_warning"] = (
+                f"{run.describe()}\nThe detections written before that were indexed; they may "
+                "be incomplete."
+            )
 
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_zircolite", params, summary, "zircolite.detections", elapsed)

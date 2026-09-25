@@ -158,9 +158,7 @@ class TestUsn:
         with (
             patch.object(ua, "_collect_fls_chunks", return_value=[([fls], 2048)]),
             patch.object(ua, "require_binary", return_value="/usr/bin/icat"),
-            patch(
-                "mulder.server.tools.extract.user_activity.subprocess.run", side_effect=fake_icat
-            ),
+            patch("mulder.server.tools.extract.tsk.subprocess.run", side_effect=fake_icat),
         ):
             _call(ua.run_usn_parser, image)
 

@@ -2,23 +2,28 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import math
-import subprocess
+import re
 import tempfile
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    ToolRun,
     adaptive_timeout,
     error_response,
     make_tool_call_id,
     require_binary,
+    run_failure_response,
+    run_tool,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
@@ -32,51 +37,59 @@ __all__ = [
 logger = logging.getLogger(__name__)
 
 _PCAP_TIMEOUT = 600
-_STDERR_PREVIEW_LIMIT = 500
+_CAPINFOS_TIMEOUT = 60
+_NUMBER_OF_PACKETS_RE = re.compile(r"^Number of packets:\s*(\d+)\s*$", re.MULTILINE)
 
 
-def _timeout_partial_output(exc: subprocess.TimeoutExpired, label: str) -> str:
-    """Extract any partial output captured before a subprocess timeout.
+def _incomplete_warning(run: ToolRun) -> str:
+    """Warning for a run that did not complete but left output that was kept."""
+    return f"{run.describe()}\nThe output written before that was kept; it may be incomplete."
 
-    Args:
-        exc: The TimeoutExpired exception (may carry partial stdout).
-        label: Human-readable label for the timed-out operation.
 
-    Returns:
-        Partial output with a truncation notice, or a plain timeout message.
+@dataclass
+class _ModeResult:
+    """Text one analysis mode produced, and what went wrong producing it.
+
+    ``errors`` are sub-runs that left nothing usable (nothing of theirs is in
+    ``text``); ``warnings`` are sub-runs that stopped after writing output
+    that is in ``text`` but may be incomplete (a truncated capture, a timeout).
     """
-    raw = exc.stdout
-    partial = ""
-    if isinstance(raw, str):
-        partial = raw.strip()
-    elif isinstance(raw, bytes):
-        partial = raw.decode(errors="replace").strip()
-    if partial:
-        return f"{partial}\n\n[TRUNCATED: {label} timed out]"
-    return f"{label} timed out"
+
+    text: str = ""
+    errors: list[str] = field(default_factory=list)
+    error_types: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
 
 
-def _tshark_output_or_error(proc: subprocess.CompletedProcess[str]) -> str:
-    """Return tshark stdout, surfacing stderr when stdout is empty and tshark failed.
+#: What tshark prints on stderr for a capture whose last packet is cut.
+_TSHARK_CUT_SHORT = "cut short in the middle of a packet"
 
-    Corrupt or truncated PCAP files cause tshark to exit non-zero with
-    diagnostic messages on stderr.  Without this check those errors are
-    silently swallowed, producing empty results.
 
-    Args:
-        proc: Completed tshark process.
+def _usable_output(run: ToolRun, label: str, out: _ModeResult) -> str | None:
+    """The stdout of *run*, or None when it produced nothing usable.
 
-    Returns:
-        The stdout text, or a bracketed error description when tshark
-        failed with no usable output.
+    A failure or an incomplete run is recorded in *out* instead of being
+    returned as text: ``[tshark error ...]`` used to be indexed as the
+    content of ``pcap.<mode>``, and a truncated capture (non-zero exit after
+    partial output) was indexed with no sign of the error.
     """
-    output = proc.stdout.strip()
-    if output:
-        return output
-    if proc.returncode != 0:
-        err = proc.stderr.strip()[:_STDERR_PREVIEW_LIMIT] if proc.stderr else "unknown error"
-        return f"[tshark error (exit {proc.returncode}): {err}]"
-    return ""
+    if run.failed:
+        out.errors.append(f"{label}: {run.describe()}")
+        out.error_types.append(run.error_type)
+        return None
+    text = run.stdout.strip()
+    if not run.ok and not run.timed_out and _TSHARK_CUT_SHORT in run.stderr:
+        # A capture that ends mid-packet (common for carved or live-copied
+        # pcaps): tshark read everything before it and exits 2. Not a gap.
+        text += (
+            f"\n\n[NOTE: {label}: the capture ends in the middle of a packet; "
+            "that last packet is incomplete]"
+        )
+    elif not run.ok:
+        out.warnings.append(f"{label}: {_incomplete_warning(run)}")
+        if run.timed_out:
+            text += f"\n\n[TRUNCATED: {label} timed out]"
+    return text
 
 
 _PCAP_MODES = {
@@ -98,262 +111,236 @@ def _run_tshark(
     pcap_path: str,
     timeout: int = _PCAP_TIMEOUT,
     ssl_keylog_path: str | None = None,
-) -> subprocess.CompletedProcess[str]:
-    """Run tshark with the given args against a PCAP file.
-
-    Handles OSError (e.g. binary removed at runtime) by returning a
-    synthetic CompletedProcess with returncode=-1 and the error in
-    stderr, preventing unhandled exceptions from cascading.
-    """
+) -> ToolRun:
+    """Run tshark with the given args against a PCAP file (never raises)."""
     ssl_args: list[str] = []
     if ssl_keylog_path and Path(ssl_keylog_path).exists():
         ssl_args = ["-o", f"tls.keylog_file:{ssl_keylog_path}"]
     cmd = ["tshark", *ssl_args, "-r", pcap_path, *args]
-    try:
-        return subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            check=False,
-        )
-    except OSError as exc:
-        logger.error("Failed to execute tshark: %s", exc)
-        return subprocess.CompletedProcess(
-            args=cmd,
-            returncode=-1,
-            stdout="",
-            stderr=f"Failed to execute tshark: {exc}",
-        )
+    return run_tool(cmd, timeout=timeout)
 
 
-def _pcap_summary(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> str:
+def _single_run_mode(run: ToolRun, label: str) -> _ModeResult:
+    """A mode made of one tshark run whose stdout is the indexed text."""
+    out = _ModeResult()
+    out.text = _usable_output(run, label, out) or ""
+    return out
+
+
+def _pcap_summary(
+    pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None
+) -> _ModeResult:
     """Capture statistics via capinfos + protocol hierarchy via tshark."""
+    out = _ModeResult()
     parts: list[str] = []
 
     capinfos = require_binary("capinfos")
     if capinfos:
-        try:
-            ci_proc = subprocess.run(
-                [capinfos, pcap_path],
-                capture_output=True,
-                text=True,
-                timeout=60,
-                check=False,
-            )
-            if ci_proc.stdout.strip():
-                parts.append("=== Capture Info ===\n" + ci_proc.stdout.strip())
-            elif ci_proc.returncode != 0 and ci_proc.stderr:
-                parts.append(f"capinfos failed: {ci_proc.stderr.strip()[:_STDERR_PREVIEW_LIMIT]}")
-        except subprocess.TimeoutExpired as exc:
-            parts.append(_timeout_partial_output(exc, "capinfos"))
-        except OSError as exc:
-            parts.append(f"capinfos execution failed: {exc}")
+        info = _usable_output(
+            run_tool([capinfos, pcap_path], timeout=_CAPINFOS_TIMEOUT), "capinfos", out
+        )
+        if info:
+            parts.append("=== Capture Info ===\n" + info)
 
-    try:
-        proc = _run_tshark(
+    phs = _usable_output(
+        _run_tshark(
             ["-q", "-z", "io,phs", "-c", str(max_packets)],
             pcap_path,
             timeout=120,
             ssl_keylog_path=ssl_keylog_path,
-        )
-        output = _tshark_output_or_error(proc)
-        if output:
-            parts.append("=== Protocol Hierarchy ===\n" + output)
-    except subprocess.TimeoutExpired as exc:
-        parts.append(_timeout_partial_output(exc, "tshark protocol hierarchy"))
+        ),
+        "tshark protocol hierarchy",
+        out,
+    )
+    if phs:
+        parts.append("=== Protocol Hierarchy ===\n" + phs)
 
-    return "\n\n".join(parts)
+    out.text = "\n\n".join(parts)
+    return out
 
 
 def _pcap_conversations(
     pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None
-) -> str:
+) -> _ModeResult:
     """IP and TCP conversation tables."""
     timeout = adaptive_timeout(pcap_path)
+    out = _ModeResult()
     parts: list[str] = []
     for conv_type in ("ip", "tcp"):
-        try:
-            proc = _run_tshark(
+        output = _usable_output(
+            _run_tshark(
                 ["-q", "-z", f"conv,{conv_type}", "-c", str(max_packets)],
                 pcap_path,
                 timeout=timeout,
                 ssl_keylog_path=ssl_keylog_path,
-            )
-            output = _tshark_output_or_error(proc)
-            if output:
-                parts.append(f"=== {conv_type.upper()} Conversations ===\n" + output)
-        except subprocess.TimeoutExpired as exc:
-            parts.append(_timeout_partial_output(exc, f"tshark {conv_type} conversations"))
-    return "\n\n".join(parts)
+            ),
+            f"tshark {conv_type} conversations",
+            out,
+        )
+        if output:
+            parts.append(f"=== {conv_type.upper()} Conversations ===\n" + output)
+    out.text = "\n\n".join(parts)
+    return out
 
 
-def _pcap_dns(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> str:
+def _pcap_dns(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> _ModeResult:
     """Extract DNS queries and responses."""
-    try:
-        proc = _run_tshark(
-            [
-                "-Y",
-                "dns",
-                "-T",
-                "fields",
-                "-e",
-                "frame.time",
-                "-e",
-                "ip.src",
-                "-e",
-                "ip.dst",
-                "-e",
-                "dns.qry.name",
-                "-e",
-                "dns.resp.addr",
-                "-E",
-                "header=y",
-                "-E",
-                "separator=\t",
-                "-c",
-                str(max_packets),
-            ],
-            pcap_path,
-            timeout=adaptive_timeout(pcap_path),
-            ssl_keylog_path=ssl_keylog_path,
-        )
-        return _tshark_output_or_error(proc)
-    except subprocess.TimeoutExpired as exc:
-        return _timeout_partial_output(exc, "tshark DNS extraction")
+    run = _run_tshark(
+        [
+            "-Y",
+            "dns",
+            "-T",
+            "fields",
+            "-e",
+            "frame.time",
+            "-e",
+            "ip.src",
+            "-e",
+            "ip.dst",
+            "-e",
+            "dns.qry.name",
+            "-e",
+            "dns.resp.addr",
+            "-E",
+            "header=y",
+            "-E",
+            "separator=\t",
+            "-c",
+            str(max_packets),
+        ],
+        pcap_path,
+        timeout=adaptive_timeout(pcap_path),
+        ssl_keylog_path=ssl_keylog_path,
+    )
+    return _single_run_mode(run, "tshark DNS extraction")
 
 
-def _pcap_http(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> str:
+def _pcap_http(
+    pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None
+) -> _ModeResult:
     """Extract HTTP requests and responses."""
-    try:
-        proc = _run_tshark(
-            [
-                "-Y",
-                "http",
-                "-T",
-                "fields",
-                "-e",
-                "frame.time",
-                "-e",
-                "ip.src",
-                "-e",
-                "ip.dst",
-                "-e",
-                "http.request.method",
-                "-e",
-                "http.request.uri",
-                "-e",
-                "http.host",
-                "-e",
-                "http.response.code",
-                "-E",
-                "header=y",
-                "-E",
-                "separator=\t",
-                "-c",
-                str(max_packets),
-            ],
-            pcap_path,
-            timeout=adaptive_timeout(pcap_path),
-            ssl_keylog_path=ssl_keylog_path,
-        )
-        return _tshark_output_or_error(proc)
-    except subprocess.TimeoutExpired as exc:
-        return _timeout_partial_output(exc, "tshark HTTP extraction")
+    run = _run_tshark(
+        [
+            "-Y",
+            "http",
+            "-T",
+            "fields",
+            "-e",
+            "frame.time",
+            "-e",
+            "ip.src",
+            "-e",
+            "ip.dst",
+            "-e",
+            "http.request.method",
+            "-e",
+            "http.request.uri",
+            "-e",
+            "http.host",
+            "-e",
+            "http.response.code",
+            "-E",
+            "header=y",
+            "-E",
+            "separator=\t",
+            "-c",
+            str(max_packets),
+        ],
+        pcap_path,
+        timeout=adaptive_timeout(pcap_path),
+        ssl_keylog_path=ssl_keylog_path,
+    )
+    return _single_run_mode(run, "tshark HTTP extraction")
 
 
-def _pcap_smtp(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> str:
+def _pcap_smtp(
+    pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None
+) -> _ModeResult:
     """Extract SMTP email transactions (sender, recipient, subject)."""
-    try:
-        proc = _run_tshark(
-            [
-                "-Y",
-                "smtp",
-                "-T",
-                "fields",
-                "-e",
-                "frame.time",
-                "-e",
-                "ip.src",
-                "-e",
-                "ip.dst",
-                "-e",
-                "smtp.req.parameter",
-                "-e",
-                "smtp.response.parameter",
-                "-E",
-                "header=y",
-                "-E",
-                "separator=\t",
-                "-c",
-                str(max_packets),
-            ],
-            pcap_path,
-            timeout=adaptive_timeout(pcap_path),
-            ssl_keylog_path=ssl_keylog_path,
-        )
-        return _tshark_output_or_error(proc)
-    except subprocess.TimeoutExpired as exc:
-        return _timeout_partial_output(exc, "tshark SMTP extraction")
+    run = _run_tshark(
+        [
+            "-Y",
+            "smtp",
+            "-T",
+            "fields",
+            "-e",
+            "frame.time",
+            "-e",
+            "ip.src",
+            "-e",
+            "ip.dst",
+            "-e",
+            "smtp.req.parameter",
+            "-e",
+            "smtp.response.parameter",
+            "-E",
+            "header=y",
+            "-E",
+            "separator=\t",
+            "-c",
+            str(max_packets),
+        ],
+        pcap_path,
+        timeout=adaptive_timeout(pcap_path),
+        ssl_keylog_path=ssl_keylog_path,
+    )
+    return _single_run_mode(run, "tshark SMTP extraction")
 
 
-def _pcap_tls(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> str:
+def _pcap_tls(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> _ModeResult:
     """Extract TLS handshake info (server names, certificate subjects)."""
-    try:
-        proc = _run_tshark(
-            [
-                "-Y",
-                "tls.handshake.type == 1 || tls.handshake.type == 11",
-                "-T",
-                "fields",
-                "-e",
-                "frame.time",
-                "-e",
-                "ip.src",
-                "-e",
-                "ip.dst",
-                "-e",
-                "tls.handshake.extensions_server_name",
-                "-e",
-                "x509ce.dNSName",
-                "-e",
-                "x509sat.uTF8String",
-                "-E",
-                "header=y",
-                "-E",
-                "separator=\t",
-                "-c",
-                str(max_packets),
-            ],
-            pcap_path,
-            timeout=adaptive_timeout(pcap_path),
-            ssl_keylog_path=ssl_keylog_path,
-        )
-        return _tshark_output_or_error(proc)
-    except subprocess.TimeoutExpired as exc:
-        return _timeout_partial_output(exc, "tshark TLS extraction")
+    run = _run_tshark(
+        [
+            "-Y",
+            "tls.handshake.type == 1 || tls.handshake.type == 11",
+            "-T",
+            "fields",
+            "-e",
+            "frame.time",
+            "-e",
+            "ip.src",
+            "-e",
+            "ip.dst",
+            "-e",
+            "tls.handshake.extensions_server_name",
+            "-e",
+            "x509ce.dNSName",
+            "-e",
+            "x509sat.uTF8String",
+            "-E",
+            "header=y",
+            "-E",
+            "separator=\t",
+            "-c",
+            str(max_packets),
+        ],
+        pcap_path,
+        timeout=adaptive_timeout(pcap_path),
+        ssl_keylog_path=ssl_keylog_path,
+    )
+    return _single_run_mode(run, "tshark TLS extraction")
 
 
 def _pcap_custom(
     pcap_path: str, display_filter: str, max_packets: int, ssl_keylog_path: str | None = None
-) -> str:
+) -> _ModeResult:
     """Apply a custom tshark display filter."""
-    try:
-        proc = _run_tshark(
-            ["-Y", display_filter, "-c", str(max_packets)],
-            pcap_path,
-            timeout=adaptive_timeout(pcap_path),
-            ssl_keylog_path=ssl_keylog_path,
-        )
-        return _tshark_output_or_error(proc)
-    except subprocess.TimeoutExpired as exc:
-        return _timeout_partial_output(exc, f"tshark custom filter '{display_filter}'")
+    run = _run_tshark(
+        ["-Y", display_filter, "-c", str(max_packets)],
+        pcap_path,
+        timeout=adaptive_timeout(pcap_path),
+        ssl_keylog_path=ssl_keylog_path,
+    )
+    return _single_run_mode(run, f"tshark custom filter '{display_filter}'")
 
 
-def _pcap_beaconing(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> str:
+def _pcap_beaconing(
+    pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None
+) -> _ModeResult:
     """Detect C2 beaconing by analyzing inter-arrival timing per destination."""
-    try:
-        proc = _run_tshark(
+    out = _ModeResult()
+    output = _usable_output(
+        _run_tshark(
             [
                 "-T",
                 "fields",
@@ -375,17 +362,17 @@ def _pcap_beaconing(pcap_path: str, max_packets: int, ssl_keylog_path: str | Non
             pcap_path,
             timeout=adaptive_timeout(pcap_path),
             ssl_keylog_path=ssl_keylog_path,
-        )
-    except subprocess.TimeoutExpired as exc:
-        return _timeout_partial_output(exc, "tshark beaconing extraction")
-
-    output = _tshark_output_or_error(proc)
-    if output.startswith("[tshark error"):
-        return output
+        ),
+        "tshark beaconing extraction",
+        out,
+    )
+    if output is None:
+        return out
 
     lines = output.splitlines()
     if len(lines) < 2:
-        return "No packets found for beaconing analysis"
+        out.text = "No packets found for beaconing analysis"
+        return out
 
     dest_times: dict[str, list[float]] = {}
     for line in lines[1:]:
@@ -435,7 +422,8 @@ def _pcap_beaconing(pcap_path: str, max_packets: int, ssl_keylog_path: str | Non
     results.insert(
         2, f"Destinations analyzed: {len(dest_times)}, Potential beacons flagged: {flagged}\n"
     )
-    return "\n".join(results)
+    out.text = "\n".join(results)
+    return out
 
 
 def _collect_dns_tunnel_stats(dns_lines: list[str]) -> dict[str, dict[str, Any]]:
@@ -529,21 +517,25 @@ def _score_dns_tunnel_candidates(
 
 
 def _collect_icmp_payload_signals(
-    pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None
-) -> list[str]:
+    pcap_path: str,
+    max_packets: int,
+    ssl_keylog_path: str | None,
+    out: _ModeResult,
+) -> list[str] | None:
     """Detect ICMP packets with unusually large payloads indicating covert channels.
 
     Args:
         pcap_path: Path to the PCAP file.
         max_packets: Maximum packets to process.
         ssl_keylog_path: Optional SSL keylog file path.
+        out: Collects the tshark failure or warning, if any.
 
     Returns:
-        List of formatted output lines describing ICMP findings.
+        Formatted output lines describing ICMP findings, or None when tshark
+        produced nothing usable (the error is in *out*).
     """
-    output_parts: list[str] = []
-    try:
-        icmp_proc = _run_tshark(
+    icmp_output = _usable_output(
+        _run_tshark(
             [
                 "-Y",
                 "icmp && data.len > 64",
@@ -565,32 +557,39 @@ def _collect_icmp_payload_signals(
             pcap_path,
             timeout=adaptive_timeout(pcap_path),
             ssl_keylog_path=ssl_keylog_path,
-        )
-        icmp_output = _tshark_output_or_error(icmp_proc)
-        if icmp_output.startswith("[tshark error"):
-            output_parts.append(f"\nICMP analysis: {icmp_output}")
-        else:
-            icmp_lines = icmp_output.splitlines()
-            if len(icmp_lines) > 1:
-                output_parts.append(
-                    f"\nICMP large-payload packets (data > 64 bytes): {len(icmp_lines) - 1}"
-                )
-                for line in icmp_lines[1:6]:
-                    output_parts.append(f"  {line}")
-                if len(icmp_lines) > 6:
-                    output_parts.append(f"  ... and {len(icmp_lines) - 6} more")
-    except subprocess.TimeoutExpired as exc:
-        output_parts.append(f"\n{_timeout_partial_output(exc, 'ICMP analysis')}")
+        ),
+        "tshark ICMP analysis",
+        out,
+    )
+    if icmp_output is None:
+        return None
 
+    output_parts: list[str] = []
+    icmp_lines = icmp_output.splitlines()
+    if len(icmp_lines) > 1:
+        output_parts.append(
+            f"\nICMP large-payload packets (data > 64 bytes): {len(icmp_lines) - 1}"
+        )
+        for line in icmp_lines[1:6]:
+            output_parts.append(f"  {line}")
+        if len(icmp_lines) > 6:
+            output_parts.append(f"  ... and {len(icmp_lines) - 6} more")
     return output_parts
 
 
-def _pcap_tunneling(pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None) -> str:
-    """Detect DNS tunneling and ICMP covert channels."""
+def _pcap_tunneling(
+    pcap_path: str, max_packets: int, ssl_keylog_path: str | None = None
+) -> _ModeResult:
+    """Detect DNS tunneling and ICMP covert channels.
+
+    A half that tshark could not produce is left out of the text (its error
+    is in the mode's errors) rather than reported as "0 suspects".
+    """
+    out = _ModeResult()
     output_parts: list[str] = ["DNS TUNNELING / COVERT CHANNEL ANALYSIS", "=" * 50, ""]
 
-    try:
-        proc = _run_tshark(
+    dns_output = _usable_output(
+        _run_tshark(
             [
                 "-Y",
                 "dns.qry.name",
@@ -612,24 +611,27 @@ def _pcap_tunneling(pcap_path: str, max_packets: int, ssl_keylog_path: str | Non
             pcap_path,
             timeout=adaptive_timeout(pcap_path),
             ssl_keylog_path=ssl_keylog_path,
-        )
-        output = _tshark_output_or_error(proc)
-        dns_lines = output.splitlines() if output and not output.startswith("[tshark") else []
-    except subprocess.TimeoutExpired:
-        dns_lines = []
-        output_parts.append("DNS extraction timed out; tunnel analysis may be incomplete")
-
-    domain_stats = _collect_dns_tunnel_stats(dns_lines)
-    flagged_lines = _score_dns_tunnel_candidates(domain_stats)
-    output_parts.extend(flagged_lines)
-
-    output_parts.append(
-        f"\nDomains analyzed: {len(domain_stats)}, DNS tunneling suspects: {len(flagged_lines)}"
+        ),
+        "tshark DNS query extraction",
+        out,
     )
+    if dns_output is not None:
+        domain_stats = _collect_dns_tunnel_stats(dns_output.splitlines())
+        flagged_lines = _score_dns_tunnel_candidates(domain_stats)
+        output_parts.extend(flagged_lines)
+        output_parts.append(
+            f"\nDomains analyzed: {len(domain_stats)}, "
+            f"DNS tunneling suspects: {len(flagged_lines)}"
+        )
 
-    output_parts.extend(_collect_icmp_payload_signals(pcap_path, max_packets, ssl_keylog_path))
+    icmp_lines = _collect_icmp_payload_signals(pcap_path, max_packets, ssl_keylog_path, out)
+    if icmp_lines is not None:
+        output_parts.extend(icmp_lines)
 
-    return "\n".join(output_parts)
+    if dns_output is None and icmp_lines is None:
+        return out
+    out.text = "\n".join(output_parts)
+    return out
 
 
 def _validate_pcap_params(
@@ -708,7 +710,7 @@ def _run_pcap_mode(
     max_packets: int,
     ssl_keylog_path: str | None,
     display_filter: str | None,
-) -> tuple[str, str]:
+) -> tuple[str, _ModeResult]:
     """Dispatch a single PCAP analysis mode and return its output.
 
     Args:
@@ -719,9 +721,9 @@ def _run_pcap_mode(
         display_filter: Display filter (used only for "custom" mode).
 
     Returns:
-        A tuple of (source_name, output_text) for the executed mode.
+        A tuple of (source_name, mode result) for the executed mode.
     """
-    mode_map: dict[str, tuple[str, Callable[[], str]]] = {
+    mode_map: dict[str, tuple[str, Callable[[], _ModeResult]]] = {
         "summary": (
             "pcap.summary",
             lambda: _pcap_summary(pcap_path, max_packets, ssl_keylog_path),
@@ -752,6 +754,50 @@ def _run_pcap_mode(
 
     source_name, fn = mode_map[mode]
     return source_name, fn()
+
+
+def _count_packets(pcap_path: str) -> int | None:
+    """Number of packets in the capture per ``capinfos -M -c``, or None if unknown."""
+    capinfos = require_binary("capinfos")
+    if not capinfos:
+        return None
+    run = run_tool([capinfos, "-M", "-c", pcap_path], timeout=_CAPINFOS_TIMEOUT)
+    match = _NUMBER_OF_PACKETS_RE.search(run.stdout)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _packet_limit_info(pcap_path: str, max_packets: int) -> dict[str, object]:
+    """Say whether ``tshark -c max_packets`` left packets of the capture unread."""
+    count = _count_packets(pcap_path)
+    if count is None:
+        return {
+            "packets_limit": max_packets,
+            "note": (
+                f"tshark ran with -c {max_packets}: each mode stops after {max_packets} "
+                "packets, so a larger capture is only partly analyzed (the packet count "
+                "could not be read with capinfos)."
+            ),
+        }
+    info: dict[str, object] = {"packets_in_capture": count}
+    if count > max_packets:
+        info["packets_limited_to"] = max_packets
+        info["note"] = (
+            f"The capture holds {count} packets; each mode stopped after {max_packets}. "
+            "Packets after that were not analyzed: raise max_packets or narrow with "
+            "mode='custom' and a display_filter."
+        )
+    return info
+
+
+def _mode_error_type(error_types: list[str]) -> str:
+    """One ``error_type`` for a run whose modes all failed."""
+    if error_types and all(t == "timeout" for t in error_types):
+        return "timeout"
+    if "binary_missing" in error_types:
+        return "binary_missing"
+    return "tool_failed"
 
 
 @mcp.tool()
@@ -821,15 +867,19 @@ def run_pcap_analysis(
     else:
         modes_to_run = [mode]
 
-    results: list[object] = []
+    per_mode: list[dict[str, object]] = []
+    mode_errors: list[dict[str, str]] = []
+    mode_warnings: list[dict[str, str]] = []
+    failed_modes: list[str] = []
+    error_types: list[str] = []
     for m in modes_to_run:
         try:
-            source_name, output = _run_pcap_mode(
+            source_name, out = _run_pcap_mode(
                 m, pcap_path, max_packets, ssl_keylog_path, display_filter
             )
         except Exception as exc:
             logger.exception("PCAP mode '%s' failed unexpectedly", m)
-            results.append(
+            per_mode.append(
                 {
                     "source_name": f"pcap.{m}",
                     "status": "error",
@@ -837,13 +887,34 @@ def run_pcap_analysis(
                     "error_message": str(exc)[:300],
                 }
             )
+            mode_errors.append({"mode": m, "error": str(exc)[:300]})
+            failed_modes.append(m)
+            error_types.append("tool_failed")
             continue
 
-        if output:
-            summary = extract_and_index(output, source_name, pcap_path, "tshark")
-            results.append(summary)
+        mode_errors.extend({"mode": m, "error": e} for e in out.errors)
+        mode_warnings.extend({"mode": m, "warning": w} for w in out.warnings)
+        if out.text:
+            summary = extract_and_index(out.text, source_name, pcap_path, "tshark")
+            if out.errors:
+                summary["errors"] = out.errors
+            if out.warnings:
+                summary["warnings"] = out.warnings
+            per_mode.append(summary)
+        elif out.errors:
+            # Not indexed: an error message is not the content of pcap.<mode>.
+            failed_modes.append(m)
+            error_types.extend(out.error_types)
+            per_mode.append(
+                {
+                    "source_name": source_name,
+                    "status": "error",
+                    "mode": m,
+                    "error_message": "\n".join(out.errors),
+                }
+            )
         else:
-            results.append(
+            per_mode.append(
                 {
                     "source_name": source_name,
                     "status": "no_output",
@@ -852,6 +923,38 @@ def run_pcap_analysis(
             )
 
     elapsed = (time.monotonic() - t0) * 1000
+    if len(failed_modes) == len(modes_to_run):
+        return error_response(
+            tc_id,
+            "run_pcap_analysis",
+            params,
+            "tshark produced nothing usable; nothing was indexed.\n"
+            + "\n".join(f"[{e['mode']}] {e['error']}" for e in mode_errors),
+            elapsed,
+            error_type=_mode_error_type(error_types),
+            suggestion=(
+                "Check that the file is a readable capture (capinfos / tshark -r). "
+                "This is not a capture without traffic."
+            ),
+        )
+
+    results: dict[str, object] = {"modes": per_mode}
+    results.update(_packet_limit_info(pcap_path, max_packets))
+    if mode_errors:
+        results["mode_errors"] = mode_errors
+    if mode_warnings:
+        results["mode_warnings"] = mode_warnings
+    if mode_errors or mode_warnings:
+        results["status"] = "partial"
+        lines: list[str] = []
+        if failed_modes:
+            lines.append(
+                f"{len(failed_modes)} of {len(modes_to_run)} mode(s) failed and indexed "
+                f"nothing: {', '.join(failed_modes)}."
+            )
+        lines.extend(f"[{e['mode']}] {e['error']}" for e in mode_errors)
+        lines.extend(f"[{w['mode']}] {w['warning']}" for w in mode_warnings)
+        results["tool_warning"] = "\n".join(lines)
     return tool_response(tc_id, "run_pcap_analysis", params, results, "pcap", elapsed)
 
 
@@ -861,6 +964,8 @@ def run_pcap_analysis(
 
 _ZEEK_TIMEOUT = 600
 _ZEEK_BINARY = "/opt/zeek/bin/zeek"
+_ZEEK_LOG_INDEX_CHARS = 20_000_000
+"""Characters of each Zeek log indexed as ``zeek.<log>`` (the rest is reported, not indexed)."""
 
 
 def _run_zeek(
@@ -868,8 +973,8 @@ def _run_zeek(
     pcap_path: Path,
     output_dir: Path,
     generate_files: bool = True,
-) -> subprocess.CompletedProcess[str]:
-    """Execute Zeek against a PCAP file.
+) -> ToolRun:
+    """Execute Zeek against a PCAP file (never raises).
 
     Args:
         binary: Resolved zeek executable.
@@ -878,10 +983,7 @@ def _run_zeek(
         generate_files: Whether to enable file extraction.
 
     Returns:
-        The completed process result.
-
-    Raises:
-        subprocess.TimeoutExpired: If Zeek exceeds the timeout.
+        The run record: exit status, output, and whether it timed out.
     """
     cmd = [
         binary,
@@ -893,13 +995,10 @@ def _run_zeek(
     if generate_files:
         cmd.append("FileExtract::prefix=extracted_files/")
 
-    return subprocess.run(
+    return run_tool(
         cmd,
-        capture_output=True,
-        text=True,
         timeout=adaptive_timeout(pcap_path, base=_ZEEK_TIMEOUT),
         cwd=str(output_dir),
-        check=False,
     )
 
 
@@ -1135,57 +1234,89 @@ def run_zeek_analysis(
 
     with tempfile.TemporaryDirectory(prefix="mulder_zeek_") as tmpdir:
         output_dir = Path(tmpdir)
-        try:
-            _run_zeek(zeek_bin, Path(pcap_path), output_dir, generate_files)
-        except subprocess.TimeoutExpired:
-            log_files = list(output_dir.glob("*.log"))
-            if log_files:
-                result = _parse_zeek_logs(output_dir, protocols)
-                result["timed_out"] = True
-                text_parts = [f"Zeek (partial): {len(log_files)} log files generated"]
-                for s in result.get("log_summaries", []):
-                    text_parts.append(f"  {s['log_type']}: {s['record_count']} records")
-                summary = extract_and_index(
-                    "\n".join(text_parts), "zeek.partial", pcap_path, "zeek"
-                )
-                summary.update(result)
-                elapsed = (time.monotonic() - t0) * 1000
-                return tool_response(
-                    tc_id, "run_zeek_analysis", params, summary, "zeek.partial", elapsed
-                )
-            return error_response(
+        run = _run_zeek(zeek_bin, Path(pcap_path), output_dir, generate_files)
+        log_files = list(output_dir.glob("*.log"))
+
+        if not run.ok and not log_files:
+            return run_failure_response(
                 tc_id,
                 "run_zeek_analysis",
                 params,
-                "Zeek timed out with no output",
-                (time.monotonic() - t0) * 1000,
-                error_type="timeout",
+                run,
+                t0,
+                context="Zeek wrote no log",
+                suggestion=(
+                    "Nothing was indexed: this is not a capture without traffic. Check that "
+                    "the file is a readable capture (capinfos / tshark -r)."
+                ),
             )
-        except OSError as exc:
-            return error_response(
-                tc_id,
-                "run_zeek_analysis",
-                params,
-                f"Failed to execute Zeek: {exc}",
-                (time.monotonic() - t0) * 1000,
-                error_type="os_error",
+
+        if run.timed_out:
+            result = _parse_zeek_logs(output_dir, protocols)
+            result["timed_out"] = True
+            text_parts = [f"Zeek (partial): {len(log_files)} log files generated"]
+            for s in result.get("log_summaries", []):
+                text_parts.append(f"  {s['log_type']}: {s['record_count']} records")
+            summary = extract_and_index("\n".join(text_parts), "zeek.partial", pcap_path, "zeek")
+            summary.update(result)
+            summary["status"] = "partial"
+            summary["tool_warning"] = _incomplete_warning(run)
+            elapsed = (time.monotonic() - t0) * 1000
+            return tool_response(
+                tc_id, "run_zeek_analysis", params, summary, "zeek.partial", elapsed
             )
 
         result = _parse_zeek_logs(output_dir, protocols)
 
         text_parts = []
+        truncated_logs: list[dict[str, object]] = []
         for s in result.get("log_summaries", []):
             source_name = f"zeek.{s['log_type']}"
             log_path = Path(s["file_path"])
+            line = f"{s['log_type']}: {s['record_count']} records"
             if log_path.exists():
-                log_content = log_path.read_text(errors="replace")[:50000]
+                full = log_path.read_text(errors="replace")
+                log_content = full[:_ZEEK_LOG_INDEX_CHARS]
+                if len(full) > len(log_content):
+                    # Cut at a record boundary: a half JSON line is not a record.
+                    newline = log_content.rfind("\n")
+                    if newline > 0:
+                        log_content = log_content[: newline + 1]
+                    truncated_logs.append(
+                        {
+                            "log": s["log_type"],
+                            "source_name": source_name,
+                            "chars_kept": len(log_content),
+                            "chars_dropped": len(full) - len(log_content),
+                        }
+                    )
+                    line += (
+                        f" (only the first {len(log_content)} of {len(full)} chars are "
+                        f"indexed as {source_name})"
+                    )
                 if log_content.strip():
                     extract_and_index(log_content, source_name, pcap_path, "zeek")
-            text_parts.append(f"{s['log_type']}: {s['record_count']} records")
+            text_parts.append(line)
 
         summary_text = f"Zeek analysis of {pcap_path}\n" + "\n".join(text_parts)
         summary = extract_and_index(summary_text, "zeek.summary", pcap_path, "zeek")
         summary.update(result)
+
+    warnings: list[str] = []
+    if not run.ok:
+        warnings.append(_incomplete_warning(run))
+    if truncated_logs:
+        summary["truncated_logs"] = truncated_logs
+        warnings.append(
+            "Zeek logs cut before indexing (record counts cover the whole log, the "
+            "indexed zeek.<log> sources do not): "
+            + ", ".join(
+                f"{t['source_name']} ({t['chars_kept']} chars kept, {t['chars_dropped']} dropped)"
+                for t in truncated_logs
+            )
+        )
+    if warnings:
+        summary["tool_warning"] = "\n".join(warnings)
 
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_zeek_analysis", params, summary, "zeek.summary", elapsed)
@@ -1199,6 +1330,11 @@ _SURICATA_TIMEOUT = 600
 _SURICATA_BINARY = "/usr/bin/suricata"
 _SURICATA_CONFIG = "/etc/suricata/suricata.yaml"
 _ET_RULES_DIR = "/etc/suricata/rules"
+_SURICATA_NO_RULES_RE = re.compile(
+    r"no rules were loaded|No rule files match|\b0 rules successfully loaded"
+    r"|\b0 signatures processed",
+    re.IGNORECASE,
+)
 
 
 def _suricata_binary() -> str | None:
@@ -1214,8 +1350,8 @@ def _suricata_binary() -> str | None:
     )
 
 
-def _run_suricata_process(binary: str, pcap_path: Path, output_dir: Path) -> Path:
-    """Execute Suricata in offline PCAP replay mode.
+def _run_suricata_process(binary: str, pcap_path: Path, output_dir: Path) -> tuple[Path, ToolRun]:
+    """Execute Suricata in offline PCAP replay mode (never raises).
 
     Args:
         binary: Resolved suricata executable.
@@ -1223,10 +1359,8 @@ def _run_suricata_process(binary: str, pcap_path: Path, output_dir: Path) -> Pat
         output_dir: Directory for EVE JSON output.
 
     Returns:
-        Path to the generated eve.json file.
-
-    Raises:
-        subprocess.TimeoutExpired: If Suricata exceeds the timeout.
+        The path where eve.json is expected, and the run record. Check
+        both with :func:`_suricata_failure` before reading alerts.
     """
     eve_path = output_dir / "eve.json"
 
@@ -1244,15 +1378,43 @@ def _run_suricata_process(binary: str, pcap_path: Path, output_dir: Path) -> Pat
         "outputs.1.eve-log.filename=eve.json",
     ]
 
-    subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=adaptive_timeout(pcap_path, base=_SURICATA_TIMEOUT),
-        check=False,
-    )
+    run = run_tool(cmd, timeout=adaptive_timeout(pcap_path, base=_SURICATA_TIMEOUT))
+    return eve_path, run
 
-    return eve_path
+
+def _suricata_failure(eve_path: Path, run: ToolRun) -> str | None:
+    """Why this Suricata run left no alert data to read, or None if eve.json is usable.
+
+    Without eve.json the parser returns zero alerts, and "Total alerts: 0"
+    used to be indexed for a replay that never happened.
+    """
+    try:
+        size = eve_path.stat().st_size
+    except OSError:
+        if run.ok:
+            return (
+                "suricata exited 0 but wrote no eve.json (is the eve-log output enabled "
+                f"in {_SURICATA_CONFIG}?). {run.describe()}"
+            )
+        return f"suricata wrote no eve.json. {run.describe()}"
+    if size == 0 and not run.ok:
+        return f"suricata left an empty eve.json. {run.describe()}"
+    return None
+
+
+def _suricata_rules_warning(run: ToolRun, output_dir: Path) -> str | None:
+    """A warning when Suricata ran without any detection rule loaded."""
+    text = run.stdout + "\n" + run.stderr
+    log = output_dir / "suricata.log"
+    if log.is_file():
+        with contextlib.suppress(OSError):
+            text += "\n" + log.read_text(errors="replace")
+    if _SURICATA_NO_RULES_RE.search(text):
+        return (
+            f"Suricata loaded no detection rules (rule path {_ET_RULES_DIR}): zero alerts "
+            "does not mean the traffic is clean. Install rules (suricata-update) and re-run."
+        )
+    return None
 
 
 def _parse_eve_json(
@@ -1293,7 +1455,7 @@ def _parse_eve_json(
             "timeline": [],
         }
 
-    with open(eve_path) as f:
+    with open(eve_path, encoding="utf-8", errors="replace") as f:
         for line in f:
             try:
                 event = json.loads(line.strip())
@@ -1420,42 +1582,44 @@ def run_suricata(
 
     with tempfile.TemporaryDirectory(prefix="mulder_suricata_") as tmpdir:
         output_dir = Path(tmpdir)
-        try:
-            eve_path = _run_suricata_process(suricata_bin, Path(pcap_path), output_dir)
-        except subprocess.TimeoutExpired:
-            eve_path = output_dir / "eve.json"
-            if eve_path.exists():
-                result = _parse_eve_json(eve_path, alert_severity_threshold)
-                result["timed_out"] = True
-                alert_count = result["statistics"]["total_alerts"]
-                summary_text = f"Suricata (partial, timed out): {alert_count} alerts detected"
-                summary = extract_and_index(
-                    summary_text, "suricata.partial", pcap_path, "suricata"
-                )
-                summary.update(result)
-                elapsed = (time.monotonic() - t0) * 1000
-                return tool_response(
-                    tc_id, "run_suricata", params, summary, "suricata.partial", elapsed
-                )
+        eve_path, run = _run_suricata_process(suricata_bin, Path(pcap_path), output_dir)
+
+        failure = _suricata_failure(eve_path, run)
+        if failure is not None:
             return error_response(
                 tc_id,
                 "run_suricata",
                 params,
-                "Suricata timed out with no output",
+                failure,
                 (time.monotonic() - t0) * 1000,
-                error_type="timeout",
-            )
-        except OSError as exc:
-            return error_response(
-                tc_id,
-                "run_suricata",
-                params,
-                f"Failed to execute Suricata: {exc}",
-                (time.monotonic() - t0) * 1000,
-                error_type="os_error",
+                error_type=run.error_type if not run.ok else "tool_failed",
+                suggestion=(
+                    "Nothing was indexed: this is not a replay that raised no alert. "
+                    "Read the Suricata output above."
+                ),
             )
 
+        warnings: list[str] = []
+        if not run.ok:
+            warnings.append(_incomplete_warning(run))
+        rules_warning = _suricata_rules_warning(run, output_dir)
+        if rules_warning is not None:
+            warnings.append(rules_warning)
+
         result = _parse_eve_json(eve_path, alert_severity_threshold)
+
+        if run.timed_out:
+            result["timed_out"] = True
+            alert_count = result["statistics"]["total_alerts"]
+            summary_text = f"Suricata (partial, timed out): {alert_count} alerts detected"
+            summary = extract_and_index(summary_text, "suricata.partial", pcap_path, "suricata")
+            summary.update(result)
+            summary["status"] = "partial"
+            summary["tool_warning"] = "\n".join(warnings)
+            elapsed = (time.monotonic() - t0) * 1000
+            return tool_response(
+                tc_id, "run_suricata", params, summary, "suricata.partial", elapsed
+            )
 
         stats = result["statistics"]
         text_parts = [
@@ -1472,6 +1636,8 @@ def run_suricata(
             "\n".join(text_parts), "suricata.alerts", pcap_path, "suricata"
         )
         summary.update(result)
+        if warnings:
+            summary["tool_warning"] = "\n".join(warnings)
 
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_suricata", params, summary, "suricata.alerts", elapsed)

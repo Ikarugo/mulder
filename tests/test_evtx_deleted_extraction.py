@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import subprocess
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -36,11 +37,11 @@ def icat_calls(tmp_path: Path) -> list[list[str]]:
 
 
 def _run_extraction(dest: Path, calls: list[list[str]]) -> list[Path]:
-    def fake_run(cmd: list[str], **_: object) -> MagicMock:
+    def fake_run(cmd: list[str], stdout: Any = None, **_: object) -> MagicMock:
         calls.append(cmd)
+        stdout.write(b"ElfFile\x00evtx-bytes")
         proc = MagicMock()
         proc.returncode = 0
-        proc.stdout = b"ElfFile\x00evtx-bytes"
         return proc
 
     with (
@@ -48,7 +49,7 @@ def _run_extraction(dest: Path, calls: list[list[str]]) -> list[Path]:
             "mulder.server.tools.extract.evtx._collect_fls_chunks",
             return_value=[([FLS_WITH_DELETED_EVTX], 0)],
         ),
-        patch("mulder.server.tools.extract.evtx.subprocess.run", side_effect=fake_run),
+        patch("mulder.server.tools.extract.tsk.subprocess.run", side_effect=fake_run),
     ):
         return _extract_evtx_from_image("/evidence/disk.dd", str(dest))
 
@@ -94,13 +95,13 @@ def test_a_timeout_on_one_file_does_not_abort_the_rest(tmp_path: Path) -> None:
     """Unchanged behaviour: one bad icat must not lose the other logs."""
     seen: list[str] = []
 
-    def flaky(cmd: list[str], **_: object) -> MagicMock:
+    def flaky(cmd: list[str], stdout: Any = None, **_: object) -> MagicMock:
         seen.append(cmd[-1])
         if cmd[-1] == "22":
             raise subprocess.TimeoutExpired(cmd, 30)
+        stdout.write(b"ElfFile\x00")
         proc = MagicMock()
         proc.returncode = 0
-        proc.stdout = b"ElfFile\x00"
         return proc
 
     with (
@@ -108,7 +109,7 @@ def test_a_timeout_on_one_file_does_not_abort_the_rest(tmp_path: Path) -> None:
             "mulder.server.tools.extract.evtx._collect_fls_chunks",
             return_value=[([FLS_WITH_DELETED_EVTX], 0)],
         ),
-        patch("mulder.server.tools.extract.evtx.subprocess.run", side_effect=flaky),
+        patch("mulder.server.tools.extract.tsk.subprocess.run", side_effect=flaky),
     ):
         extracted = _extract_evtx_from_image("/evidence/disk.dd", str(tmp_path))
 

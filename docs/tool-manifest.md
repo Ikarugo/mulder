@@ -1,6 +1,8 @@
 # Mulder MCP Tool Manifest
 
-Every tool is exposed as `mcp__mulder__{name}`. All tools return a dict containing at minimum `tool_call_id` and `status`. Extraction tools additionally return `source_name`, `windows_indexed`, and `line_count`. Write tools (those with a `source_name`) return only metadata plus a 500-character content preview; full output is accessible via `search()` or `get_raw_output()`.
+Every tool is exposed as `mcp__mulder__{name}`. All tools return a dict containing at minimum `tool_call_id` and `status`. Extraction tools additionally return `source_name`, `windows_indexed`, and `line_count`. Write tools (those with a `source_name`) return only metadata plus a bounded preview of their result (`preview_truncated` is set when it was cut); full output is accessible via `search()` or `get_raw_output()`.
+
+`status` is `success`, `partial` or `error`. `partial` means the tool produced results but did not complete: an external program exited non-zero after writing output, some input files could not be read (`extraction_failures`), or some plugins or modes failed; `tool_warning` says what is missing. An external program that fails without usable output returns `error` with its exit code and last output lines, and nothing is indexed. Slow tools remember a failure and refuse an identical run unless `force=True`. An "already indexed" skip ignores sources that hold no data.
 
 **Role Key:** `CATALOG` `EXTRACT_PLANNER` `EXTRACT_EXECUTOR` `EXTRACT_ANALYST` `CROSS_PLANNER` `CROSS_EXECUTOR` `CROSS_ANALYST` `NARRATIVE_PLANNER` `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT`
 
@@ -222,6 +224,7 @@ Run log2timeline (Plaso) against an evidence file to build a super-timeline.
 | evidence_path | str | yes | Path to a disk image or directory |
 | parsers | str \| None | no | Comma-separated Plaso parsers (e.g. "winevtx,prefetch,pe") |
 | time_range | str \| None | no | Date filter passed to psort |
+| force | bool | no | Run again after a remembered log2timeline failure (default False) |
 
 **Returns:** `source_name` (plaso.timeline), `windows_indexed`
 
@@ -405,6 +408,7 @@ When indexing a Security log, automatically indexes System.evtx and PowerShell o
 | filename | str | yes | Name of the .evtx file to parse |
 | event_ids | list[int] \| None | no | Event IDs to extract (all if omitted) |
 | image_path | str | no | Disk image path for multi-image sessions |
+| force | bool | no | Parse again after a remembered failure on this file (default False) |
 
 **Returns:** `source_name` (evtx.\<channel\>), `windows_indexed`, `line_count`
 

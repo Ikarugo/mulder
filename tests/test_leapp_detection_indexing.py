@@ -75,7 +75,7 @@ def _run_aleapp_over(tmpdir_contents: Any, extraction: Path) -> tuple[Any, list[
             return_value=str(extraction.parent / "aleapp.py"),
         ),
         patch("mulder.server.tools.phone._find_leapp_cmd", return_value=["python", "aleapp.py"]),
-        patch("mulder.server.tools.phone.subprocess.run", side_effect=_fake_aleapp),
+        patch("mulder.server.helpers.subprocess.run", side_effect=_fake_aleapp),
         patch("mulder.server.tools.phone.extract_and_index", side_effect=_record),
     ):
         result = run_aleapp.__wrapped__(str(extraction))  # type: ignore[attr-defined]
@@ -149,7 +149,7 @@ def test_the_response_stays_a_bounded_preview(extraction: Path) -> None:
             return_value=str(extraction.parent / "aleapp.py"),
         ),
         patch("mulder.server.tools.phone._find_leapp_cmd", return_value=["python", "aleapp.py"]),
-        patch("mulder.server.tools.phone.subprocess.run", side_effect=_fake_aleapp),
+        patch("mulder.server.helpers.subprocess.run", side_effect=_fake_aleapp),
         patch("mulder.server.tools.phone.extract_and_index", return_value={}),
         patch("mulder.server.tools.phone.tool_response", side_effect=_capture),
     ):

@@ -239,6 +239,23 @@ def extract_and_index(
     }
 
 
+class MountError(RuntimeError):
+    """A disk image could not be mounted; ``problems`` says why.
+
+    Callers used to catch a bare ``RuntimeError`` and ``pass``, so the
+    agent only learned that an artifact was "not found via TSK extraction
+    or mount". The reason (xmount could not read the E01, no filesystem
+    driver recognised the partition, BitLocker...) is what it needs to
+    decide what to do next.
+    """
+
+    def __init__(self, image_path: str, problems: list[str]) -> None:
+        self.image_path = image_path
+        self.problems = list(problems)
+        detail = "; ".join(self.problems) or "no detail reported"
+        super().__init__(f"Failed to mount disk image {image_path}: {detail}")
+
+
 @dataclass
 class _MountEntry:
     """Internal bookkeeping for a single cached mount point."""
@@ -294,14 +311,15 @@ class _MountCache:
             entry.refcount += 1
 
         if is_owner:
+            problems: list[str] = []
             try:
-                mounted = _mount_image(Path(image_path), entry.mount_dir)
+                mounted = _mount_image(Path(image_path), entry.mount_dir, problems)
                 if mounted:
                     entry.mounted = True
                 else:
-                    entry.error = RuntimeError(f"Failed to mount disk image: {image_path}")
+                    entry.error = MountError(image_path, problems)
             except Exception as exc:
-                entry.error = exc
+                entry.error = MountError(image_path, [*problems, f"{type(exc).__name__}: {exc}"])
             finally:
                 entry.ready.set()
         else:
@@ -309,7 +327,10 @@ class _MountCache:
 
         if entry.error is not None:
             self._release(canonical, entry)
-            raise RuntimeError(f"Failed to mount disk image: {image_path}") from entry.error
+            error = entry.error
+            if isinstance(error, MountError):
+                raise MountError(image_path, error.problems) from error
+            raise MountError(image_path, [str(error)]) from error
 
         try:
             yield str(entry.mount_dir)

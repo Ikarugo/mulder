@@ -29,6 +29,11 @@ Runner = Callable[[list[str], Path], "subprocess.CompletedProcess[str]"]
 
 _CSV_HEADER = "Timestamp,RuleTitle,Level,Computer,MitreAttack\n"
 _CSV_ROW = "2026-01-01 00:00:00,Suspicious PowerShell,high,WS01,T1059.001\n"
+_SCANNED_NOTHING_MATCHED = (
+    "Total event log files: 1\nTotal file size: 68.0 KiB\n\nScanning finished.\n\n"
+    "Results Summary:\n\n"
+    "Events with hits / Total events: 0 / 1,234 (Data reduction: 1,234 events (100.00%))\n"
+)
 
 
 @pytest.fixture
@@ -62,7 +67,7 @@ def _invoke(evtx_dir: Path, run: Runner) -> tuple[Any, list[str], list[bool]]:
             return_value="/usr/bin/hayabusa",
         ),
         patch("mulder.server.tools.hayabusa.sources_already_indexed", return_value=[]),
-        patch("mulder.server.tools.hayabusa.subprocess.run", side_effect=_wrap),
+        patch("mulder.server.helpers.subprocess.run", side_effect=_wrap),
         patch("mulder.server.tools.hayabusa.extract_and_index", side_effect=_record),
     ):
         result = run_hayabusa.__wrapped__(str(evtx_dir))  # type: ignore[attr-defined]
@@ -137,13 +142,16 @@ def test_the_detail_falls_back_to_stdout(evtx_dir: Path) -> None:
 def test_a_genuinely_clean_host_is_still_a_success(evtx_dir: Path) -> None:
     """Pins the fix's narrowness: exit 0 with no alerts stays a success.
 
-    Hayabusa exits 0 having written nothing when no rule matched. That is a
+    Hayabusa exits 0 having written nothing when no rule matched, after
+    reporting the files and events it scanned. That is a
     real answer, not a failure, and must keep reporting as one -- otherwise
     the fix trades silent failures for false alarms.
     """
 
     def _clean(cmd: list[str], _out_path: Path) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+        return subprocess.CompletedProcess(
+            args=cmd, returncode=0, stdout=_SCANNED_NOTHING_MATCHED, stderr=""
+        )
 
     result, _indexed, _existed = _invoke(evtx_dir, _clean)
 
@@ -154,7 +162,9 @@ def test_detections_written_before_a_non_zero_exit_are_kept(evtx_dir: Path) -> N
     """Hayabusa can fail on one unreadable EVTX after matching others.
 
     The guard is conjunctive -- non-zero *and* an empty timeline -- so real
-    detections are never discarded because one input was corrupt.
+    detections are never discarded because one input was corrupt. The run
+    is reported as partial, with Hayabusa's error, so the analyst knows the
+    scan did not cover every file.
     """
 
     def _partial(cmd: list[str], out_path: Path) -> subprocess.CompletedProcess[str]:
@@ -165,6 +175,7 @@ def test_detections_written_before_a_non_zero_exit_are_kept(evtx_dir: Path) -> N
 
     result, indexed, _existed = _invoke(evtx_dir, _partial)
 
-    assert result["status"] == "success"
+    assert result["status"] == "partial"
+    assert "failed to parse one file" in str(result["tool_warning"])
     assert indexed == [_CSV_HEADER + _CSV_ROW]
     assert "Suspicious PowerShell" in json.dumps(result)

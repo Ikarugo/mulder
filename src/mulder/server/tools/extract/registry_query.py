@@ -23,7 +23,11 @@ from mulder.server.helpers import (
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
-from mulder.server.tools.extract.tsk import _cleanup_tsk_extract_dir, _tsk_extract_files
+from mulder.server.tools.extract.tsk import (
+    IcatFailure,
+    _cleanup_tsk_extract_dir,
+    _tsk_extract_files,
+)
 
 __all__ = ["query_registry_value"]
 
@@ -134,6 +138,7 @@ def _extract_hive(
     image_path: str,
     hive: str,
     username: str | None,
+    failures: list[IcatFailure] | None = None,
 ) -> tuple[Path | None, str | None]:
     """Locate and extract a hive file from a disk image via TSK.
 
@@ -150,7 +155,7 @@ def _extract_hive(
     if username:
         patterns = [p.format(username=username) for p in patterns]
 
-    extracted = _tsk_extract_files(image_path, patterns)
+    extracted = _tsk_extract_files(image_path, patterns, failures=failures)
     if not extracted:
         return None, None
 
@@ -237,8 +242,18 @@ def query_registry_value(
 
     extract_dir: str | None = None
     try:
-        hive_path, extract_dir = _extract_hive(image_path, hive, username)
+        failures: list[IcatFailure] = []
+        hive_path, extract_dir = _extract_hive(image_path, hive, username, failures)
         if hive_path is None:
+            if failures:
+                return error_response(
+                    tc_id,
+                    "query_registry_value",
+                    params,
+                    f"The {hive} hive exists in the image but could not be read: "
+                    + "; ".join(f"{f.path}: {f.reason}" for f in failures[:3]),
+                    error_type="extraction_failed",
+                )
             return error_response(
                 tc_id,
                 "query_registry_value",

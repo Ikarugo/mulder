@@ -12,20 +12,56 @@ import contextlib
 import json
 import logging
 import shutil
-import subprocess
 import tempfile
 import time
 from pathlib import Path
 
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index
-from mulder.server.helpers import error_response, make_tool_call_id, tool_response
+from mulder.server.helpers import (
+    ToolRun,
+    error_response,
+    make_tool_call_id,
+    run_failure_response,
+    run_tool,
+    tool_response,
+)
 from mulder.server.tool_access import Role, tool_access
 
 logger = logging.getLogger(__name__)
 
 _MVT_TIMEOUT = 600
-_STDERR_PREVIEW_CHARS = 500
+
+
+def _iocs_error(
+    tc_id: str, tool_name: str, params: dict[str, object], iocs: str
+) -> dict[str, object] | None:
+    """An error when *iocs* names a file that does not exist.
+
+    The flag used to be dropped silently while the response still echoed
+    ``iocs_file``: a scan with no indicators loaded then read as "checked
+    against these IOCs, nothing matched".
+    """
+    if not iocs or Path(iocs).is_file():
+        return None
+    return error_response(
+        tc_id,
+        tool_name,
+        params,
+        f"IOC file not found: {iocs}. The scan was not run, so no indicator was checked.",
+        error_type="file_not_found",
+        suggestion="Pass the path of an existing STIX2 file, or iocs='' to scan without IOCs.",
+    )
+
+
+def _partial_warning(run: ToolRun) -> str | None:
+    """For a run that exited non-zero after MVT wrote some module results."""
+    if run.ok:
+        return None
+    return (
+        f"{run.describe()}\nThe module results written before that were indexed; modules "
+        "that did not run are missing, so absence of detections is not conclusive."
+    )
 
 
 def _collect_mvt_results(output_dir: str) -> tuple[str, dict[str, int]]:
@@ -98,48 +134,32 @@ def run_mvt_android(
             error_type="file_not_found",
         )
 
+    if (iocs_error := _iocs_error(tc_id, tool_name, params, iocs)) is not None:
+        return iocs_error
+
     with tempfile.TemporaryDirectory(prefix="mulder_mvt_android_") as tmpdir:
         if Path(evidence_path).is_dir():
             cmd = ["mvt-android", "check-backup", "-o", tmpdir, evidence_path]
         else:
             cmd = ["mvt-android", "check-bugreport", "-o", tmpdir, evidence_path]
 
-        if iocs and Path(iocs).is_file():
+        if iocs:
             cmd.extend(["--iocs", iocs])
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=_MVT_TIMEOUT,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                tool_name,
-                params,
-                f"mvt-android timed out after {_MVT_TIMEOUT}s",
-                elapsed_ms=(time.monotonic() - t0) * 1000,
-            )
+        run = run_tool(cmd, timeout=_MVT_TIMEOUT)
 
         raw_output, module_counts = _collect_mvt_results(tmpdir)
 
-        if proc.returncode != 0 and not raw_output.strip():
-            detail = (proc.stderr.strip() or proc.stdout.strip())[:_STDERR_PREVIEW_CHARS]
-            return error_response(
-                tc_id,
-                tool_name,
-                params,
-                f"mvt-android exited {proc.returncode} and produced no results: {detail}",
-                elapsed_ms=(time.monotonic() - t0) * 1000,
-                error_type="tool_failed",
-            )
-
         if not raw_output.strip():
-            raw_output = proc.stdout.strip() or proc.stderr.strip()
+            if not run.ok:
+                # MVT wrote no JSON: what it printed is its own error, not
+                # device evidence, and a scan that never ran is not clean.
+                return run_failure_response(
+                    tc_id, tool_name, params, run, t0, context="mvt-android produced no results"
+                )
+            raw_output = run.stdout.strip() or run.stderr.strip()
 
+    warning = _partial_warning(run)
     index_result = extract_and_index(
         raw_output,
         "mvt.android",
@@ -163,6 +183,8 @@ def run_mvt_android(
         "iocs_file": iocs or None,
         "index": index_result,
     }
+    if warning is not None:
+        result["tool_warning"] = warning
 
     return tool_response(tc_id, tool_name, params, result, "mvt.android", elapsed)
 
@@ -211,46 +233,30 @@ def run_mvt_ios(
             error_type="file_not_found",
         )
 
+    if (iocs_error := _iocs_error(tc_id, tool_name, params, iocs)) is not None:
+        return iocs_error
+
     with tempfile.TemporaryDirectory(prefix="mulder_mvt_ios_") as tmpdir:
         subcommand = "check-fs" if mode == "fs" else "check-backup"
         cmd = ["mvt-ios", subcommand, "-o", tmpdir, evidence_path]
 
-        if iocs and Path(iocs).is_file():
+        if iocs:
             cmd.extend(["--iocs", iocs])
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=_MVT_TIMEOUT,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                tool_name,
-                params,
-                f"mvt-ios timed out after {_MVT_TIMEOUT}s",
-                elapsed_ms=(time.monotonic() - t0) * 1000,
-            )
+        run = run_tool(cmd, timeout=_MVT_TIMEOUT)
 
         raw_output, module_counts = _collect_mvt_results(tmpdir)
 
-        if proc.returncode != 0 and not raw_output.strip():
-            detail = (proc.stderr.strip() or proc.stdout.strip())[:_STDERR_PREVIEW_CHARS]
-            return error_response(
-                tc_id,
-                tool_name,
-                params,
-                f"mvt-ios exited {proc.returncode} and produced no results: {detail}",
-                elapsed_ms=(time.monotonic() - t0) * 1000,
-                error_type="tool_failed",
-            )
-
         if not raw_output.strip():
-            raw_output = proc.stdout.strip() or proc.stderr.strip()
+            if not run.ok:
+                # MVT wrote no JSON: what it printed is its own error, not
+                # device evidence, and a scan that never ran is not clean.
+                return run_failure_response(
+                    tc_id, tool_name, params, run, t0, context="mvt-ios produced no results"
+                )
+            raw_output = run.stdout.strip() or run.stderr.strip()
 
+    warning = _partial_warning(run)
     index_result = extract_and_index(
         raw_output,
         "mvt.ios",
@@ -275,5 +281,7 @@ def run_mvt_ios(
         "iocs_file": iocs or None,
         "index": index_result,
     }
+    if warning is not None:
+        result["tool_warning"] = warning
 
     return tool_response(tc_id, tool_name, params, result, "mvt.ios", elapsed)

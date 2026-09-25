@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import re
 import shutil
-import subprocess
 import tempfile
 import time
 from collections.abc import Callable
@@ -43,9 +42,13 @@ from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.misc import _run_ez_tool
 from mulder.server.tools.extract.registry import _discover_user_hives_via_tsk
 from mulder.server.tools.extract.tsk import (
+    IcatFailure,
     _cleanup_tsk_extract_dir,
     _collect_fls_chunks,
     _tsk_extract_files,
+    add_extraction_failures,
+    icat_file,
+    nothing_extracted_response,
 )
 from mulder.triage import child_ci, is_triage_root, iter_tree_files
 
@@ -117,23 +120,18 @@ def _run_on_extracted_dir(
     missing_message: str,
 ) -> dict[str, object]:
     """Stage matching files in one directory and run *dll* over it with ``-d``."""
-    extracted = _tsk_extract_files(image_path, patterns, predicate)
+    failures: list[IcatFailure] = []
+    extracted = _tsk_extract_files(image_path, patterns, predicate, failures)
     if not extracted:
-        return error_response(
-            tc_id,
-            tool,
-            params,
-            missing_message,
-            (time.monotonic() - t0) * 1000,
-            error_type="artifact_missing",
-        )
+        return nothing_extracted_response(tc_id, tool, params, t0, missing_message, failures)
     extract_dir = str(extracted[0][1].parent)
     try:
-        return _run_ez_tool(
+        result = _run_ez_tool(
             dll, ["-d", extract_dir, *extra_args], source, image_path, tc_id, tool, params, t0
         )
     finally:
         _cleanup_tsk_extract_dir(extract_dir)
+    return add_extraction_failures(result, failures)
 
 
 # ---------------------------------------------------------------------------
@@ -144,36 +142,27 @@ def _run_on_extracted_dir(
 def _icat_to_file(
     image_path: str, offset: int, inode: str, dest: Path, skip_holes: bool = False
 ) -> bool:
-    """Stream ``icat`` output for *inode* to *dest*; True if non-empty.
-
-    Output goes straight to disk: $J and $MFT run to gigabytes, far beyond
-    what ``capture_output`` should hold. ``-h`` drops the sparse holes that
-    make up most of a $J stream's logical size.
-    """
-    cmd = ["icat"]
-    if skip_holes:
-        cmd.append("-h")
-    if offset > 0:
-        cmd.extend(["-o", str(offset)])
-    cmd.extend([image_path, inode])
-    try:
-        with dest.open("wb") as out:
-            proc = subprocess.run(
-                cmd, stdout=out, stderr=subprocess.PIPE, timeout=_ICAT_TIMEOUT, check=False
-            )
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    return proc.returncode == 0 and dest.stat().st_size > 0
+    """Stream ``icat`` output for *inode* to *dest*; True if non-empty."""
+    ok, _reason = icat_file(
+        image_path, offset, inode, dest, skip_holes=skip_holes, timeout=_ICAT_TIMEOUT
+    )
+    return ok
 
 
-def _usn_from_image(image_path: str, dest: Path) -> tuple[Path | None, Path | None]:
+def _usn_from_image(
+    image_path: str, dest: Path, problems: list[str] | None = None
+) -> tuple[Path | None, Path | None]:
     """Extract $J (the named ``$UsnJrnl:$J`` stream) and $MFT from a disk image.
 
     The stream has to be addressed with its full ``inode-type-id`` from the
     fls listing: the bare inode reads the file's unnamed data attribute,
-    which ``$UsnJrnl`` does not have.
+    which ``$UsnJrnl`` does not have. ``-h`` drops the sparse holes that
+    make up most of a $J stream's logical size. Read errors go to
+    *problems*, so "not on this volume" and "could not be read" differ.
     """
     if not require_binary("icat"):
+        if problems is not None:
+            problems.append("icat (Sleuth Kit) is not installed")
         return None, None
     for chunks, offset in _collect_fls_chunks(image_path):
         for chunk in chunks:
@@ -183,10 +172,19 @@ def _usn_from_image(image_path: str, dest: Path) -> tuple[Path | None, Path | No
                 if not entry.path.lower().replace("\\", "/").endswith("$extend/$usnjrnl:$j"):
                     continue
                 j_path = dest / "$J"
-                if not _icat_to_file(image_path, offset, entry.inode, j_path, skip_holes=True):
+                ok, reason = icat_file(
+                    image_path, offset, entry.inode, j_path, skip_holes=True, timeout=_ICAT_TIMEOUT
+                )
+                if not ok:
+                    if reason is not None and problems is not None:
+                        problems.append(f"$J (offset {offset}): {reason}")
                     continue
                 mft_path = dest / "$MFT"
-                mft_ok = _icat_to_file(image_path, offset, "0", mft_path)
+                mft_ok, mft_reason = icat_file(
+                    image_path, offset, "0", mft_path, timeout=_ICAT_TIMEOUT
+                )
+                if mft_reason is not None and problems is not None:
+                    problems.append(f"$MFT (offset {offset}): {mft_reason}")
                 return j_path, (mft_path if mft_ok else None)
     return None, None
 
@@ -228,11 +226,21 @@ def run_usn_parser(image_path: str, force: bool = False) -> dict[str, object]:
         return skipped
 
     with tempfile.TemporaryDirectory(prefix="mulder_usn_") as tmp:
+        problems: list[str] = []
         if is_triage_root(image_path):
             j_path, mft_path = _usn_from_tree(image_path)
         else:
-            j_path, mft_path = _usn_from_image(image_path, Path(tmp))
+            j_path, mft_path = _usn_from_image(image_path, Path(tmp), problems)
         if j_path is None:
+            if problems:
+                return error_response(
+                    tc_id,
+                    "run_usn_parser",
+                    params,
+                    "The $UsnJrnl:$J stream could not be read: " + "; ".join(problems),
+                    (time.monotonic() - t0) * 1000,
+                    error_type="extraction_failed",
+                )
             return error_response(
                 tc_id,
                 "run_usn_parser",
@@ -244,7 +252,7 @@ def run_usn_parser(image_path: str, force: bool = False) -> dict[str, object]:
         args = ["-f", str(j_path)]
         if mft_path is not None:
             args.extend(["-m", str(mft_path)])
-        return _run_ez_tool(
+        result = _run_ez_tool(
             "MFTECmd.dll",
             args,
             SRC_USNJRNL,
@@ -255,6 +263,13 @@ def run_usn_parser(image_path: str, force: bool = False) -> dict[str, object]:
             t0,
             timeout=adaptive_timeout(j_path, base=TOOL_TIMEOUT * 2),
         )
+        if mft_path is None and result.get("status") != "error":
+            result["note"] = (
+                "Parsed without the $MFT"
+                + (f" ({'; '.join(problems)})" if problems else "")
+                + ": entries have file names but not their full parent paths."
+            )
+        return result
 
 
 # ---------------------------------------------------------------------------
@@ -472,16 +487,13 @@ def run_srum_parser(image_path: str, force: bool = False) -> dict[str, object]:
     if not force and (skipped := _skipped(tc_id, "run_srum_parser", params, SRC_SRUM)):
         return skipped
 
-    extracted = _tsk_extract_files(image_path, ["srudb.dat", "config/software"], _is_srum_input)
+    failures: list[IcatFailure] = []
+    extracted = _tsk_extract_files(
+        image_path, ["srudb.dat", "config/software"], _is_srum_input, failures
+    )
+    missing = "SRUDB.dat not found (Windows 8+ keeps it in Windows/System32/sru)"
     if not extracted:
-        return error_response(
-            tc_id,
-            "run_srum_parser",
-            params,
-            "SRUDB.dat not found (Windows 8+ keeps it in Windows/System32/sru)",
-            (time.monotonic() - t0) * 1000,
-            error_type="artifact_missing",
-        )
+        return nothing_extracted_response(tc_id, "run_srum_parser", params, t0, missing, failures)
     extract_dir = str(extracted[0][1].parent)
     try:
         by_rel = {rel.lower().replace("\\", "/"): path for rel, path in extracted}
@@ -490,13 +502,13 @@ def run_srum_parser(image_path: str, force: bool = False) -> dict[str, object]:
             (p for r, p in by_rel.items() if r.endswith("config/software")), None
         )
         if srudb is None:
-            return error_response(
+            return nothing_extracted_response(
                 tc_id,
                 "run_srum_parser",
                 params,
-                "SRUDB.dat not found (Windows 8+ keeps it in Windows/System32/sru)",
-                (time.monotonic() - t0) * 1000,
-                error_type="artifact_missing",
+                t0,
+                missing,
+                [f for f in failures if f.path.lower().endswith("srudb.dat")],
             )
         args = ["-f", str(srudb)]
         if software is not None:
@@ -509,4 +521,4 @@ def run_srum_parser(image_path: str, force: bool = False) -> dict[str, object]:
 
     if result.get("status") == "error" and result.get("error_type") != "binary_missing":
         result["suggestion"] = _SRUM_DIRTY_HINT
-    return result
+    return add_extraction_failures(result, failures)

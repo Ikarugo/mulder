@@ -38,7 +38,7 @@ def _invoke(tool: Any, evidence: Path, proc: subprocess.CompletedProcess[str]) -
 
     with (
         patch("mulder.server.tools.mvt.shutil.which", return_value="/usr/bin/mvt"),
-        patch("mulder.server.tools.mvt.subprocess.run", return_value=proc),
+        patch("mulder.server.helpers.subprocess.run", return_value=proc),
         patch("mulder.server.tools.mvt.extract_and_index", side_effect=_record),
     ):
         result = tool.__wrapped__(str(evidence))
@@ -123,5 +123,8 @@ def test_results_written_before_a_non_zero_exit_are_kept(
     ):
         result, indexed = _invoke(tool, backup, proc)
 
-    assert result["status"] == "success"
+    # Kept and indexed, but not reported as a complete scan: the modules
+    # after the failure did not run.
+    assert result["status"] == "partial"
+    assert "one module failed" in str(result["tool_warning"])
     assert indexed == ["sms_detected: 2 entries"]

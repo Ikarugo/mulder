@@ -18,9 +18,11 @@ from mulder.patterns import parse_mmls_rows
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    ToolRun,
     error_response,
     make_tool_call_id,
     require_binary,
+    run_tool,
     sources_already_indexed,
     tool_response,
 )
@@ -40,6 +42,7 @@ _DEFAULT_MAX_FILES = 5000
 _DEFAULT_SAMPLE_BYTES = 8192
 _WALK_BUDGET_S = 300
 _HITS_IN_RESPONSE = 25
+_FAILURES_IN_RESPONSE = 10
 _FLS_TIMEOUT = 300
 _NON_FS_ROWS = ("unallocated", "table", "gpt header")
 
@@ -220,19 +223,52 @@ def _tsk_cmd(binary: str, image_path: str, offset: int, *args: str) -> list[str]
     return cmd
 
 
+class _HeadReadError(Exception):
+    """icat returned no data for a file the listing says is not empty."""
+
+
 def _read_head(image_path: str, offset: int, inode: str, n: int) -> bytes:
-    """Return the first *n* bytes of *inode* via icat, killing icat afterwards."""
+    """Return the first *n* bytes of *inode* via icat, killing icat afterwards.
+
+    Raises :class:`_HeadReadError` with icat's own reason when it returns
+    nothing: only non-empty files are sampled, so no data means the file
+    could not be read (deleted clusters reused, unsupported attribute, bad
+    sector), not that it is empty. An empty head used to be classified as
+    "unrecognised content" and counted as a clean sample.
+    """
     cmd = [*_tsk_cmd("icat", image_path, offset), inode]
     try:
-        with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL) as proc:
+        with subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, stdin=subprocess.DEVNULL
+        ) as proc:
             assert proc.stdout is not None
-            try:
-                head: bytes = proc.stdout.read(n)
-                return head
-            finally:
+            head: bytes = proc.stdout.read(n)
+            if head:
                 proc.kill()
-    except OSError:
-        return b""
+                return head
+            try:
+                _out, err = proc.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                err = b""
+            reason = err.decode("utf-8", errors="replace").strip()[:200]
+            raise _HeadReadError(
+                f"icat exited {proc.returncode}: {reason}"
+                if reason or proc.returncode
+                else "icat returned no data"
+            )
+    except OSError as exc:
+        raise _HeadReadError(f"icat could not be started: {exc}") from exc
+
+
+def _fls_problem(run: ToolRun) -> str:
+    """Why fls did not complete, in the form partitions_skipped has always used."""
+    if run.timed_out:
+        return "timeout"
+    if run.launch_error is not None:
+        return run.describe()
+    detail = run.stderr[:200].strip() or run.tail(3)[:200]
+    return f"fls exited {run.returncode}: {detail}"
 
 
 def _extension(path: str) -> str:
@@ -325,36 +361,43 @@ def detect_masquerading(
     hits: list[dict[str, object]] = []
     scanned: list[dict[str, object]] = []
     skipped: list[dict[str, object]] = []
+    unreadable: list[dict[str, object]] = []
+    warnings: list[str] = []
     listed = 0
-    sampled = 0
+    attempted = 0  # files icat was asked for: what max_files bounds
+    sampled = 0  # files whose head was actually read and checked
     truncated = False
     for offset, desc in targets:
-        try:
-            proc = subprocess.run(
-                _tsk_cmd("fls", image_path, offset, "-r", "-p", "-l"),
-                capture_output=True,
-                timeout=_FLS_TIMEOUT,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            skipped.append({"partition_offset": offset, "description": desc, "reason": "timeout"})
-            continue
-        if proc.returncode != 0:
-            stderr = proc.stderr.decode("utf-8", errors="replace")[:200].strip()
-            reason = f"fls exited {proc.returncode}: {stderr}"
+        run = run_tool(_tsk_cmd("fls", image_path, offset, "-r", "-p", "-l"), timeout=_FLS_TIMEOUT)
+        if run.failed:
+            reason = _fls_problem(run)
             skipped.append({"partition_offset": offset, "description": desc, "reason": reason})
             continue
 
-        entries = parse_fls_long(proc.stdout.decode("utf-8", errors="replace"))
+        entries = parse_fls_long(run.stdout)
         listed += len(entries)
         part_hits = 0
         # Only extensions we know a family for can ever produce a hit, so skip the rest.
         for entry in (e for e in entries if _extension(e.path) in _EXT_FAMILIES):
-            if sampled >= max_files or time.monotonic() - t0 > _WALK_BUDGET_S:
+            if attempted >= max_files or time.monotonic() - t0 > _WALK_BUDGET_S:
                 truncated = True
                 break
+            attempted += 1
+            try:
+                head = _read_head(image_path, offset, entry.inode, sample_bytes)
+            except _HeadReadError as exc:
+                unreadable.append(
+                    {
+                        "path": entry.path,
+                        "inode": entry.inode,
+                        "deleted": entry.deleted,
+                        "partition_offset": offset,
+                        "reason": str(exc),
+                    }
+                )
+                continue
             sampled += 1
-            detected = identify_content(_read_head(image_path, offset, entry.inode, sample_bytes))
+            detected = identify_content(head)
             if is_mismatch(entry.path, detected):
                 part_hits += 1
                 hits.append(
@@ -372,14 +415,21 @@ def detect_masquerading(
                         "partition_offset": offset,
                     }
                 )
-        scanned.append(
-            {
-                "partition_offset": offset,
-                "description": desc,
-                "files_listed": len(entries),
-                "mismatches": part_hits,
-            }
-        )
+        part: dict[str, object] = {
+            "partition_offset": offset,
+            "description": desc,
+            "files_listed": len(entries),
+            "mismatches": part_hits,
+        }
+        if not run.ok:
+            # fls stopped part-way (a corrupt directory, a timeout) after
+            # listing some files: those were checked, the rest were not.
+            part["fls_error"] = _fls_problem(run)
+            warnings.append(
+                f"Partition at offset {offset}: {part['fls_error']}. Only the "
+                f"{len(entries)} files listed before that were checked."
+            )
+        scanned.append(part)
 
     if not scanned:
         return error_response(
@@ -390,6 +440,19 @@ def detect_masquerading(
             + "; ".join(f"offset {s['partition_offset']} ({s['reason']})" for s in skipped),
             error_type="extraction_failed",
             suggestion="Run run_mmls and pass the data partition start sector as the offset.",
+        )
+
+    if attempted and not sampled:
+        return error_response(
+            tc_id,
+            name,
+            params,
+            f"icat could not read any of the {attempted} files sampled, so no file was "
+            "checked. First failures: "
+            + "; ".join(f"{u['path']} ({u['reason']})" for u in unreadable[:3]),
+            elapsed_ms=(time.monotonic() - t0) * 1000,
+            error_type="extraction_failed",
+            suggestion="Check the partition offset (run_mmls) and that icat can read the image.",
         )
 
     lines = [
@@ -408,7 +471,22 @@ def detect_masquerading(
         "files_sampled": sampled,
         "truncated": truncated,
         "hits": hits[:_HITS_IN_RESPONSE],
+        "files_unreadable": len(unreadable),
     }
+    if unreadable:
+        summary["unreadable"] = unreadable[:_FAILURES_IN_RESPONSE]
+        live = [u for u in unreadable if not u["deleted"]]
+        summary["files_unreadable_deleted"] = len(unreadable) - len(live)
+        # Deleted entries whose clusters were reused are routinely unreadable:
+        # counted, but only allocated files that could not be read are a gap.
+        if live:
+            warnings.append(
+                f"icat could not read {len(live)} allocated file(s) of the {attempted} sampled; "
+                "they were not checked, so a renamed file among them would be missed. First: "
+                + "; ".join(f"{u['path']} ({u['reason']})" for u in live[:3])
+            )
+    if warnings:
+        summary["tool_warning"] = "\n".join(warnings)
     summary.update(extract_and_index("\n".join(lines), _SOURCE, image_path, "sleuthkit"))
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, name, params, summary, _SOURCE, elapsed)

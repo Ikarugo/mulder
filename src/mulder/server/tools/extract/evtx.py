@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import atexit
 import contextlib
+import importlib.util
 import logging
 import shutil
 import subprocess
@@ -17,19 +18,29 @@ from mulder.patterns import fls_file_entries
 from mulder.server.app import get_cfg, get_ctx, mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    ToolRun,
     adaptive_timeout,
     error_response,
+    failure_key,
     make_tool_call_id,
+    remember_failure,
+    repeated_failure_response,
     require_binary,
+    run_failure_response,
+    run_tool,
     sources_already_indexed,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.misc import _DOTNET, _find_ez_tool
 from mulder.server.tools.extract.tsk import (
+    BULK_ICAT_TIMEOUT,
+    IcatFailure,
     _collect_fls_chunks,
     _tsk_extract_dirs,
     _tsk_lock,
+    extraction_failure_fields,
+    icat_file,
 )
 from mulder.triage import is_triage_root, iter_tree_files
 
@@ -46,7 +57,12 @@ _evtx_extract_dirs: dict[str, str] = {}
 _evtx_lock = threading.Lock()
 
 
-def _extract_evtx_from_image(image_path: str, dest_dir: str) -> list[Path]:
+def _extract_evtx_from_image(
+    image_path: str,
+    dest_dir: str,
+    failures: list[IcatFailure] | None = None,
+    problems: list[str] | None = None,
+) -> list[Path]:
     """Extract .evtx files from a disk image to *dest_dir* using TSK icat.
 
     Searches all indexed ``tsk.filelist*`` sources (primary and secondary
@@ -59,6 +75,10 @@ def _extract_evtx_from_image(image_path: str, dest_dir: str) -> list[Path]:
     Args:
         image_path: Path to the disk image.
         dest_dir: Directory to write extracted .evtx files to.
+        failures: When given, receives the logs icat could not read.
+        problems: When given, receives why no file listing could be built
+            (fls/mmls failure), so "no EVTX found" is not reported for an
+            image that was never listed.
 
     Returns:
         List of paths to extracted .evtx files.
@@ -66,7 +86,7 @@ def _extract_evtx_from_image(image_path: str, dest_dir: str) -> list[Path]:
     if is_triage_root(image_path):
         return _copy_evtx_from_tree(image_path, dest_dir)
 
-    chunk_groups = _collect_fls_chunks(image_path)
+    chunk_groups = _collect_fls_chunks(image_path, problems)
     if not chunk_groups:
         return []
 
@@ -84,17 +104,15 @@ def _extract_evtx_from_image(image_path: str, dest_dir: str) -> list[Path]:
                 seen.add(dedup_key)
                 safe_name = entry.path.replace("/", "_").replace("\\", "_")
                 out_path = Path(dest_dir) / safe_name
-                cmd = ["icat"]
-                if offset > 0:
-                    cmd.extend(["-o", str(offset)])
-                cmd.extend([image_path, inode_str])
-                try:
-                    proc = subprocess.run(cmd, capture_output=True, timeout=30, check=False)
-                    if proc.returncode == 0 and proc.stdout:
-                        out_path.write_bytes(proc.stdout)
-                        extracted.append(out_path)
-                except (subprocess.TimeoutExpired, OSError):
-                    continue
+                ok, reason = icat_file(
+                    image_path, offset, inode_str, out_path, timeout=BULK_ICAT_TIMEOUT
+                )
+                if ok:
+                    extracted.append(out_path)
+                elif reason is not None and not entry.deleted:
+                    logger.warning("Cannot extract %s: %s", entry.path, reason)
+                    if failures is not None:
+                        failures.append(IcatFailure(entry.path, inode_str, reason))
     return extracted
 
 
@@ -222,7 +240,9 @@ def _build_evtx_priority_manifest(evtx_files: list[Path]) -> list[dict[str, obje
     return manifest
 
 
-def _parse_evtx_with_eztools(evtx_path: str, evtx_dir: str | None) -> dict[str, object] | None:
+def _parse_evtx_with_eztools(
+    evtx_path: str, evtx_dir: str | None, problems: list[str] | None = None
+) -> dict[str, object] | None:
     """Parse EVTX files using EZTools EvtxECmd.
 
     Attempts to locate EvtxECmd.dll and the dotnet runtime. If available,
@@ -249,13 +269,11 @@ def _parse_evtx_with_eztools(evtx_path: str, evtx_dir: str | None) -> dict[str, 
         else:
             cmd = [_DOTNET, dll, "-f", evtx_path, "--csv", csv_dir]
 
-        subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=adaptive_timeout(evtx_path),
-            check=False,
-        )
+        run = run_tool(cmd, timeout=adaptive_timeout(evtx_path))
+        if run.timed_out:
+            if problems is not None:
+                problems.append(f"EvtxECmd: {run.describe()}")
+            raise subprocess.TimeoutExpired(cmd, run.timeout)
 
         combined = ""
         for csv_file in sorted(Path(csv_dir).glob("*.csv")):
@@ -263,11 +281,83 @@ def _parse_evtx_with_eztools(evtx_path: str, evtx_dir: str | None) -> dict[str, 
                 combined += csv_file.read_text(encoding="utf-8", errors="replace")
 
         if combined:
-            return extract_and_index(combined, "ez.evtx", evtx_path, "eztools")
+            summary = extract_and_index(combined, "ez.evtx", evtx_path, "eztools")
+            if (warning := run.warning()) is not None:
+                summary["tool_warning"] = warning
+            return summary
+        if problems is not None:
+            problems.append(_evtx_run_problem(run))
     return None
 
 
-def _parse_evtx_with_python_fallback(evtx_path: str, evtx_dir: str | None) -> list[object]:
+def _evtxecmd_unavailable() -> str | None:
+    """Why EvtxECmd cannot run, or None when it can."""
+    if _find_ez_tool("EvtxECmd.dll") is None:
+        return "EvtxECmd not run: EvtxECmd.dll not found (run 'mulder setup')"
+    if not require_binary(_DOTNET):
+        return f"EvtxECmd not run: {_DOTNET} not found on PATH"
+    return None
+
+
+def _ez_reasons(problems: list[str]) -> list[str]:
+    """What happened to EvtxECmd, for an error message: its failure or why it did not run."""
+    if problems:
+        return problems
+    unavailable = _evtxecmd_unavailable()
+    return [unavailable] if unavailable else []
+
+
+def _python_evtx_missing() -> str | None:
+    """The reason python-evtx cannot run, or None when it is installed.
+
+    ``_parse_evtx_file`` returns empty text when the ``Evtx`` package is
+    missing, which is otherwise indistinguishable from a log with no events.
+    """
+    try:
+        found = importlib.util.find_spec("Evtx") is not None
+    except (ImportError, ValueError):
+        found = False
+    return None if found else "python-evtx is not installed"
+
+
+#: Signature that starts every event record inside an EVTX chunk.
+_EVTX_RECORD_MAGIC = b"\x2a\x2a\x00\x00"
+#: File header (4 KiB) plus the first chunk header (512 bytes).
+_EVTX_FIRST_RECORD_OFFSET = 0x1200
+
+
+def _evtx_has_records(path: Path) -> bool:
+    """Whether an EVTX file holds at least one event record.
+
+    Most channels under ``winevt\\Logs`` are empty: a 68 KiB file with a
+    header and an empty chunk. Parsing them yields nothing, which is not a
+    parser failure. When unsure (unreadable file, stray signature bytes)
+    this answers True, so a real failure is never hidden.
+    """
+    try:
+        with path.open("rb") as fh:
+            fh.seek(_EVTX_FIRST_RECORD_OFFSET)
+            tail = b""
+            while block := fh.read(1 << 20):
+                if _EVTX_RECORD_MAGIC in tail + block:
+                    return True
+                tail = block[-3:]
+    except OSError:
+        return True
+    return False
+
+
+def _evtx_run_problem(run: ToolRun) -> str:
+    """One line on an EvtxECmd run that left no CSV."""
+    return f"EvtxECmd produced no CSV: {run.describe()}"
+
+
+def _parse_evtx_with_python_fallback(
+    evtx_path: str,
+    evtx_dir: str | None,
+    empty: list[str] | None = None,
+    no_records: list[str] | None = None,
+) -> list[object]:
     """Parse EVTX files using the pure-Python python-evtx library.
 
     Used as a fallback when EZTools is unavailable or produces no output.
@@ -291,6 +381,11 @@ def _parse_evtx_with_python_fallback(evtx_path: str, evtx_dir: str | None) -> li
         if text:
             summary = extract_and_index(text, f"evtx.{channel}", str(ef), "python-evtx")
             results.append(summary)
+        elif not _evtx_has_records(ef):
+            if no_records is not None:
+                no_records.append(ef.name)
+        elif empty is not None:
+            empty.append(ef.name)
     return results
 
 
@@ -318,6 +413,11 @@ def run_evtx_parser(evtx_path: str, force: bool = False) -> dict[str, object]:
 
     if not force:
         existing = sources_already_indexed(["evtx.", "ez.evtx"], evidence_path=evtx_path)
+        if set(existing) == {"evtx.manifest"} and not _extraction_dir_alive(evtx_path):
+            # Only the manifest was indexed and its extracted files are gone
+            # (they are deleted at exit): index_evtx_file has nothing to read,
+            # so extract again instead of answering "already done".
+            existing = []
         if existing:
             return tool_response(
                 tc_id,
@@ -351,13 +451,41 @@ def run_evtx_parser(evtx_path: str, force: bool = False) -> dict[str, object]:
         ctx = get_ctx()
         ctx.db.set_kv("evtx_extract_dir", extract_dir)
         ctx.db.set_kv(f"evtx_extract_dir:{evtx_path}", extract_dir)
-        evtx_files = _extract_evtx_from_image(evtx_path, extract_dir)
+        failures: list[IcatFailure] = []
+        listing_problems: list[str] = []
+        evtx_files = _extract_evtx_from_image(evtx_path, extract_dir, failures, listing_problems)
         if not evtx_files:
             evtx_files = _find_carved_evtx(extract_dir)
         if not evtx_files:
             shutil.rmtree(extract_dir, ignore_errors=True)
             with _evtx_lock:
                 _evtx_extract_dirs.pop(evtx_path, None)
+            if failures:
+                listed = "; ".join(f"{f.path}: {f.reason}" for f in failures[:5])
+                return error_response(
+                    tc_id,
+                    "run_evtx_parser",
+                    params,
+                    f"{len(failures)} EVTX file(s) exist in the image but none could be read: "
+                    f"{listed}",
+                    (time.monotonic() - t0) * 1000,
+                    error_type="extraction_failed",
+                    suggestion="A read failure, not an absence of logs: record the gap.",
+                )
+            if listing_problems:
+                return error_response(
+                    tc_id,
+                    "run_evtx_parser",
+                    params,
+                    "No EVTX files extracted: the image's file listing could not be built "
+                    f"({'; '.join(listing_problems)})",
+                    (time.monotonic() - t0) * 1000,
+                    error_type="extraction_failed",
+                    suggestion=(
+                        "A listing failure, not an absence of logs. Run run_mmls and run_fls "
+                        "with the right partition_offset, or run_bulk_extractor to carve EVTX."
+                    ),
+                )
             return error_response(
                 tc_id,
                 "run_evtx_parser",
@@ -365,6 +493,8 @@ def run_evtx_parser(evtx_path: str, force: bool = False) -> dict[str, object]:
                 "No EVTX files found in disk image. "
                 "Ensure run_fls has been called first, or run run_bulk_extractor "
                 "which can carve EVTX fragments even when fls fails.",
+                (time.monotonic() - t0) * 1000,
+                error_type="artifact_missing",
             )
 
         manifest = _build_evtx_priority_manifest(evtx_files)
@@ -391,27 +521,138 @@ def run_evtx_parser(evtx_path: str, force: bool = False) -> dict[str, object]:
                 f"Only index archived logs (Archive-Security-*) if you need historical data."
             ),
         }
+        if failures:
+            result.update(extraction_failure_fields(failures))
+            result["tool_warning"] = result["extraction_note"]
 
         elapsed = (time.monotonic() - t0) * 1000
         return tool_response(tc_id, "run_evtx_parser", params, result, "evtx.manifest", elapsed)
 
     evtx_dir = evtx_path if target.is_dir() else None
 
+    problems: list[str] = []
     try:
-        ez_result = _parse_evtx_with_eztools(evtx_path, evtx_dir)
+        ez_result = _parse_evtx_with_eztools(evtx_path, evtx_dir, problems)
         if ez_result is not None:
             elapsed = (time.monotonic() - t0) * 1000
             return tool_response(tc_id, "run_evtx_parser", params, ez_result, "ez.evtx", elapsed)
     except subprocess.TimeoutExpired:
-        return error_response(tc_id, "run_evtx_parser", params, "EvtxECmd timed out")
+        return error_response(
+            tc_id,
+            "run_evtx_parser",
+            params,
+            "; ".join(problems) or "EvtxECmd timed out",
+            (time.monotonic() - t0) * 1000,
+            error_type="timeout",
+        )
 
+    if evtx_dir and not any(Path(evtx_dir).rglob("*.evtx")):
+        return error_response(
+            tc_id,
+            "run_evtx_parser",
+            params,
+            f"No .evtx files under {evtx_dir}" + (f" ({'; '.join(problems)})" if problems else ""),
+            (time.monotonic() - t0) * 1000,
+            error_type="artifact_missing",
+        )
+
+    missing = _python_evtx_missing()
+    if missing is not None:
+        return error_response(
+            tc_id,
+            "run_evtx_parser",
+            params,
+            "No EVTX parser available: " + "; ".join([*_ez_reasons(problems), missing]),
+            (time.monotonic() - t0) * 1000,
+            error_type="binary_missing",
+        )
+
+    empty: list[str] = []
+    no_records: list[str] = []
     try:
-        results = _parse_evtx_with_python_fallback(evtx_path, evtx_dir)
-    except ImportError:
-        return error_response(tc_id, "run_evtx_parser", params, "No EVTX parser available")
+        results = _parse_evtx_with_python_fallback(evtx_path, evtx_dir, empty, no_records)
+    except ImportError as exc:
+        return error_response(
+            tc_id,
+            "run_evtx_parser",
+            params,
+            "No EVTX parser available: "
+            + "; ".join([*_ez_reasons(problems), f"python-evtx: {exc}"]),
+            error_type="binary_missing",
+        )
 
     elapsed = (time.monotonic() - t0) * 1000
+    if not results and no_records and not empty:
+        # Every log is empty (no event record at all): a fact, not a failure.
+        return tool_response(
+            tc_id,
+            "run_evtx_parser",
+            params,
+            {
+                "status": "no_records",
+                "logs_without_records": no_records[:50],
+                "logs_without_records_count": len(no_records),
+                "message": f"The {len(no_records)} EVTX file(s) hold no event record.",
+            },
+            None,
+            elapsed,
+        )
+    if not results:
+        # Nothing parsed: say so instead of a success with an empty list.
+        return error_response(
+            tc_id,
+            "run_evtx_parser",
+            params,
+            "; ".join(
+                [
+                    *_ez_reasons(problems),
+                    f"python-evtx also parsed no events from {len(empty)} EVTX file(s)"
+                    + (f" ({', '.join(empty[:10])})" if empty else ""),
+                ]
+            ),
+            elapsed,
+            error_type="tool_failed",
+            suggestion=(
+                "The logs may be empty, corrupt or not EVTX. Check their size with "
+                "list_directory and record the gap if they cannot be read."
+            ),
+        )
+    if empty or problems:
+        notes = []
+        if problems:
+            notes.extend(problems)
+        if empty:
+            notes.append(
+                f"no events parsed from {len(empty)} file(s) that hold event records: "
+                f"{', '.join(empty[:10])}"
+            )
+        payload: dict[str, object] = {"parsed": results, "tool_warning": "; ".join(notes)}
+        if no_records:
+            payload["logs_without_records_count"] = len(no_records)
+        return tool_response(tc_id, "run_evtx_parser", params, payload, "evtx", elapsed)
+    if no_records:
+        return tool_response(
+            tc_id,
+            "run_evtx_parser",
+            params,
+            {"parsed": results, "logs_without_records_count": len(no_records)},
+            "evtx",
+            elapsed,
+        )
     return tool_response(tc_id, "run_evtx_parser", params, results, "evtx", elapsed)
+
+
+def _extraction_dir_alive(evtx_path: str) -> bool:
+    """Whether the files extracted by an earlier run_evtx_parser are still on disk."""
+    with _evtx_lock:
+        extract_dir = _evtx_extract_dirs.get(evtx_path)
+    if extract_dir is None:
+        try:
+            value = get_ctx().db.get_kv(f"evtx_extract_dir:{evtx_path}")
+        except Exception:
+            value = None
+        extract_dir = str(value) if value else None
+    return bool(extract_dir) and Path(str(extract_dir)).is_dir()
 
 
 _COMPANION_LOG_PATTERNS: tuple[tuple[str, str], ...] = (
@@ -426,15 +667,48 @@ def _is_security_log(filename: str) -> bool:
     return "security" in filename.lower().replace(" ", "").replace("-", "")
 
 
-def _auto_index_companion_logs(extract_dir: str, image_path: str) -> list[dict[str, object]]:
+def _run_evtxecmd_file(
+    evtx_file: Path, event_ids: list[int] | None = None
+) -> tuple[ToolRun | None, str]:
+    """Run EvtxECmd on one file and return ``(run, combined CSV text)``.
+
+    ``run`` is None when EvtxECmd or dotnet is not installed.
+    """
+    dll = _find_ez_tool("EvtxECmd.dll")
+    if not (dll and require_binary(_DOTNET)):
+        return None, ""
+    with tempfile.TemporaryDirectory(prefix="mulder_evtx_csv_") as csv_dir:
+        cmd = [_DOTNET, dll, "-f", str(evtx_file), "--csv", csv_dir]
+        if event_ids:
+            cmd.extend(["--inc", ",".join(str(eid) for eid in event_ids)])
+        run = run_tool(cmd, timeout=adaptive_timeout(str(evtx_file)))
+        combined = ""
+        for csv_file in sorted(Path(csv_dir).glob("*.csv")):
+            with contextlib.suppress(OSError):
+                combined += csv_file.read_text(encoding="utf-8", errors="replace")
+    return run, combined
+
+
+def _auto_index_companion_logs(
+    extract_dir: str,
+    image_path: str,
+    failures: list[dict[str, object]] | None = None,
+) -> list[dict[str, object]]:
     """Index System.evtx and PowerShell logs alongside a Security log.
 
     Checks for companion logs in the same extraction directory. Skips
     any that are already indexed. Returns summaries of newly indexed logs.
+    Companions that could not be indexed are appended to *failures* as
+    ``{"file", "error"}`` entries (when given) instead of only being logged.
     """
     ctx = get_ctx()
     existing_sources = {s.source_name for s in ctx.db.get_sources()}
     indexed: list[dict[str, object]] = []
+
+    def _failed(candidate: Path, error: str) -> None:
+        logger.warning("Auto-index of %s failed: %s", candidate.name, error)
+        if failures is not None:
+            failures.append({"file": candidate.name, "error": error})
 
     extract_path = Path(extract_dir)
     available_files = {f.name.lower(): f for f in extract_path.glob("*.evtx")}
@@ -450,37 +724,28 @@ def _auto_index_companion_logs(extract_dir: str, image_path: str) -> list[dict[s
         if candidate is None:
             continue
 
-        dll = _find_ez_tool("EvtxECmd.dll")
-        if dll and require_binary(_DOTNET):
-            with tempfile.TemporaryDirectory(prefix="mulder_evtx_csv_") as csv_dir:
-                cmd = [_DOTNET, dll, "-f", str(candidate), "--csv", csv_dir]
-                try:
-                    subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=adaptive_timeout(str(candidate)),
-                        check=False,
-                    )
-                except subprocess.TimeoutExpired:
-                    logger.warning("Auto-index timed out for %s", candidate.name)
-                    continue
+        run, combined = _run_evtxecmd_file(candidate)
+        if run is not None and run.timed_out:
+            _failed(candidate, f"EvtxECmd: {run.describe()}")
+            continue
+        if combined:
+            sname = "evtx." + candidate.stem.lower().replace(" ", "-").replace("%", "")
+            summary = extract_and_index(combined, sname, str(candidate), "eztools")
+            if (warning := run.warning() if run is not None else None) is not None:
+                summary["tool_warning"] = warning
+            indexed.append({"source": sname, "file": candidate.name, "summary": summary})
+            existing_sources.add(sname)
+            continue
 
-                combined = ""
-                for csv_file in sorted(Path(csv_dir).glob("*.csv")):
-                    with contextlib.suppress(OSError):
-                        combined += csv_file.read_text(encoding="utf-8", errors="replace")
-
-                if combined:
-                    sname = "evtx." + candidate.stem.lower().replace(" ", "-").replace("%", "")
-                    summary = extract_and_index(combined, sname, str(candidate), "eztools")
-                    indexed.append({"source": sname, "file": candidate.name, "summary": summary})
-                    existing_sources.add(sname)
-                    continue
-
+        reasons = [_evtx_run_problem(run)] if run is not None else []
+        missing = _python_evtx_missing()
+        if missing is not None:
+            _failed(candidate, "; ".join([*reasons, missing]))
+            continue
         try:
             from mulder.extractors.disk import _parse_evtx_file
-        except ImportError:
+        except ImportError as exc:
+            _failed(candidate, "; ".join([*reasons, f"python-evtx: {exc}"]))
             continue
 
         channel, text = _parse_evtx_file(candidate)
@@ -489,8 +754,31 @@ def _auto_index_companion_logs(extract_dir: str, image_path: str) -> list[dict[s
             summary = extract_and_index(text, sname, str(candidate), "python-evtx")
             indexed.append({"source": sname, "file": candidate.name, "summary": summary})
             existing_sources.add(sname)
+        elif _evtx_has_records(candidate):
+            _failed(candidate, "; ".join([*reasons, "python-evtx parsed no events"]))
+        # else: the companion log is empty (no event record): nothing to index.
 
     return indexed
+
+
+def _with_companions(
+    summary: dict[str, object], filename: str, extract_dir: str, image_path: str
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Auto-index the companions of a Security log; note failures in *summary*."""
+    if not _is_security_log(filename):
+        return [], []
+    failures: list[dict[str, object]] = []
+    auto_indexed = _auto_index_companion_logs(extract_dir, image_path, failures)
+    if failures:
+        summary["companion_failures"] = failures
+        warning = (
+            f"{len(failures)} companion log(s) could not be auto-indexed "
+            f"({', '.join(str(f['file']) for f in failures)}); see companion_failures. "
+            "Index them with index_evtx_file or record the gap."
+        )
+        earlier = summary.get("tool_warning")
+        summary["tool_warning"] = f"{earlier}\n{warning}" if earlier else warning
+    return auto_indexed, failures
 
 
 @mcp.tool()
@@ -499,6 +787,7 @@ def index_evtx_file(
     filename: str,
     event_ids: list[int] | None = None,
     image_path: str = "",
+    force: bool = False,
 ) -> dict[str, object]:
     """Parse and index a specific EVTX file from a prior run_evtx_parser extraction.
 
@@ -523,10 +812,17 @@ def index_evtx_file(
         image_path: Disk image path passed to ``run_evtx_parser``.
             Required when multiple images have been extracted in the
             same session; omit for single-image cases.
+        force: Parse again a file whose parsing already failed with the
+            same event_ids (by default the earlier failure is returned).
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
-    params = {"filename": filename, "event_ids": event_ids, "image_path": image_path}
+    params: dict[str, object] = {
+        "filename": filename,
+        "event_ids": event_ids,
+        "image_path": image_path,
+        "force": force,
+    }
 
     with _evtx_lock:
         if image_path and image_path in _evtx_extract_dirs:
@@ -565,67 +861,123 @@ def index_evtx_file(
                 f"File not found: {filename}. Available files include: {', '.join(available)}",
             )
 
-    dll = _find_ez_tool("EvtxECmd.dll")
-    if dll and require_binary(_DOTNET):
-        with tempfile.TemporaryDirectory(prefix="mulder_evtx_csv_") as csv_dir:
-            cmd = [_DOTNET, dll, "-f", str(evtx_path), "--csv", csv_dir]
-            if event_ids:
-                cmd.extend(["--inc", ",".join(str(eid) for eid in event_ids)])
-            try:
-                subprocess.run(
-                    cmd,
-                    capture_output=True,
-                    text=True,
-                    timeout=adaptive_timeout(str(evtx_path)),
-                    check=False,
-                )
-            except subprocess.TimeoutExpired:
-                return error_response(
-                    tc_id, "index_evtx_file", params, f"EvtxECmd timed out on {filename}"
-                )
+    memory_key = failure_key(
+        "index_evtx_file", str(evtx_path), ",".join(str(e) for e in sorted(event_ids or []))
+    )
+    repeated = repeated_failure_response(tc_id, "index_evtx_file", params, memory_key, t0)
+    if repeated is not None:
+        return repeated
 
-            combined = ""
-            for csv_file in sorted(Path(csv_dir).glob("*.csv")):
-                with contextlib.suppress(OSError):
-                    combined += csv_file.read_text(encoding="utf-8", errors="replace")
+    run, combined = _run_evtxecmd_file(evtx_path, event_ids)
+    if run is not None and run.timed_out:
+        return run_failure_response(
+            tc_id,
+            "index_evtx_file",
+            params,
+            run,
+            t0,
+            memory_key=memory_key,
+            context=f"EvtxECmd on {evtx_path.name}",
+        )
+    if combined:
+        source_name = "evtx." + evtx_path.stem.lower().replace(" ", "-").replace("%", "")
+        summary = extract_and_index(combined, source_name, str(evtx_path), "eztools")
+        if run is not None and (warning := run.warning()) is not None:
+            summary["tool_warning"] = warning
+        return _index_response(
+            tc_id, params, summary, source_name, filename, extract_dir, image_path, t0
+        )
 
-            if combined:
-                source_name = "evtx." + evtx_path.stem.lower().replace(" ", "-").replace("%", "")
-                summary = extract_and_index(combined, source_name, str(evtx_path), "eztools")
-
-                auto_indexed: list[dict[str, object]] = []
-                if _is_security_log(filename):
-                    auto_indexed = _auto_index_companion_logs(extract_dir, image_path)
-
-                elapsed = (time.monotonic() - t0) * 1000
-                response = tool_response(
-                    tc_id, "index_evtx_file", params, summary, source_name, elapsed
-                )
-                if auto_indexed:
-                    response["auto_indexed_companions"] = auto_indexed
-                return response
-
+    reasons = [_evtx_run_problem(run)] if run is not None else _ez_reasons([])
+    missing = _python_evtx_missing()
+    if missing is not None:
+        return error_response(
+            tc_id,
+            "index_evtx_file",
+            params,
+            f"No EVTX parser available for {evtx_path.name}: " + "; ".join([*reasons, missing]),
+            (time.monotonic() - t0) * 1000,
+            error_type="binary_missing",
+        )
     try:
         from mulder.extractors.disk import _parse_evtx_file
-    except ImportError:
-        return error_response(tc_id, "index_evtx_file", params, "No EVTX parser available")
+    except ImportError as exc:
+        return error_response(
+            tc_id,
+            "index_evtx_file",
+            params,
+            "No EVTX parser available: " + "; ".join([*reasons, f"python-evtx: {exc}"]),
+            (time.monotonic() - t0) * 1000,
+            error_type="binary_missing",
+        )
 
     id_filter = set(event_ids) if event_ids else None
     channel, text = _parse_evtx_file(evtx_path, event_ids=id_filter)
     if text:
         summary = extract_and_index(text, f"evtx.{channel}", str(evtx_path), "python-evtx")
-
-        auto_indexed = []
-        if _is_security_log(filename):
-            auto_indexed = _auto_index_companion_logs(extract_dir, image_path)
-
-        elapsed = (time.monotonic() - t0) * 1000
-        response = tool_response(
-            tc_id, "index_evtx_file", params, summary, f"evtx.{channel}", elapsed
+        if run is not None:
+            # EvtxECmd failed but python-evtx read the log: the events are all
+            # there, in python-evtx's format under evtx.<channel>.
+            summary["parser_note"] = f"{reasons[0]}. Parsed with python-evtx instead."
+        return _index_response(
+            tc_id, params, summary, f"evtx.{channel}", filename, extract_dir, image_path, t0
         )
-        if auto_indexed:
-            response["auto_indexed_companions"] = auto_indexed
-        return response
 
+    size = evtx_path.stat().st_size if evtx_path.exists() else 0
+    if not id_filter and not _evtx_has_records(evtx_path):
+        return tool_response(
+            tc_id,
+            "index_evtx_file",
+            params,
+            {
+                "status": "no_records",
+                "message": (
+                    f"{evtx_path.name} ({size} bytes) holds no event record: the channel is "
+                    "empty (never written to, or cleared and not written to since)."
+                ),
+            },
+            None,
+            (time.monotonic() - t0) * 1000,
+        )
+    message = (
+        f"No events parsed from {evtx_path.name} ({size} bytes): "
+        + "; ".join(reasons)
+        + "; python-evtx also parsed no events"
+        + (f" matching event_ids {sorted(event_ids)}" if event_ids else "")
+    )
+    remember_failure(memory_key, message)
+    return error_response(
+        tc_id,
+        "index_evtx_file",
+        params,
+        message,
+        (time.monotonic() - t0) * 1000,
+        error_type="tool_failed",
+        suggestion=(
+            "The log may be empty, corrupt or not EVTX"
+            + (", or no event has these IDs" if event_ids else "")
+            + ". Running it again fails the same way (pass force=True after changing the "
+            "setup); record the gap or use run_hayabusa on the extraction directory."
+        ),
+    )
+
+
+def _index_response(
+    tc_id: str,
+    params: dict[str, object],
+    summary: dict[str, object],
+    source_name: str,
+    filename: str,
+    extract_dir: str,
+    image_path: str,
+    t0: float,
+) -> dict[str, object]:
+    """The index_evtx_file response for an indexed log, with its companions."""
+    auto_indexed, companion_failures = _with_companions(summary, filename, extract_dir, image_path)
     elapsed = (time.monotonic() - t0) * 1000
-    return error_response(tc_id, "index_evtx_file", params, f"No events parsed from {filename}")
+    response = tool_response(tc_id, "index_evtx_file", params, summary, source_name, elapsed)
+    if auto_indexed:
+        response["auto_indexed_companions"] = auto_indexed
+    if companion_failures:
+        response["companion_failures"] = companion_failures
+    return response

@@ -47,7 +47,7 @@ def _invoke(
 
     with (
         patch("mulder.server.helpers.require_binary", return_value=True),
-        patch("mulder.server.helpers.run_subprocess", return_value=proc),
+        patch("mulder.server.helpers.subprocess.run", return_value=proc),
         patch("mulder.server.extract_helpers.extract_and_index", side_effect=_record),
     ):
         result = tool.__wrapped__(str(target))
@@ -156,7 +156,11 @@ def test_output_produced_before_a_non_zero_exit_is_kept(
 
     result, indexed = _invoke(tool, evidence, proc)
 
-    assert result["status"] == "success"
+    # Kept and indexed, but not reported as a clean run: the agent is told
+    # the tool stopped early and why.
+    assert result["status"] == "partial"
+    assert "exited 1" in str(result["tool_warning"])
+    assert "two.bin: Permission denied" in str(result["tool_warning"])
     assert indexed == ["/evidence/one.bin: MZ header found"]
 
 
