@@ -69,7 +69,7 @@ _EZ_TOOLS: list[tuple[str, str, str]] = [
     (
         "parse_srum",
         "ez.srum",
-        "Return SRUM data parsed by SrumECmd (EZ Tools).\n\n"
+        "Return SRUM data parsed by run_srum_parser.\n\n"
         "Shows network/app resource usage over 30-60 days.  Returns a summary\n"
         "with counts and sample entries; use ``search()`` or\n"
         "``get_raw_output()`` for full data.  Read-only.",

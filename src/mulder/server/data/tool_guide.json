@@ -388,7 +388,7 @@
     },
     {
       "tool": "run_srum_parser",
-      "description": "Parse SRUDB.dat (per-application network and resource usage) with SrumECmd",
+      "description": "Parse SRUDB.dat (per-application network and resource usage, application run times) in Python, dirty databases included",
       "input": "Disk image or triage collection path",
       "related": ["parse_srum"]
     },
@@ -397,6 +397,18 @@
       "description": "Parse CryptnetUrlCache: URLs, times and hashes of files fetched through CryptAPI (certutil downloads), non-PKI entries flagged",
       "input": "Disk image or triage collection path",
       "related": ["run_usn_parser", "read_evidence_file"]
+    },
+    {
+      "tool": "parse_windows_search",
+      "description": "Parse the Windows Search index (Windows.edb / Windows.db): indexed files, e-mail headers, contacts, content summaries",
+      "input": "Disk image or triage collection path",
+      "related": ["query_ese_database", "run_mft_parser"]
+    },
+    {
+      "tool": "query_ese_database",
+      "description": "List the tables of an ESE database file (WebCacheV01.dat, .edb) or read one table in pages",
+      "input": "ESE database file path, optional table/offset/limit",
+      "related": ["parse_windows_search", "run_srum_parser", "query_sqlite_file"]
     },
     {
       "tool": "extract_mft_record",

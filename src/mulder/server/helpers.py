@@ -947,6 +947,7 @@ TOOL_SOURCE_PREFIXES: dict[str, list[str]] = {
     "run_shellbags_parser": ["ez.shellbags"],
     "run_srum_parser": ["ez.srum"],
     "parse_cryptnet_url_cache": ["cryptnet.urlcache"],
+    "parse_windows_search": ["windows.search"],
     "parse_autoruns": ["autoruns."],
 }
 """Maps extraction tool names to the source prefixes they produce.

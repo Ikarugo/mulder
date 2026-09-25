@@ -597,6 +597,7 @@ def _tsk_extract_files(
     path_patterns: list[str],
     predicate: Callable[[str], bool] | None = None,
     failures: list[IcatFailure] | None = None,
+    icat_timeout: int = BULK_ICAT_TIMEOUT,
 ) -> list[tuple[str, Path]]:
     """Extract files from a disk image via TSK fls + icat.
 
@@ -616,6 +617,7 @@ def _tsk_extract_files(
             file is extracted.
         failures: When given, receives an :class:`IcatFailure` for every
             matching file that icat could not read.
+        icat_timeout: Seconds allowed per file (large databases need more).
 
     Returns:
         List of ``(relative_path, extracted_path)`` tuples.
@@ -657,7 +659,7 @@ def _tsk_extract_files(
                 safe_name = rel_path.replace("/", "_").replace("\\", "_")
                 out_path = extract_dir / safe_name
                 ok, reason = icat_file(
-                    image_path, offset, inode_str, out_path, timeout=BULK_ICAT_TIMEOUT
+                    image_path, offset, inode_str, out_path, timeout=icat_timeout
                 )
                 if ok:
                     extracted.append((rel_path, out_path))

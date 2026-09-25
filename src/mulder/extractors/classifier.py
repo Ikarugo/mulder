@@ -55,6 +55,22 @@ _PHONE_DB_NAMES = {
     "downloads.db",
 }
 _SQLITE_EXTS = {".sqlite", ".sqlitedb", ".db"}
+#: ESE (JET Blue) databases with a known forensic meaning, catalogued wherever
+#: they are: SRUM, Windows Search, legacy Edge / IE cache and history, UAL.
+ESE_ARTIFACT_NAMES = frozenset(
+    {
+        "srudb.dat",
+        "windows.edb",
+        "webcachev01.dat",
+        "webcachev24.dat",
+        "spartan.edb",
+        "current.mdb",
+    }
+)
+_ESE_EXTS = {".edb"}
+_SEARCH_INDEX_DIR = "search/data/applications/windows/"
+#: Databases with a dedicated parser, catalogued wherever they sit.
+_KNOWN_DATABASE_TYPES = frozenset({"srum_database", "windows_search_index"})
 
 _AUTO_EXCLUDE_DIRS = {"precooked", "baseline-memory", "baseline"}
 
@@ -111,7 +127,7 @@ _TRIAGE_COVERED_TYPES: frozenset[str] = frozenset({"evtx", "log_file", "log_dire
 
 #: Inside a triage root, these types are kept only in user-writable locations.
 _TRIAGE_LOCATION_FILTERED_TYPES: frozenset[str] = frozenset(
-    {"script", "sqlite_database", "compressed_archive", "browser_history"}
+    {"script", "sqlite_database", "compressed_archive", "browser_history", "ese_database"}
 )
 
 #: A collected ``.dmp``/``.raw`` smaller than this is a crash minidump or an
@@ -332,7 +348,13 @@ class EvidenceClassifier:
         if classified is None or classified.artifact_type in _TRIAGE_COVERED_TYPES:
             return
         atype = classified.artifact_type
-        if atype in _TRIAGE_LOCATION_FILTERED_TYPES and not in_writable_location(rel):
+        known_ese = atype == "ese_database" and item.name.lower() in ESE_ARTIFACT_NAMES
+        if (
+            atype in _TRIAGE_LOCATION_FILTERED_TYPES
+            and not known_ese
+            and atype not in _KNOWN_DATABASE_TYPES
+            and not in_writable_location(rel)
+        ):
             return
         if atype == "memory_dump":
             try:
@@ -396,6 +418,15 @@ class EvidenceClassifier:
 
         if name in _PHONE_DB_NAMES:
             return ClassifiedEvidence(path=path, artifact_type="phone_database")
+
+        if name == "srudb.dat":
+            return ClassifiedEvidence(path=path, artifact_type="srum_database")
+        if name in ("windows.edb", "windows.db") and _SEARCH_INDEX_DIR in (
+            path.as_posix().lower()
+        ):
+            return ClassifiedEvidence(path=path, artifact_type="windows_search_index")
+        if name in ESE_ARTIFACT_NAMES or ext in _ESE_EXTS:
+            return ClassifiedEvidence(path=path, artifact_type="ese_database")
 
         if ext in _SQLITE_EXTS:
             return ClassifiedEvidence(path=path, artifact_type="sqlite_database")

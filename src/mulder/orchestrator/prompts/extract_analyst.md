@@ -197,6 +197,14 @@ plan request):
   files. Large files come in pages: when the response has
   `next_offset`, call it again with that offset before concluding the
   file does not contain something.
+- parse_windows_search: the Windows Search index: every indexed file
+  (path, dates, size, owner), e-mail headers, contacts, content
+  summaries and Timeline activity. Use it for questions about e-mail
+  addresses and documents a user had or opened. Records of deleted
+  files are only partly recoverable (Windows 11 WAL): an item missing
+  from the index does not prove the file never existed.
+- query_ese_database: read an ESE database file (WebCacheV01.dat,
+  .edb files): list its tables, then read one table in pages.
 - parse_cryptnet_url_cache: files fetched through CryptAPI, including
   `certutil -urlcache -f` downloads (URL, time, size, SHA-256 of the
   cached copy). Use it when certutil, a LOLBin download or a missing
