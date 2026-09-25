@@ -18,7 +18,7 @@ from typing import Any
 
 from sqlalchemy import select as sa_select
 
-from mulder.db import windows_t
+from mulder.db import _FTS5_DATETIME, windows_t
 from mulder.server import source_names as _sn
 from mulder.server.app import get_ctx, mcp
 from mulder.server.helpers import (
@@ -70,18 +70,66 @@ _SNIPPET_EXTRA = 2
 _FTS_WORD_RE = re.compile(r"[A-Za-z0-9_\u0080-\U0010ffff]+")
 
 
+def _datetime_regex(value: str) -> str:
+    """Regex for a queried date or time as written in raw text: ``T`` or space, any zone."""
+    m = _FTS5_DATETIME.fullmatch(value)
+    bare = value[: m.start("zone")] if m is not None and m.group("zone") else value
+    return "[Tt ]".join(re.escape(part) for part in re.split(r"[Tt ]", bare, maxsplit=1))
+
+
 def _fts_terms_pattern(terms: list[str]) -> re.Pattern[str] | None:
-    """A case-insensitive regex matching the words of FTS queries in raw text."""
-    words = {
-        w
-        for term in terms
-        for w in _FTS_WORD_RE.findall(term)
-        if w.upper() not in {"AND", "OR", "NOT", "NEAR"}
-    }
-    if not words:
+    """A case-insensitive regex matching the words of FTS queries in raw text.
+
+    A date or time is matched whole: its numbers alone ("11", "06") occur
+    everywhere, and excerpts centred on them missed the timestamp that made
+    the window match. Other all-digit words must not sit inside a longer
+    number.
+    """
+    alternatives: dict[str, int] = {}
+    for term in terms:
+        for m in _FTS5_DATETIME.finditer(term):
+            alternatives[_datetime_regex(m.group(0))] = len(m.group(0))
+        for w in _FTS_WORD_RE.findall(_FTS5_DATETIME.sub(" ", term)):
+            if w in {"AND", "OR", "NOT", "NEAR"}:
+                continue
+            regex = rf"(?<!\d){w}(?!\d)" if w.isdigit() else re.escape(w)
+            alternatives[regex] = len(w)
+    if not alternatives:
         return None
-    alternation = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
-    return re.compile(alternation, re.IGNORECASE)
+    ordered = sorted(alternatives, key=lambda r: alternatives[r], reverse=True)
+    return re.compile("|".join(ordered), re.IGNORECASE)
+
+
+def _no_match_hint(terms: list[str]) -> str:
+    """Why an FTS search can return nothing although the data is there."""
+    explicit_or = any(re.search(r"(?:^|\s)OR(?:\s|$)", t) for t in terms)
+    multi = [
+        t
+        for t in terms
+        if not explicit_or
+        and not re.fullmatch(r'\s*"[^"]*"\*?\s*', t)
+        and len([w for w in t.split() if w not in {"AND", "OR", "NOT", "NEAR"}]) > 1
+    ]
+    lower_ops = sorted({w for t in terms for w in t.split() if w in {"and", "or", "not"}})
+    hint = (
+        "No match. Search matches whole words: 'mimikatz' finds 'mimikatz.exe', 'katz' "
+        "does not (regex=True matches substrings). "
+    )
+    if multi:
+        hint += (
+            f"All the words of {multi[0]!r} had to be in the same window: search the most "
+            "distinctive word alone, pass the words as queries=[...] to match any of them, "
+            "or use regex=True for an exact substring. "
+        )
+    if lower_ops:
+        hint += (
+            f"Lowercase {', '.join(repr(w) for w in lower_ops)} is searched as a word: "
+            "write AND, OR, NOT in capitals. "
+        )
+    return hint + (
+        "Zero hits is not proof of absence until the right source was searched: check "
+        "list_sources and the tool that should have indexed it."
+    )
 
 
 def _snippet_window(w: Any, pattern: re.Pattern[str] | None) -> dict[str, object]:
@@ -488,6 +536,8 @@ def search(
             "with get_raw_output(source_name, after_id=window_id - 1, limit=1)."
         ),
     }
+    if total_matches == 0 and not regex:
+        response["hint"] = _no_match_hint(all_terms)
     if remaining > 0:
         response["hint"] = (
             f"Showing {len(results)} of {total_matches} matches "
