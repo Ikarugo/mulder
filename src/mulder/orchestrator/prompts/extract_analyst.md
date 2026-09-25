@@ -184,8 +184,9 @@ plan request):
   image files in suspicious contexts.
 - query_sqlite_from_image: query a database file from the disk image.
   Use when you find SQLite databases (browser history, app data).
-  It needs an fls inode, so it does not apply to a triage collection;
-  there, use run_hindsight for Chromium profiles.
+  It needs an fls inode, so for a database that exists as a file (in a
+  triage collection or an extracted folder) use query_sqlite_file with
+  its path: an empty query lists tables and columns, then SELECT.
 - On a triage collection (a directory of collected files rather than a
   raw image), files have real paths: read scripts, PowerShell history
   (ConsoleHost_history.txt) and configs with read_evidence_file. The

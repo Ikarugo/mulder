@@ -73,6 +73,12 @@
       "description": "Retrieve raw tool output for a specific source",
       "input": "Source name, optional tool filter",
       "related": ["list_sources", "get_source_stats"]
+    },
+    {
+      "tool": "query_sqlite_file",
+      "description": "Read-only SQL query (or schema listing) on a SQLite file in the evidence",
+      "input": "Database file path and SELECT query",
+      "related": ["query_sqlite_from_image", "run_hindsight"]
     }
   ],
   "memory": [
@@ -355,6 +361,36 @@
       "description": "List Volume Shadow Copy (VSS) snapshots in a disk image",
       "input": "Disk image file path, optional partition offset",
       "related": ["run_fls", "run_registry_parser"]
+    },
+    {
+      "tool": "run_usn_parser",
+      "description": "Parse the NTFS change journal ($UsnJrnl:$J) with MFTECmd, paired with $MFT for full paths",
+      "input": "Disk image or triage collection path",
+      "related": ["parse_usn_journal", "run_mft_parser"]
+    },
+    {
+      "tool": "run_lnk_parser",
+      "description": "Parse .lnk shortcut files from user profiles with LECmd",
+      "input": "Disk image or triage collection path",
+      "related": ["parse_lnk_files", "run_jumplist_parser"]
+    },
+    {
+      "tool": "run_jumplist_parser",
+      "description": "Parse Jump Lists (Automatic/CustomDestinations) with JLECmd",
+      "input": "Disk image or triage collection path",
+      "related": ["parse_jump_lists", "run_lnk_parser"]
+    },
+    {
+      "tool": "run_shellbags_parser",
+      "description": "Parse Shellbags from NTUSER.DAT/UsrClass.dat with SBECmd",
+      "input": "Disk image or triage collection path",
+      "related": ["parse_shellbags", "run_registry_parser"]
+    },
+    {
+      "tool": "run_srum_parser",
+      "description": "Parse SRUDB.dat (per-application network and resource usage) with SrumECmd",
+      "input": "Disk image or triage collection path",
+      "related": ["parse_srum"]
     }
   ],
   "network": [

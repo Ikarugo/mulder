@@ -51,6 +51,11 @@ _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
         "run_amcache_parser",
         "run_shimcache_parser",
         "run_mft_parser",
+        "run_usn_parser",
+        "run_lnk_parser",
+        "run_jumplist_parser",
+        "run_shellbags_parser",
+        "run_srum_parser",
         "run_evtx_parser",
         "run_hayabusa",
         "yara_scan_files",
@@ -73,7 +78,7 @@ _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
         "extract_archive",
     ],
     "sqlite_database": [
-        "query_sqlite_from_image",
+        "query_sqlite_file",
     ],
     "phone_dump": [
         "run_fls",

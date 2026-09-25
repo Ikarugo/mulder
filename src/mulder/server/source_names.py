@@ -47,6 +47,7 @@ SRC_EZ_USNJRNL = "ez.usnjrnl"
 SRC_EZ_MFT = "ez.mft"
 SRC_EZ_JUMPLISTS = "ez.jumplists"
 SRC_EZ_LNKFILES = "ez.lnkfiles"
+SRC_EZ_SHELLBAGS = "ez.shellbags"
 
 # Bulk extractor sources
 SRC_BULK_URL = "bulk.url"

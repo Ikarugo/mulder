@@ -9,7 +9,7 @@ import subprocess
 import tempfile
 import threading
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 
 from mulder.extractors.optical import probe_optical
@@ -387,6 +387,7 @@ def _index_secondary_partitions(
 def _tsk_extract_files(
     image_path: str,
     path_patterns: list[str],
+    predicate: Callable[[str], bool] | None = None,
 ) -> list[tuple[str, Path]]:
     """Extract files from a disk image via TSK fls + icat.
 
@@ -401,12 +402,15 @@ def _tsk_extract_files(
     Args:
         image_path: Path to the disk image.
         path_patterns: Substring patterns to match against file paths.
+        predicate: Optional extra filter on the lower-cased ``/``-separated
+            relative path, applied after a pattern matched and before the
+            file is extracted.
 
     Returns:
         List of ``(relative_path, extracted_path)`` tuples.
     """
     if is_triage_root(image_path):
-        return _triage_extract_files(image_path, path_patterns)
+        return _triage_extract_files(image_path, path_patterns, predicate)
 
     chunk_groups = _collect_fls_chunks(image_path)
     if not chunk_groups:
@@ -425,6 +429,8 @@ def _tsk_extract_files(
                 rel_lower = rel_path.lower().replace("\\", "/")
 
                 if not any(pat.lower() in rel_lower for pat in path_patterns):
+                    continue
+                if predicate is not None and not predicate(rel_lower):
                     continue
                 dedup_key = f"{offset}:{inode_str}"
                 if dedup_key in seen:
@@ -459,7 +465,11 @@ def _tsk_extract_files(
     return extracted
 
 
-def _triage_extract_files(root: str, path_patterns: list[str]) -> list[tuple[str, Path]]:
+def _triage_extract_files(
+    root: str,
+    path_patterns: list[str],
+    predicate: Callable[[str], bool] | None = None,
+) -> list[tuple[str, Path]]:
     """``_tsk_extract_files`` for a triage root: copy matching files, no Sleuth Kit.
 
     Matching is the same case-insensitive substring test applied to the
@@ -482,6 +492,8 @@ def _triage_extract_files(root: str, path_patterns: list[str]) -> list[tuple[str
     for rel_path, src in iter_tree_files(root):
         rel_lower = rel_path.lower()
         if not any(pat in rel_lower for pat in patterns):
+            continue
+        if predicate is not None and not predicate(rel_lower):
             continue
         if extract_dir is None:
             extract_dir = Path(tempfile.mkdtemp(prefix="mulder_tsk_extract_"))
@@ -524,8 +536,9 @@ def _triage_redirect(
         or (
             "Use the Windows artifact parsers directly on this path (run_registry_parser, "
             "run_prefetch_parser, run_amcache_parser, run_shimcache_parser, run_mft_parser, "
-            "run_evtx_parser, run_hayabusa); the $MFT parsed by run_mft_parser is the file "
-            "inventory and MAC timeline."
+            "run_usn_parser, run_lnk_parser, run_jumplist_parser, run_shellbags_parser, "
+            "run_srum_parser, run_evtx_parser, run_hayabusa); the $MFT parsed by "
+            "run_mft_parser is the file inventory and MAC timeline."
         ),
     )
 

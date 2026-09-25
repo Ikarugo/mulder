@@ -555,6 +555,11 @@ TOOL_SOURCE_PREFIXES: dict[str, list[str]] = {
     "run_amcache_parser": ["amcache.", "ez.amcache"],
     "run_shimcache_parser": ["shimcache.", "ez.shimcache"],
     "run_mft_parser": ["mft.", "ez.mft"],
+    "run_usn_parser": ["ez.usnjrnl"],
+    "run_lnk_parser": ["ez.lnkfiles"],
+    "run_jumplist_parser": ["ez.jumplists"],
+    "run_shellbags_parser": ["ez.shellbags"],
+    "run_srum_parser": ["ez.srum"],
     "run_zircolite": ["zircolite."],
     "parse_autoruns": ["autoruns."],
 }

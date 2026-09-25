@@ -336,6 +336,162 @@ def parse_plist(plist_filter: str | None = None) -> dict[str, object]:
     }
 
 
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+_SQLITE_MAX_ROWS = 1000
+_SQLITE_SIDECARS = ("-wal", "-journal")
+_SOURCE_SAFE_RE = re.compile(r"[^a-z0-9_.-]+")
+
+
+def _sqlite_schema(conn: sqlite3.Connection) -> list[dict[str, object]]:
+    """Tables and views with their columns and row counts (tables only)."""
+    schema: list[dict[str, object]] = []
+    objects = conn.execute(
+        "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') "
+        "AND name NOT LIKE 'sqlite_%' ORDER BY name"
+    ).fetchall()
+    for name, obj_type in objects:
+        quoted = '"' + str(name).replace('"', '""') + '"'
+        try:
+            columns = [row[1] for row in conn.execute(f"PRAGMA table_info({quoted})")]
+            rows: int | None = None
+            if obj_type == "table":
+                rows = conn.execute(f"SELECT COUNT(*) FROM {quoted}").fetchone()[0]
+        except sqlite3.Error:
+            continue
+        schema.append({"name": name, "type": obj_type, "columns": columns, "rows": rows})
+    return schema
+
+
+@mcp.tool()
+@tool_access(Role.EXTRACT_EXECUTOR | Role.EXTRACT_ANALYST)
+def query_sqlite_file(
+    file_path: str,
+    query: str = "",
+    description: str = "",
+    max_rows: int = _SQLITE_MAX_ROWS,
+) -> dict[str, object]:
+    """Run a read-only SQL query on a SQLite database file in the evidence.
+
+    Call on databases that exist as files: in a triage collection or an
+    extracted directory (Firefox places.sqlite, Windows Timeline
+    ActivitiesCache.db, chat and application stores), where
+    query_sqlite_from_image does not apply because there is no fls inode.
+    With an empty *query*, returns every table and view with its columns
+    and row count so a query can be written; with a SELECT, indexes up to
+    *max_rows* rows as ``sqlite.<description or file name>``. The database
+    and its -wal/-journal files are copied first, so uncommitted WAL pages
+    are included and the evidence is never opened for writing.
+
+    Args:
+        file_path: Absolute path of the database file.
+        query: A single SELECT (or WITH ... SELECT) statement; empty to list the schema.
+        description: Optional label for the indexed source name.
+        max_rows: Maximum rows to index (1 to 1000).
+    """
+    ctx = get_ctx()
+    tc_id = make_tool_call_id()
+    t0 = time.monotonic()
+    params = {
+        "file_path": file_path,
+        "query": query,
+        "description": description,
+        "max_rows": max_rows,
+    }
+
+    def _fail(message: str) -> dict[str, object]:
+        ctx.audit.log_tool_call(
+            tool_call_id=tc_id,
+            tool_name="query_sqlite_file",
+            params=params,
+            output_hash=hash_output({"error": message}),
+            duration_ms=(time.monotonic() - t0) * 1000,
+        )
+        return {"tool_call_id": tc_id, "status": "error", "error_message": message}
+
+    try:
+        target = _resolve_artifact_path(Path(file_path))
+    except PathPolicyError as exc:
+        return _fail(str(exc))
+    if not target.is_file():
+        return _fail(f"File not found: {file_path}")
+    try:
+        with target.open("rb") as f:
+            if f.read(len(_SQLITE_MAGIC)) != _SQLITE_MAGIC:
+                return _fail(f"Not a SQLite database: {file_path}")
+    except OSError as exc:
+        return _fail(f"Cannot read {file_path}: {exc}")
+
+    statement = query.strip().rstrip(";").strip()
+    if statement:
+        if not re.match(r"(?is)^(select|with)\b", statement):
+            return _fail("Only SELECT queries are allowed (read-only)")
+        if ";" in statement:
+            return _fail("Multi-statement queries are not allowed")
+    max_rows = max(1, min(int(max_rows), _SQLITE_MAX_ROWS))
+
+    with tempfile.TemporaryDirectory(prefix="mulder_sqlite_") as tmpdir:
+        copy = Path(tmpdir) / "db.sqlite"
+        try:
+            shutil.copyfile(target, copy)
+            for suffix in _SQLITE_SIDECARS:
+                sidecar = target.with_name(target.name + suffix)
+                if sidecar.is_file():
+                    shutil.copyfile(sidecar, copy.with_name(copy.name + suffix))
+            conn = sqlite3.connect(str(copy))
+        except (OSError, sqlite3.Error) as exc:
+            return _fail(f"Cannot open {file_path}: {exc}")
+        try:
+            conn.execute("PRAGMA trusted_schema=OFF")
+            if not statement:
+                schema = _sqlite_schema(conn)
+                conn.close()
+                result = {"file_path": str(target), "tables": schema}
+                ctx.audit.log_tool_call(
+                    tool_call_id=tc_id,
+                    tool_name="query_sqlite_file",
+                    params=params,
+                    output_hash=hash_output(result),
+                    duration_ms=(time.monotonic() - t0) * 1000,
+                )
+                return {"tool_call_id": tc_id, "status": "success", **result}
+            conn.set_authorizer(_readonly_authorizer)
+            conn.row_factory = sqlite3.Row
+            cursor = conn.execute(statement)
+            rows = cursor.fetchmany(max_rows + 1)
+        except sqlite3.Error as exc:
+            conn.close()
+            return _fail(f"SQLite query failed: {exc}")
+        conn.close()
+
+    truncated = len(rows) > max_rows
+    rows = rows[:max_rows]
+    label = description or target.name
+    source_name = "sqlite." + (_SOURCE_SAFE_RE.sub("_", label.lower()).strip("_") or "file")
+    if rows:
+        columns = list(rows[0].keys())
+        lines = [f"=== {target} ===", "\t".join(columns)]
+        lines.extend("\t".join(str(r[c]) for c in columns) for r in rows)
+        summary = extract_and_index("\n".join(lines), source_name, str(target), "sqlite_query")
+    else:
+        summary = {"status": "no_results", "message": "Query returned 0 rows"}
+
+    ctx.audit.log_tool_call(
+        tool_call_id=tc_id,
+        tool_name="query_sqlite_file",
+        params=params,
+        output_hash=hash_output(summary),
+        duration_ms=(time.monotonic() - t0) * 1000,
+    )
+    return {
+        "tool_call_id": tc_id,
+        "status": "success",
+        "results": summary,
+        "source": source_name,
+        "result_count": len(rows),
+        "truncated": truncated,
+    }
+
+
 @mcp.tool()
 @tool_access(Role.EXTRACT_EXECUTOR | Role.EXTRACT_ANALYST)
 def query_sqlite_from_image(inode: int, query: str, description: str = "") -> dict[str, object]:

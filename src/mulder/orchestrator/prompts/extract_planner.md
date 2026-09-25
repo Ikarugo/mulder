@@ -49,7 +49,9 @@ When the evidence includes a DISK IMAGE, always plan:
 - Additional tools based on the detected OS and filesystem:
   Windows: run_evtx_parser, run_hayabusa, run_chainsaw,
     run_registry_parser, run_prefetch_parser, run_amcache_parser,
-    run_shimcache_parser, run_mft_parser
+    run_shimcache_parser, run_mft_parser, run_usn_parser,
+    run_lnk_parser, run_jumplist_parser, run_shellbags_parser,
+    run_srum_parser
   Linux: run_zircolite (Auditd/Sysmon Sigma), log parsers for
     syslog/auth/journal, run_chkrootkit
   macOS: run_plaso (unified log timeline), parse_plist
@@ -60,6 +62,8 @@ the volume root: the context lists it under "Triage collections"), plan
 the Windows artifact parsers with image_path set to that directory:
 - run_registry_parser (include_user_hives=True), run_prefetch_parser,
   run_amcache_parser, run_shimcache_parser, run_mft_parser
+- run_usn_parser, run_lnk_parser, run_jumplist_parser,
+  run_shellbags_parser, run_srum_parser (user and file activity)
 - run_evtx_parser, then run_hayabusa and run_chainsaw on the same path
 - query_registry_value for the timezone and system baseline (see
   ARTIFACT AWARENESS below)
@@ -117,6 +121,20 @@ When a Windows disk image is detected:
   include_user_hives=True) for user activity artifacts: TypedURLs,
   RecentDocs, UserAssist, MRU lists, mapped network drives, and
   per-user Run keys.
+
+What each Windows user-activity parser answers (plan them when the
+question applies, on a disk image or a triage collection):
+- run_usn_parser ($UsnJrnl): files created, renamed or deleted, even
+  after deletion; anti-forensics and tool staging.
+- run_lnk_parser and run_jumplist_parser: files and volumes (USB,
+  network shares) each user opened, and when.
+- run_shellbags_parser: folders each user browsed, including removed
+  USB drives and shares.
+- run_srum_parser: bytes sent and received per application over the
+  last 30 to 60 days; exfiltration volume.
+- query_sqlite_file: SQLite databases present as files (browser
+  history, Windows Timeline ActivitiesCache.db, chat apps). Call it
+  with an empty query first to list tables and columns.
 
 When execution artifacts (ShimCache, Prefetch, Amcache, UserAssist)
 show communication or networking tools were used:
