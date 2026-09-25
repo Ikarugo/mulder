@@ -12,6 +12,7 @@ from mulder.triage import (
     RAW_COLLECTION_ARTIFACT_TYPE,
     TRIAGE_ARTIFACT_TYPE,
     detect_raw_collection,
+    in_writable_location,
     is_triage_root,
 )
 
@@ -107,6 +108,15 @@ TRIAGE_ONLY_SCRIPT_EXTS: frozenset[str] = frozenset({".py", ".sh", ".rb", ".pl"}
 #: of the hundreds of collected logs individually would only drown the
 #: catalog, so they are folded into the ``triage_collection`` entry.
 _TRIAGE_COVERED_TYPES: frozenset[str] = frozenset({"evtx", "log_file", "log_directory"})
+
+#: Inside a triage root, these types are kept only in user-writable locations.
+_TRIAGE_LOCATION_FILTERED_TYPES: frozenset[str] = frozenset(
+    {"script", "sqlite_database", "compressed_archive", "browser_history"}
+)
+
+#: A collected ``.dmp``/``.raw`` smaller than this is a crash minidump or an
+#: application file, not a memory image.
+_TRIAGE_MIN_MEMORY_DUMP = 512 * 1024 * 1024
 
 _SKIP_EXTENSIONS: set[str] = {
     ".md",
@@ -292,17 +302,45 @@ class EvidenceClassifier:
         if any(item.is_relative_to(d) for d in seen_log_dirs):
             return
 
-        if in_triage and item.suffix.lower() in TRIAGE_ONLY_SCRIPT_EXTS:
-            results.append(ClassifiedEvidence(path=item, artifact_type="script"))
+        if in_triage:
+            self._process_triage_file(item, results)
             return
 
         classified = self._classify_file(item)
-        if classified and in_triage and classified.artifact_type in _TRIAGE_COVERED_TYPES:
-            return
         if classified:
             results.append(classified)
         else:
             logger.debug("Skipping unrecognised file: %s", item)
+
+    def _process_triage_file(self, item: Path, results: list[ClassifiedEvidence]) -> None:
+        """Classify a file inside a triage root, keeping only what the planner should see.
+
+        The collection's own parsers cover logs and event logs. Scripts,
+        databases and archives count only where users write (see
+        :func:`mulder.triage.in_writable_location`): a copy of ``C:`` holds
+        thousands of each under ``Windows`` and ``Program Files``, which
+        drown the catalog and are not evidence. Small ``.dmp`` files are
+        crash minidumps, not memory images Volatility can read.
+        """
+        root = next(r for r in self._triage_roots if item.is_relative_to(r))
+        rel = item.relative_to(root).as_posix()
+        ext = item.suffix.lower()
+        if ext in TRIAGE_ONLY_SCRIPT_EXTS:
+            classified: ClassifiedEvidence | None = ClassifiedEvidence(item, "script")
+        else:
+            classified = self._classify_file(item)
+        if classified is None or classified.artifact_type in _TRIAGE_COVERED_TYPES:
+            return
+        atype = classified.artifact_type
+        if atype in _TRIAGE_LOCATION_FILTERED_TYPES and not in_writable_location(rel):
+            return
+        if atype == "memory_dump":
+            try:
+                if item.stat().st_size < _TRIAGE_MIN_MEMORY_DUMP:
+                    return
+            except OSError:
+                return
+        results.append(classified)
 
     def _classify_file(self, path: Path) -> ClassifiedEvidence | None:
         """Infer artifact type from *path* name and extension, or return None if skipped."""
