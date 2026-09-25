@@ -368,7 +368,7 @@ class SessionExecutor:
             model_config: Model identifiers for utility model resolution.
             cwd: Working directory for agent sessions.
             env: Environment variables passed to agent subprocesses.
-            effort: Effort level for agent sessions (max, xhigh, high, low).
+            effort: Effort level for agent sessions (max, xhigh, high, medium, low).
             using_proxy: Whether a LiteLLM proxy is active (disables
                 per-message token tracking to avoid double counting).
             no_thinking: Disable extended thinking for phase and utility queries.

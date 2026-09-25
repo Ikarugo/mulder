@@ -256,9 +256,13 @@ def report(case_id: str, db_dir: str) -> None:
 @click.option(
     "--effort",
     default="max",
-    type=click.Choice(["max", "xhigh", "high"]),
+    type=click.Choice(["max", "xhigh", "high", "medium", "low"]),
     show_default=True,
-    help="Effort level.",
+    help=(
+        "Effort level of the agent sessions (the API's effort parameter): how many "
+        "tokens the models may spend on reasoning and tool calls. max and xhigh cost "
+        "the most; medium and low are cheaper and less thorough."
+    ),
 )
 @click.option(
     "--no-thinking",
