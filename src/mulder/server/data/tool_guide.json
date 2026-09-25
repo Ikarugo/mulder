@@ -399,6 +399,12 @@
       "related": ["run_usn_parser", "read_evidence_file"]
     },
     {
+      "tool": "parse_scheduled_tasks",
+      "description": "Parse every scheduled task from its XML (System32\\Tasks) and the SOFTWARE TaskCache: command line, triggers, account, UTC registration and last-run times; flags hidden tasks, deleted XML and tampered actions",
+      "input": "Disk image or triage collection path",
+      "related": ["run_registry_parser", "find_persistence_mechanisms"]
+    },
+    {
       "tool": "parse_windows_search",
       "description": "Parse the Windows Search index (Windows.edb / Windows.db): indexed files, e-mail headers, contacts, content summaries",
       "input": "Disk image or triage collection path",
