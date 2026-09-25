@@ -455,3 +455,26 @@ class TestReportHashes:
             assert f"{49:064x}" in text
             assert f"{50:064x}" not in text
             assert "The 70 other hashes" in text
+
+
+@pytest.mark.parametrize(
+    "role_name",
+    [
+        "EXTRACT_EXECUTOR",
+        "EXTRACT_ANALYST",
+        "CROSS_EXECUTOR",
+        "CROSS_ANALYST",
+        "NARRATIVE_EXECUTOR",
+        "NARRATIVE_ANALYST",
+    ],
+)
+def test_decode_payload_is_available_to_every_executor_and_analyst(role_name: str) -> None:
+    """The extraction analyst was told to use decode_payload but could not call it.
+
+    On a real run it then wrote that the Deflate-compressed Teams.ps1 "cannot
+    be inflated by hand" and left the C2 address unresolved.
+    """
+    import mulder.server.tools  # noqa: F401  (registers the tools)
+    from mulder.server.tool_access import Role, get_tools_for_role
+
+    assert any("decode_payload" in t for t in get_tools_for_role(Role[role_name]))
