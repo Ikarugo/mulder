@@ -294,6 +294,19 @@ class TestCryptnetUrlCache:
         }
         assert parse_cryptnet_metadata(b"short") is None
 
+    def test_url_is_read_to_its_terminator_not_by_the_size_field(self) -> None:
+        """A real certutil entry said 100 bytes in its size field for a longer URL."""
+        from mulder.server.tools.extract.cryptnet import parse_cryptnet_metadata
+
+        url = "https://files.example.net/share/3f9c2a7e1b4d/tool.zip"
+        etag = '"5d2c7e0a9b1f43c8a6e2d4f07b9c3a18-9"'
+        data = bytearray(_metadata(url, 48_213_907, etag))
+        struct.pack_into("<I", data, 0x0C, 100)
+        meta = parse_cryptnet_metadata(bytes(data))
+        assert meta is not None
+        assert meta["url"] == url
+        assert meta["etag"] == etag.strip('"')
+
     @pytest.mark.parametrize(
         ("url", "routine"),
         [
