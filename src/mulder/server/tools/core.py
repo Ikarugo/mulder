@@ -35,7 +35,7 @@ from mulder.server.helpers import (
     window_has_pid,
     windowed_response,
 )
-from mulder.server.tool_access import PLANNERS, Role, tool_access
+from mulder.server.tool_access import ANALYSTS, EXECUTORS, PLANNERS, Role, tool_access
 
 logger = logging.getLogger(__name__)
 
@@ -1080,7 +1080,7 @@ _B64_EXTRACT_RE = re.compile(r"[A-Za-z0-9+/=]{20,}")
 
 
 @mcp.tool()
-@tool_access(Role.CROSS_EXECUTOR)
+@tool_access(EXECUTORS | ANALYSTS)
 def decode_payload(
     data: str = "",
     encoding: str = "auto",

@@ -1204,7 +1204,7 @@ Safely decode an encoded payload found in evidence. Base64 wrapping zlib, raw DE
 
 **Returns:** `results{}` (detected_encoding, layers[], decoded, decoded_length)
 
-**Roles:** `CROSS_EXECUTOR`
+**Roles:** all executors and analysts (read-only, nothing is executed)
 
 ### get_carved_iocs
 
