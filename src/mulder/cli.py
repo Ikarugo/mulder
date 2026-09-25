@@ -849,8 +849,23 @@ def prepare_triage_cmd(
       mulder prepare-triage /cases/kape_out /triage --hostname WS01
       mulder investigate /triage my-case
     """
+    import time
+
     from mulder.triage.prepare import TriagePrepareError, prepare_triage
 
+    last_report = [0.0]
+
+    def _progress(done: int, total: int) -> None:
+        now = time.monotonic()
+        if done != total and now - last_report[0] < 1.0:
+            return
+        last_report[0] = now
+        pct = done * 100 // total if total else 100
+        click.echo(f"\r  copying and hashing: {done}/{total} files ({pct}%)", nl=False, err=True)
+        if done == total:
+            click.echo("", err=True)
+
+    click.echo(f"Reading {source} (listing files can take a while)...", err=True)
     try:
         result = prepare_triage(
             source,
@@ -860,6 +875,7 @@ def prepare_triage_cmd(
             drive=drive,
             include_vss=include_vss,
             force=force,
+            progress=_progress,
         )
     except TriagePrepareError as exc:
         raise click.ClickException(str(exc)) from exc

@@ -19,7 +19,7 @@ from mulder.extractors.classifier import SCRIPT_EXTS, TRIAGE_ONLY_SCRIPT_EXTS
 from mulder.extractors.optical import probe_optical
 from mulder.orchestrator.types import PhaseResult, extract_catalog_result
 from mulder.patterns import DISK_IMAGE_EXTS, extract_iocs_from_text, resolve_db_dir
-from mulder.triage import find_triage_roots
+from mulder.triage import find_triage_roots, in_writable_location
 from mulder.triage.prepare import artifact_coverage, missing_artifacts
 
 logger = logging.getLogger(__name__)
@@ -151,7 +151,10 @@ class EvidenceContext:
                 if sys_lower not in rel:
                     continue
                 ext = f.suffix.lower()
-                in_triage = any(f.is_relative_to(r) for r in triage_roots)
+                owner = next((r for r in triage_roots if f.is_relative_to(r)), None)
+                in_triage = owner is not None
+                if owner is not None and not in_writable_location(f.relative_to(owner).as_posix()):
+                    continue
                 if (
                     ext in SCRIPT_EXTS
                     or (in_triage and ext in TRIAGE_ONLY_SCRIPT_EXTS)

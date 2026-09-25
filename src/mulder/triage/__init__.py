@@ -35,6 +35,7 @@ __all__ = [
     "detect_raw_collection",
     "find_triage_roots",
     "find_unprepared_collections",
+    "in_writable_location",
     "is_triage_root",
     "iter_tree_files",
 ]
@@ -96,6 +97,62 @@ def is_triage_root(path: str | os.PathLike[str]) -> bool:
         return True
     mft = child_ci(p, "$MFT")
     return mft is not None and mft.is_file()
+
+
+#: Top-level folders of a Windows volume where users and attackers write:
+#: tooling dropped there is worth reading, unlike the thousands of scripts
+#: and databases that ship with Windows and installed programs.
+_WRITABLE_PREFIXES: tuple[str, ...] = (
+    "users/",
+    "documents and settings/",
+    "programdata/",
+    "windows/temp/",
+    "windows/tasks/",
+    "$recycle.bin/",
+    "recycler/",
+    "perflogs/",
+    "temp/",
+    "tmp/",
+    "inetpub/",
+    "intel/",
+    "public/",
+)
+
+#: Program and package trees inside those folders: installed software, not
+#: something a person wrote or dropped.
+_PROGRAM_TREE_MARKERS: tuple[str, ...] = (
+    "/node_modules/",
+    "/site-packages/",
+    "/.git/",
+    "/appdata/local/programs/",
+    "/appdata/local/packages/",
+    "/appdata/local/microsoft/",
+    "/appdata/roaming/code/",
+    "/.vscode/",
+    "/appdata/local/google/",
+    "/appdata/local/bravesoftware/",
+    "programdata/microsoft/",
+    "programdata/package cache/",
+    "programdata/chocolatey/lib/",
+)
+
+
+def in_writable_location(rel_path: str) -> bool:
+    """True if *rel_path* (relative to a triage root) lies where users drop files.
+
+    Files at the volume root count (``C:\\x.ps1``); ``Windows/``,
+    ``Program Files*/`` and program trees such as ``node_modules`` or
+    ``AppData/Local/Programs`` do not.
+    """
+    rel = rel_path.replace("\\", "/").lower().lstrip("/")
+    if "/" not in rel:
+        return True
+    if not rel.startswith(_WRITABLE_PREFIXES):
+        return False
+    probe = "/" + rel
+    if "/appdata/" in probe and "/extensions/" in probe:
+        return False  # browser and editor extensions: thousands of bundled .js files
+    return not any(marker in probe for marker in _PROGRAM_TREE_MARKERS)
 
 
 def iter_tree_files(root: str | os.PathLike[str]) -> Iterator[tuple[str, Path]]:

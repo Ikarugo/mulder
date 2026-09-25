@@ -1207,6 +1207,33 @@ class CaseDB:
 
         self._wq.submit(_do_register)
 
+    def register_evidence_files(self, records: list[tuple[str, str, int]]) -> None:
+        """Record many ``(file_path, sha256, size_bytes)`` rows in one transaction.
+
+        A triage collection holds thousands of files; one transaction per
+        file makes registration dominate the scan on slow storage.
+        """
+        if not records:
+            return
+
+        def _do_register_many() -> None:
+            now = datetime.now(timezone.utc).isoformat()
+            with self._engine.begin() as conn:
+                conn.execute(
+                    insert(evidence_registry_t),
+                    [
+                        {
+                            "file_path": path,
+                            "sha256": sha256,
+                            "size_bytes": size,
+                            "registered_at": now,
+                        }
+                        for path, sha256, size in records
+                    ],
+                )
+
+        self._wq.submit(_do_register_many)
+
     def get_evidence_registry(self) -> list[dict[str, object]]:
         """Return all registered evidence files."""
         stmt = select(evidence_registry_t).order_by(evidence_registry_t.c.id)

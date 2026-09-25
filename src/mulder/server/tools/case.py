@@ -147,8 +147,36 @@ def scan_evidence(
     return result
 
 
+_REGISTER_BATCH = 500
+
+
+def _manifest_hashes(root: Path) -> dict[str, tuple[str, int]]:
+    """``{file path: (sha256, size)}`` from the TRIAGE_MANIFEST.json of a triage root.
+
+    ``prepare-triage`` hashes every file while copying it; reusing those
+    hashes spares reading the whole collection a second time.
+    """
+    manifest_file = root.parent / MANIFEST_NAME
+    try:
+        data = json.loads(manifest_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    hashes: dict[str, tuple[str, int]] = {}
+    for rec in data.get("files", []) if isinstance(data, dict) else []:
+        try:
+            hashes[str(root.parent / str(rec["path"]))] = (str(rec["sha256"]), int(rec["size"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+    return hashes
+
+
 def _hash_and_register_evidence(manifest: list[dict[str, object]]) -> list[str]:
     """Hash each evidence file and register it for chain of custody.
+
+    Files of a triage root prepared by ``mulder prepare-triage`` reuse the
+    SHA-256 recorded in its TRIAGE_MANIFEST.json when the size still
+    matches; everything else is read and hashed. Rows are written in
+    batches.
 
     Returns:
         List of file paths that failed to hash.
@@ -160,26 +188,40 @@ def _hash_and_register_evidence(manifest: list[dict[str, object]]) -> list[str]:
     if not has_ctx():
         return []
     ctx = get_ctx()
+
+    known: dict[str, tuple[str, int]] = {}
+    for item in manifest:
+        fp = Path(str(item.get("path", "")))
+        if item.get("artifact_type") == TRIAGE_ARTIFACT_TYPE and fp.is_dir():
+            known.update(_manifest_hashes(fp))
+
     failed_files: list[str] = []
+    batch: list[tuple[str, str, int]] = []
+    reused = 0
     for fp in _evidence_files(manifest):
         try:
-            h = _hashlib.sha256()
-            size = 0
-            with open(fp, "rb") as f:
-                while True:
-                    chunk = f.read(65536)
-                    if not chunk:
-                        break
-                    h.update(chunk)
-                    size += len(chunk)
-            ctx.db.register_evidence_file(
-                file_path=str(fp),
-                sha256=h.hexdigest(),
-                size_bytes=size,
-            )
+            recorded = known.get(str(fp))
+            if recorded is not None and fp.stat().st_size == recorded[1]:
+                batch.append((str(fp), recorded[0], recorded[1]))
+                reused += 1
+            else:
+                h = _hashlib.sha256()
+                size = 0
+                with open(fp, "rb") as f:
+                    while chunk := f.read(1024 * 1024):
+                        h.update(chunk)
+                        size += len(chunk)
+                batch.append((str(fp), h.hexdigest(), size))
         except Exception as exc:
             logger.warning("Failed to hash evidence file %s: %s", fp, exc)
             failed_files.append(str(fp))
+            continue
+        if len(batch) >= _REGISTER_BATCH:
+            ctx.db.register_evidence_files(batch)
+            batch = []
+    ctx.db.register_evidence_files(batch)
+    if reused:
+        logger.info("Reused %d SHA-256 hashes from %s files", reused, MANIFEST_NAME)
     return failed_files
 
 
@@ -247,6 +289,45 @@ def _manifest_entry(item: ClassifiedEvidence) -> dict[str, object]:
     return entry
 
 
+#: Evidence-tree lines shown per artifact type, and in total. The response
+#: has to stay small enough for the cataloging agent to read in one piece:
+#: past that, the agent host stores it in a file the agent cannot open and
+#: the agent falls back to walking directories one call at a time.
+_TREE_PER_TYPE = 25
+_TREE_MAX_LINES = 300
+
+
+def _render_evidence_tree(ev_path: Path, manifest: list[dict[str, object]]) -> list[str]:
+    """Indented evidence listing, capped per type, with counts for what is left out."""
+    lines: list[str] = [str(ev_path) + "/"]
+    shown: dict[str, int] = {}
+    omitted: dict[str, int] = {}
+    for mi in manifest:
+        atype = str(mi["artifact_type"])
+        if shown.get(atype, 0) >= _TREE_PER_TYPE or len(lines) > _TREE_MAX_LINES:
+            omitted[atype] = omitted.get(atype, 0) + 1
+            continue
+        shown[atype] = shown.get(atype, 0) + 1
+        try:
+            rel = str(Path(str(mi["path"])).relative_to(ev_path))
+        except ValueError:
+            rel = str(mi["path"])
+        depth = rel.count("/") + rel.count("\\")
+        label = atype
+        if "media" in mi:
+            label = f"{label}, {mi['media']}"
+        if mi.get("hostname"):
+            label = f"{label}, host {mi['hostname']}"
+        size_label = mi.get("size_human", "")
+        lines.append(f"{'  ' * depth}{Path(rel).name}  [{label}] {size_label}".rstrip())
+    for atype, count in sorted(omitted.items()):
+        lines.append(
+            f"... {count} more [{atype}] item(s) not listed; "
+            "browse with list_directory if they matter"
+        )
+    return lines
+
+
 def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str, object]:
     """Inner implementation of scan_evidence with full error propagation."""
     from mulder.extractors.classifier import ClassifierConfig, EvidenceClassifier
@@ -263,22 +344,16 @@ def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str
         t = str(mi["artifact_type"])
         type_counts[t] = type_counts.get(t, 0) + 1
 
-    tree_lines: list[str] = [str(ev_path) + "/"]
-    for mi in manifest:
-        try:
-            rel = str(Path(str(mi["path"])).relative_to(ev_path))
-        except ValueError:
-            rel = str(mi["path"])
-        depth = rel.count("/") + rel.count("\\")
-        indent = "  " * depth
-        name = Path(rel).name
-        size_label = mi.get("size_human", "")
-        atype = mi["artifact_type"]
-        if "media" in mi:
-            atype = f"{atype}, {mi['media']}"
-        if mi.get("hostname"):
-            atype = f"{atype}, host {mi['hostname']}"
-        tree_lines.append(f"{indent}{name}  [{atype}] {size_label}")
+    tree_lines = _render_evidence_tree(ev_path, manifest)
+    triage_details = [
+        {
+            k: mi[k]
+            for k in ("path", "hostname", "collector", "missing_artifacts", "note")
+            if k in mi
+        }
+        for mi in manifest
+        if mi["artifact_type"] == TRIAGE_ARTIFACT_TYPE
+    ]
 
     result = create_case(case_id, str(ev_path), replace=replace)
 
@@ -286,6 +361,8 @@ def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str
         result["evidence_tree"] = "\n".join(tree_lines)
         result["type_summary"] = type_counts
         result["total_items"] = len(manifest)
+        if triage_details:
+            result["triage_collections"] = triage_details
         return result
 
     if isinstance(result, dict) and result.get("status") == "error":
@@ -333,6 +410,8 @@ def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str
         "total_items": len(manifest),
         "message": message,
     }
+    if triage_details:
+        response["triage_collections"] = triage_details
     if failed_files:
         response["failed_files"] = failed_files
     return response
