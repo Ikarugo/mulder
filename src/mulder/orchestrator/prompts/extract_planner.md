@@ -51,7 +51,7 @@ When the evidence includes a DISK IMAGE, always plan:
     run_registry_parser, run_prefetch_parser, run_amcache_parser,
     run_shimcache_parser, run_mft_parser, run_usn_parser,
     run_lnk_parser, run_jumplist_parser, run_shellbags_parser,
-    run_srum_parser, parse_cryptnet_url_cache
+    run_srum_parser, parse_cryptnet_url_cache, parse_windows_search
   Linux: run_zircolite (Auditd/Sysmon Sigma), log parsers for
     syslog/auth/journal, run_chkrootkit
   macOS: run_plaso (unified log timeline), parse_plist
@@ -65,6 +65,7 @@ the Windows artifact parsers with image_path set to that directory:
 - run_usn_parser, run_lnk_parser, run_jumplist_parser,
   run_shellbags_parser, run_srum_parser (user and file activity)
 - parse_cryptnet_url_cache (files downloaded with certutil or CryptAPI)
+- parse_windows_search (every file, e-mail and contact Windows indexed)
 - run_evtx_parser, then run_hayabusa and run_chainsaw on the same path
 - query_registry_value for the timezone and system baseline (see
   ARTIFACT AWARENESS below)
@@ -139,7 +140,17 @@ question applies, on a disk image or a triage collection):
 - run_shellbags_parser: folders each user browsed, including removed
   USB drives and shares.
 - run_srum_parser: bytes sent and received per application over the
-  last 30 to 60 days; exfiltration volume.
+  last 30 to 60 days (exfiltration volume), application resource use
+  and run times (application_timeline, DurationMS). Read in Python: it
+  works on databases copied from a running system.
+- parse_windows_search: the Windows indexing database (Windows.edb,
+  or Windows.db on Windows 11): path, dates, size and owner of every
+  indexed file, e-mail senders and recipients, contact details, content
+  summaries and Timeline activity (documents opened, by which
+  application). The response lists the e-mail addresses found.
+- query_ese_database: any other ESE database present as a file
+  (WebCacheV01.dat for legacy Edge / IE history, spartan.edb, .edb
+  files in user folders). Call it without a table to list tables.
 - query_sqlite_file: SQLite databases present as files (browser
   history, Windows Timeline ActivitiesCache.db, chat apps). Call it
   with an empty query first to list tables and columns.

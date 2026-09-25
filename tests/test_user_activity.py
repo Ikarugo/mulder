@@ -262,36 +262,6 @@ class TestShellbags:
 
 
 class TestSrum:
-    def test_srudb_with_software_hive(self, root: Path, ez: _Recorder) -> None:
-        _call(ua.run_srum_parser, root)
-        (call,) = ez.calls
-        assert call["dll"] == "SrumECmd.dll"
-        assert call["args"][0] == "-f" and call["args"][2] == "-r"
-        assert call["files"] == {
-            call["args"][1]: b"ese-srum",
-            call["args"][3]: b"regf-software",
-        }
-
-    def test_dirty_database_hint(self, root: Path) -> None:
-        rec = _Recorder({"status": "error", "error_message": "SrumECmd.dll produced no CSV"})
-        with (
-            patch.object(ua, "_run_ez_tool", rec),
-            patch.object(ua, "sources_already_indexed", return_value=[]),
-            patch("mulder.server.tools.extract.tsk.get_ctx"),
-        ):
-            result = _call(ua.run_srum_parser, root)
-        assert "esentutl" in result["suggestion"]
-
-    def test_missing_binary_keeps_its_own_message(self, root: Path) -> None:
-        rec = _Recorder({"status": "error", "error_type": "binary_missing"})
-        with (
-            patch.object(ua, "_run_ez_tool", rec),
-            patch.object(ua, "sources_already_indexed", return_value=[]),
-            patch("mulder.server.tools.extract.tsk.get_ctx"),
-        ):
-            result = _call(ua.run_srum_parser, root)
-        assert "suggestion" not in result
-
     def test_missing_database(self, root: Path, ez: _Recorder) -> None:
         (root / "Windows" / "System32" / "sru" / "SRUDB.dat").unlink()
         assert _call(ua.run_srum_parser, root)["error_type"] == "artifact_missing"

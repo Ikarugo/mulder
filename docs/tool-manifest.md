@@ -611,14 +611,14 @@ Parse Shellbags from every user's NTUSER.DAT and UsrClass.dat with SBECmd. From 
 
 ### run_srum_parser
 
-Parse `Windows/System32/sru/SRUDB.dat` with SrumECmd, with the SOFTWARE hive for interface names. A database collected from a running system is often dirty; the error then carries repair guidance.
+Parse `Windows/System32/sru/SRUDB.dat` in Python (dissect.esedb): every provider table (network data, applications, application timeline with `DurationMS`, connectivity, energy), application paths and user SIDs resolved. Works on Linux and on databases copied from a running system; a dirty database is read from its pages and flagged, since changes only in its transaction logs are missing. SrumECmd needs Windows' ESE engine and is no longer used.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | image_path | str | yes | Disk image, or triage collection directory |
 | force | bool | no | Re-run extraction even if sources already exist |
 
-**Returns:** `source_name` (ez.srum), `windows_indexed`
+**Returns:** `source_name` (ez.srum, one line per record starting `srum=<table>`), `windows_indexed`, `records_per_table`, `database_state`
 
 **Roles:** `EXTRACT_EXECUTOR`
 
@@ -632,6 +632,35 @@ Parse every profile's `AppData\LocalLow\Microsoft\CryptnetUrlCache`: the URL, do
 | force | bool | no | Re-run extraction even if sources already exist |
 
 **Returns:** `entries`, `non_pki_downloads[]` (up to 25, in full), `indexed_as` (cryptnet.urlcache)
+
+**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
+
+### parse_windows_search
+
+Parse the Windows Search index: `ProgramData\Microsoft\Search\Data\Applications\Windows\Windows.edb` (ESE) or `Windows.db` (SQLite, Windows 11). Each indexed item becomes one line of `windows.search`: path, dates, size, type, owner, title, author, e-mail sender and recipients, contact details, content summary, Timeline activity, and every other property except known noise. Deleted files: Windows 10 marks their records deleted (not read); on Windows 11, records still in the main database behind the `-wal` are recovered and flagged.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run extraction even if the source already exists |
+| max_items | int | no | Maximum items indexed over all databases (default 200,000; a cut or the 15-minute time budget is reported) |
+
+**Returns:** `items_indexed`, `databases[]` (items, state, notes), `email_addresses[]` (up to 100), `indexed_as` (windows.search)
+
+**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
+
+### query_ese_database
+
+Read an ESE (JET Blue) database file: with no table, list every table with its columns and record count; with a table, read `limit` records from `offset` and index them as `ese.<file>.<table>`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| file_path | str | yes | Absolute path of the database in the evidence |
+| table | str | no | Table to read; empty to list tables |
+| offset | int | no | Records to skip (default 0) |
+| limit | int | no | Records to read, 1 to 1000 (default 200) |
+
+**Returns:** listing mode: `tables[]` (table, records, columns), `state`; read mode: `records_returned`, `next_offset` when more records follow, `state`
 
 **Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
 
@@ -1657,7 +1686,7 @@ Return Shellbags data parsed by SBECmd (EZ Tools).
 
 ### parse_srum
 
-Return SRUM data parsed by SrumECmd (EZ Tools).
+Return SRUM data parsed by run_srum_parser.
 
 *No parameters.* **Roles:** `EXTRACT_ANALYST` `CROSS_EXECUTOR`
 

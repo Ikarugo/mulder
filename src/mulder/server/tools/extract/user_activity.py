@@ -10,7 +10,7 @@ Extractor                     EZ tool         Source
 ``run_lnk_parser``            LECmd           ``ez.lnkfiles``
 ``run_jumplist_parser``       JLECmd          ``ez.jumplists``
 ``run_shellbags_parser``      SBECmd          ``ez.shellbags``
-``run_srum_parser``           SrumECmd        ``ez.srum``
+``run_srum_parser``           dissect.esedb   ``ez.srum``
 ============================  ==============  ================================
 
 Each takes an ``image_path`` that is either a disk image or a triage root
@@ -29,6 +29,7 @@ from pathlib import Path
 
 from mulder.patterns import fls_file_entries
 from mulder.server.app import mcp
+from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
     TOOL_TIMEOUT,
     adaptive_timeout,
@@ -75,13 +76,6 @@ _PROFILE_RE = re.compile(r"(?:^|/)(?:users|documents and settings)/([^/]+)/")
 _USN_NAMES = frozenset({"$usnjrnl:$j", "$j", "$usnjrnl%3a$j"})
 
 _ICAT_TIMEOUT = TOOL_TIMEOUT * 4
-
-_SRUM_DIRTY_HINT = (
-    "SRUDB.dat is an ESE database and is usually 'dirty' when collected from a "
-    "running system; SrumECmd cannot replay its logs on Linux. On Windows, repair a "
-    "copy (esentutl /r sru /i in the sru folder, then esentutl /p SRUDB.dat) and "
-    "collect again, or rely on the network and application data in other sources."
-)
 
 
 def _skipped(tc_id: str, tool: str, params: dict[str, object], source: str) -> dict[str, object]:
@@ -462,25 +456,31 @@ def run_shellbags_parser(image_path: str, force: bool = False) -> dict[str, obje
 
 
 def _is_srum_input(rel_lower: str) -> bool:
-    return rel_lower.endswith(("system32/sru/srudb.dat", "system32/config/software"))
+    return rel_lower.endswith("system32/sru/srudb.dat")
 
 
 @mcp.tool()
 @tool_access(Role.EXTRACT_EXECUTOR)
 def run_srum_parser(image_path: str, force: bool = False) -> dict[str, object]:
-    """Parse the System Resource Usage Monitor database (SRUDB.dat) with SrumECmd.
+    """Parse the System Resource Usage Monitor database (SRUDB.dat).
 
     Call on Windows disk images and triage collections to get about 30 to
-    60 days of per-application network bytes sent and received, per-user
-    application runtime, and network connections, the main evidence of
-    exfiltration volume on a host. Uses the SOFTWARE hive to name network
-    interfaces. Indexes as ``ez.srum``; query with ``parse_srum()`` or
-    ``search(source='ez.srum')``.
+    60 days of per-application network bytes sent and received,
+    application resource use and run times (``application_timeline``,
+    with ``DurationMS``), and network connections: the main evidence of
+    exfiltration volume on a host. The database is read in Python
+    (dissect.esedb), which works on Linux and on databases copied from a
+    running system; SrumECmd cannot run here (it needs Windows' ESE
+    engine). Every record is one line of ``ez.srum`` starting with
+    ``srum=<table>``, with application paths and user SIDs resolved; query
+    with ``search(query, source='ez.srum')``.
 
     Args:
         image_path: Disk image, or triage collection directory.
         force: Re-run extraction even if sources already exist.
     """
+    from mulder.server.tools.extract.ese import SRUM_TABLE_NOTES, read_srum
+
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
     params: dict[str, object] = {"image_path": image_path, "force": force}
@@ -488,37 +488,84 @@ def run_srum_parser(image_path: str, force: bool = False) -> dict[str, object]:
         return skipped
 
     failures: list[IcatFailure] = []
-    extracted = _tsk_extract_files(
-        image_path, ["srudb.dat", "config/software"], _is_srum_input, failures
-    )
-    missing = "SRUDB.dat not found (Windows 8+ keeps it in Windows/System32/sru)"
+    extracted = _tsk_extract_files(image_path, ["srudb.dat"], _is_srum_input, failures)
     if not extracted:
-        return nothing_extracted_response(tc_id, "run_srum_parser", params, t0, missing, failures)
+        return nothing_extracted_response(
+            tc_id,
+            "run_srum_parser",
+            params,
+            t0,
+            "SRUDB.dat not found (Windows 8+ keeps it in Windows/System32/sru)",
+            failures,
+        )
     extract_dir = str(extracted[0][1].parent)
+    # The live database first (shortest path: Windows/System32/sru), then any
+    # other copy (Windows.old, a second volume) if the live one is unreadable.
+    candidates = sorted(extracted, key=lambda item: (len(item[0]), item[0]))
+    read = None
+    used = ""
+    problems: list[str] = []
     try:
-        by_rel = {rel.lower().replace("\\", "/"): path for rel, path in extracted}
-        srudb = next((p for r, p in by_rel.items() if r.endswith("srudb.dat")), None)
-        software = by_rel.get("windows/system32/config/software") or next(
-            (p for r, p in by_rel.items() if r.endswith("config/software")), None
-        )
-        if srudb is None:
-            return nothing_extracted_response(
-                tc_id,
-                "run_srum_parser",
-                params,
-                t0,
-                missing,
-                [f for f in failures if f.path.lower().endswith("srudb.dat")],
-            )
-        args = ["-f", str(srudb)]
-        if software is not None:
-            args.extend(["-r", str(software)])
-        result = _run_ez_tool(
-            "SrumECmd.dll", args, SRC_SRUM, image_path, tc_id, "run_srum_parser", params, t0
-        )
+        for rel, path in candidates:
+            try:
+                attempt = read_srum(path)
+            except Exception as exc:  # noqa: BLE001 - dissect raises several error types
+                problems.append(
+                    f"{rel}: not readable as an ESE database: {type(exc).__name__}: {exc}"
+                )
+                continue
+            if attempt.lines:
+                read, used = attempt, rel
+                break
+            detail = "; ".join(f"{e['table']}: {e['error']}" for e in attempt.errors)
+            problems.append(f"{rel}: no readable SRUM record" + (f" ({detail})" if detail else ""))
     finally:
         _cleanup_tsk_extract_dir(extract_dir)
 
-    if result.get("status") == "error" and result.get("error_type") != "binary_missing":
-        result["suggestion"] = _SRUM_DIRTY_HINT
+    if read is None:
+        return error_response(
+            tc_id,
+            "run_srum_parser",
+            params,
+            "SRUDB.dat could not be read: " + "; ".join(problems),
+            (time.monotonic() - t0) * 1000,
+            error_type="tool_failed",
+            suggestion=(
+                "Check the file with query_ese_database(file_path) (it lists what can be "
+                "read), and record the gap if the database is damaged."
+            ),
+        )
+    summary = extract_and_index("\n".join(read.lines), SRC_SRUM, image_path, "dissect.esedb")
+    summary["records_per_table"] = read.counts
+    summary["database_state"] = read.state
+    summary["database"] = used
+    summary["tables"] = {
+        name: SRUM_TABLE_NOTES[name] for name in read.counts if name in SRUM_TABLE_NOTES
+    }
+    others = [rel for rel, _ in candidates if rel != used]
+    if others:
+        summary["other_copies_not_read"] = others
+    summary["hint"] = (
+        "Per-application traffic is in network_data (BytesSent/BytesRecvd); sdp_* tables "
+        "are system-wide counters, not traffic of one application. Network interfaces "
+        "(InterfaceLuid, L2ProfileId) are not resolved to names."
+    )
+    warnings: list[str] = [f"{used}: {p}" for p in read.notes]
+    warnings += problems
+    if note := read.state_note():
+        warnings.append(note)
+    if read.errors:
+        summary["table_errors"] = read.errors
+        warnings.append(
+            "Some SRUM tables could not be read to the end: "
+            + "; ".join(
+                f"{e['table']} ({e['records_read']} records read): {e['error']}"
+                for e in read.errors
+            )
+        )
+    if warnings:
+        summary["tool_warning"] = "\n".join(warnings)
+    result = tool_response(
+        tc_id, "run_srum_parser", params, summary, SRC_SRUM, (time.monotonic() - t0) * 1000
+    )
     return add_extraction_failures(result, failures)

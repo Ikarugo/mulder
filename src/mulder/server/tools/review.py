@@ -57,6 +57,7 @@ _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
         "run_shellbags_parser",
         "run_srum_parser",
         "parse_cryptnet_url_cache",
+        "parse_windows_search",
         "run_evtx_parser",
         "run_hayabusa",
         "yara_scan_files",
@@ -80,6 +81,15 @@ _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
     ],
     "sqlite_database": [
         "query_sqlite_file",
+    ],
+    "ese_database": [
+        "query_ese_database",
+    ],
+    "srum_database": [
+        "run_srum_parser",
+    ],
+    "windows_search_index": [
+        "parse_windows_search",
     ],
     "phone_dump": [
         "run_fls",
