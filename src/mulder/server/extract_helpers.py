@@ -22,6 +22,7 @@ from pathlib import Path
 
 from mulder.extractors.disk import _mount_image, _unmount_image
 from mulder.models import WindowRow
+from mulder.triage import is_triage_root
 
 logger = logging.getLogger(__name__)
 
@@ -347,7 +348,14 @@ def mount_disk_image(image_path: str) -> Iterator[str]:
     share a single mount.  The image is unmounted and the temp directory
     cleaned up when the last caller exits.
 
+    A triage root (a collected copy of a volume, see :mod:`mulder.triage`)
+    is already a mounted filesystem: it is yielded as-is, without FUSE,
+    so every tool with a mount fallback reads the collected files directly.
+
     Raises ``RuntimeError`` if the image cannot be mounted.
     """
+    if is_triage_root(image_path):
+        yield str(Path(image_path))
+        return
     with _mount_cache.acquire(image_path) as mount_point:
         yield mount_point

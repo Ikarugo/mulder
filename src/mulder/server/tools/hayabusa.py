@@ -31,6 +31,7 @@ from mulder.server.helpers import (
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
+from mulder.triage import is_triage_root
 
 logger = logging.getLogger(__name__)
 
@@ -113,7 +114,7 @@ def _resolve_evtx_dir(evtx_dir: str | None, image_path: str | None = None) -> st
     if (
         image_path
         and Path(image_path).exists()
-        and Path(image_path).suffix.lower() in DISK_IMAGE_EXTS
+        and (Path(image_path).suffix.lower() in DISK_IMAGE_EXTS or is_triage_root(image_path))
     ):
         return _extract_evtx_inline(image_path)
 

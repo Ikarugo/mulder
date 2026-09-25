@@ -8,6 +8,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mulder.patterns import DISK_IMAGE_EXTS
+from mulder.triage import (
+    RAW_COLLECTION_ARTIFACT_TYPE,
+    TRIAGE_ARTIFACT_TYPE,
+    detect_raw_collection,
+    is_triage_root,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -70,13 +76,44 @@ _SKIP_FILENAMES: set[str] = {
     ".gitattributes",
 }
 
+#: Windows script and command files: attacker tooling more often than not.
+#: ``.js`` used to be skipped as web-page noise; it is now catalogued so the
+#: planner can read droppers.
+SCRIPT_EXTS: frozenset[str] = frozenset(
+    {
+        ".ps1",
+        ".psm1",
+        ".psd1",
+        ".bat",
+        ".cmd",
+        ".vbs",
+        ".vbe",
+        ".js",
+        ".jse",
+        ".wsf",
+        ".wsh",
+        ".hta",
+        ".sct",
+    }
+)
+
+#: Interpreted-language sources. At the top of an evidence directory they
+#: are usually the investigator's own helpers and stay skipped; inside a
+#: triage collection they were collected from the host and are catalogued.
+TRIAGE_ONLY_SCRIPT_EXTS: frozenset[str] = frozenset({".py", ".sh", ".rb", ".pl"})
+
+#: Artifact types that a triage collection's own tools already cover
+#: (run_evtx_parser/run_hayabusa on the collection root). Reporting each
+#: of the hundreds of collected logs individually would only drown the
+#: catalog, so they are folded into the ``triage_collection`` entry.
+_TRIAGE_COVERED_TYPES: frozenset[str] = frozenset({"evtx", "log_file", "log_directory"})
+
 _SKIP_EXTENSIONS: set[str] = {
     ".md",
     ".rst",
     ".html",
     ".htm",
     ".css",
-    ".js",
     ".json",
     ".xml",
     ".yaml",
@@ -86,8 +123,6 @@ _SKIP_EXTENSIONS: set[str] = {
     ".ini",
     ".py",
     ".sh",
-    ".bat",
-    ".ps1",
     ".rb",
     ".pl",
     ".c",
@@ -161,6 +196,8 @@ class EvidenceClassifier:
     def __init__(self, config: ClassifierConfig | None = None) -> None:
         """Build a classifier; use *config* for glob excludes relative to the evidence root."""
         self._config = config or ClassifierConfig()
+        self._triage_roots: list[Path] = []
+        self._raw_collections: list[Path] = []
 
     def classify(self, evidence_root: Path) -> list[ClassifiedEvidence]:
         """Resolve *evidence_root* and return classified files and notable directories."""
@@ -169,12 +206,22 @@ class EvidenceClassifier:
             raise FileNotFoundError(f"Evidence path does not exist: {evidence_root}")
 
         if evidence_root.is_file():
+            if detect_raw_collection(evidence_root) == "velociraptor":
+                return [ClassifiedEvidence(evidence_root, RAW_COLLECTION_ARTIFACT_TYPE)]
             result = self._classify_file(evidence_root)
             return [result] if result else []
 
         results: list[ClassifiedEvidence] = []
         seen_log_dirs: set[Path] = set()
         excluded_dirs: set[Path] = set()
+        self._triage_roots = []
+        self._raw_collections = []
+
+        if is_triage_root(evidence_root):
+            results.append(ClassifiedEvidence(evidence_root, TRIAGE_ARTIFACT_TYPE))
+            self._triage_roots.append(evidence_root)
+        elif detect_raw_collection(evidence_root) == "velociraptor":
+            return [ClassifiedEvidence(evidence_root, RAW_COLLECTION_ARTIFACT_TYPE)]
 
         try:
             all_items = sorted(evidence_root.rglob("*"))
@@ -216,7 +263,24 @@ class EvidenceClassifier:
         seen_log_dirs: set[Path],
     ) -> None:
         """Classify *item* and append to *results*; track *seen_log_dirs* for subtree pruning."""
+        if any(item.is_relative_to(r) for r in self._raw_collections):
+            return
+        in_triage = any(item.is_relative_to(r) for r in self._triage_roots)
         if item.is_dir():
+            if not in_triage and is_triage_root(item):
+                results.append(ClassifiedEvidence(path=item, artifact_type=TRIAGE_ARTIFACT_TYPE))
+                self._triage_roots.append(item)
+                return
+            if not in_triage and detect_raw_collection(item) == "velociraptor":
+                # Percent-encoded uploads/ tree: nothing inside is usable
+                # until ``mulder prepare-triage`` has normalized it.
+                results.append(
+                    ClassifiedEvidence(path=item, artifact_type=RAW_COLLECTION_ARTIFACT_TYPE)
+                )
+                self._raw_collections.append(item)
+                return
+            if in_triage and self._is_log_directory(item):
+                return
             if self._is_ios_backup(item):
                 results.append(ClassifiedEvidence(path=item, artifact_type="ios_backup"))
                 return
@@ -228,7 +292,13 @@ class EvidenceClassifier:
         if any(item.is_relative_to(d) for d in seen_log_dirs):
             return
 
+        if in_triage and item.suffix.lower() in TRIAGE_ONLY_SCRIPT_EXTS:
+            results.append(ClassifiedEvidence(path=item, artifact_type="script"))
+            return
+
         classified = self._classify_file(item)
+        if classified and in_triage and classified.artifact_type in _TRIAGE_COVERED_TYPES:
+            return
         if classified:
             results.append(classified)
         else:
@@ -245,6 +315,15 @@ class EvidenceClassifier:
 
         if name in _SKIP_FILENAMES or ext in _SKIP_EXTENSIONS:
             return None
+
+        if ext in SCRIPT_EXTS:
+            return ClassifiedEvidence(path=path, artifact_type="script")
+
+        if name == "consolehost_history.txt":
+            return ClassifiedEvidence(path=path, artifact_type="powershell_history")
+
+        if ext == ".zip" and detect_raw_collection(path) == "velociraptor":
+            return ClassifiedEvidence(path=path, artifact_type=RAW_COLLECTION_ARTIFACT_TYPE)
 
         if ext in _MEMORY_DUMP_EXTS:
             return ClassifiedEvidence(path=path, artifact_type="memory_dump")

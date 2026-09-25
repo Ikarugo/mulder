@@ -45,6 +45,22 @@ _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
         "detect_steganography",
         "run_optical_listing",
     ],
+    "triage_collection": [
+        "run_registry_parser",
+        "run_prefetch_parser",
+        "run_amcache_parser",
+        "run_shimcache_parser",
+        "run_mft_parser",
+        "run_evtx_parser",
+        "run_hayabusa",
+        "yara_scan_files",
+    ],
+    "script": [
+        "read_evidence_file",
+    ],
+    "powershell_history": [
+        "read_evidence_file",
+    ],
     "network_capture": [
         "run_pcap_analysis",
     ],

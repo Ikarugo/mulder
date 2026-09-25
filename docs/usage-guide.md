@@ -22,6 +22,7 @@ Try-it-out instructions for running Mulder, the forensic investigation platform.
     - [Using Google Cloud Vertex AI](#using-google-cloud-vertex-ai)
     - [Using Amazon Bedrock](#using-amazon-bedrock)
   - [Starting an Investigation](#starting-an-investigation)
+  - [Triage Collections (Velociraptor, KAPE)](#triage-collections-velociraptor-kape)
   - [Using Non-Anthropic Models via LiteLLM](#using-non-anthropic-models-via-litellm)
     - [Provider Prefixes](#provider-prefixes)
     - [Mixing Providers Across Roles](#mixing-providers-across-roles)
@@ -343,6 +344,37 @@ The orchestrator runs five phases in sequence:
 
 Each phase passes through a quality gate before proceeding. The investigation runs unattended from start to finish.
 
+## Triage Collections (Velociraptor, KAPE)
+
+Remote incident response usually yields a triage collection rather than a full disk image: a collector copies the registry hives, event logs, Prefetch, `$MFT` and other targeted artifacts from the live host. Mulder reads such a collection once it is laid out as the root of the source volume. `mulder prepare-triage` produces that layout:
+
+```bash
+# Velociraptor offline collection (zip, or the zip extracted)
+mulder prepare-triage /evidence/Collection-WS01-2026-09-25.zip /triage
+
+# KAPE target destination (C/, D/ folders), or a copy of a volume root
+mulder prepare-triage /evidence/kape_out /triage --hostname WS02
+mulder prepare-triage /evidence/sherlock/C /triage --hostname lab --kind tree
+
+mulder investigate /triage my-case
+```
+
+In the container, mount a writable host directory for the output (e.g. `-v ~/triage:/triage`), since `/evidence` is read-only.
+
+The output holds one folder per host:
+
+| Path | Contents |
+| --- | --- |
+| `<HOST>/C/`, `<HOST>/D/` | One triage root per volume, mirroring its root (`$MFT`, `Windows/`, `Users/`) |
+| `<HOST>/_collector/` | Collector metadata and results (Velociraptor `results/*.json`, KAPE copy logs) |
+| `<HOST>/TRIAGE_MANIFEST.json` | Source path, kind and SHA-256, a SHA-256 for every output file with the collector path it came from, artifact coverage, warnings |
+
+For Velociraptor, percent-encoded paths are decoded (`C%3A` becomes `C`, `%5C%5C.%5CC%3A` becomes `C`), and when the same file was collected by several accessors the raw `ntfs` copy is kept. Shadow-copy files are dropped unless `--include-vss` is passed. Files are copied, never linked, so a parser cannot alter the original collection. The command prints which key artifacts the collection holds and which are missing, so the questions it cannot answer are known before the investigation starts.
+
+The catalog reports each triage root as a `triage_collection` (one system, named after the host). The extraction planner then runs the Windows artifact parsers (registry, Prefetch, Amcache, ShimCache, `$MFT`, EVTX, Hayabusa, Chainsaw, YARA) with the triage root as `image_path`; wherever those tools would read a disk image through Sleuth Kit or a FUSE mount, they read the collected files directly. Tools that only make sense on a raw image (`run_fls`, `run_mmls`, carving, `detect_masquerading`, shadow-copy and BitLocker tools) return `not_applicable_triage` with a pointer to the tools that apply. Scripts (`.ps1`, `.bat`, `.vbs`, `.js`, `.hta`...) and PowerShell `ConsoleHost_history.txt` files are catalogued so the planner reads them.
+
+`mulder investigate` refuses to start when the evidence directory contains a Velociraptor collection that was not normalized (`--allow-raw-collections` overrides the check).
+
 ## Using Non-Anthropic Models via LiteLLM
 
 Mulder includes a built-in LiteLLM proxy that enables any LiteLLM-supported model provider. No manual proxy setup is required.
@@ -576,6 +608,7 @@ Runs a full multi-phase forensic investigation.
 | `--db-dir` | `~/.mulder/cases` | Case database directory |
 | `--cwd` | `~/.mulder/workspace` | Working directory for agent sessions. Also settable via `MULDER_CWD`; the container sets it to `/mulder-investigation`. Created on first use, along with a default `.mcp.json` |
 | `--proxy-config` | None | LiteLLM config YAML for custom model routing |
+| `--allow-raw-collections` | off | Start even if the evidence holds Velociraptor collections not normalized with `mulder prepare-triage` |
 | `--show-cli-stderr` | off | Stream agent CLI diagnostics to the dashboard and `orchestrator.log` |
 
 For subprocess failures that say "Check stderr output for details", rerun with
@@ -624,6 +657,22 @@ Starts the MCP server standalone. Normally invoked automatically by the orchestr
 | `--workers` | `8` | Concurrent tool execution threads |
 | `--mem-limit` | `90` | Memory usage % threshold (0 to disable) |
 | `--cpu-limit` | `90` | CPU usage % threshold (0 to disable) |
+
+### `mulder prepare-triage`
+
+```bash
+mulder prepare-triage <source> <out_dir> [OPTIONS]
+```
+
+Normalizes a triage collection into `<out_dir>/<HOST>/` (see [Triage Collections](#triage-collections-velociraptor-kape)).
+
+| Option | Default | Description |
+| --- | --- | --- |
+| `--hostname` | detected | Host name; read from Velociraptor's `client_info.json` or the collection file name when omitted |
+| `--kind` | detected | `velociraptor`, `kape` or `tree` |
+| `--drive` | `C` | Drive letter for a plain volume copy (`--kind tree`) |
+| `--include-vss` | off | Keep files collected from volume shadow copies (under `_vss/`) |
+| `--force` | off | Replace an existing output for the same host |
 
 ### `mulder report`
 

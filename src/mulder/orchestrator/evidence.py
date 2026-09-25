@@ -15,9 +15,12 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from mulder.extractors.classifier import SCRIPT_EXTS, TRIAGE_ONLY_SCRIPT_EXTS
 from mulder.extractors.optical import probe_optical
 from mulder.orchestrator.types import PhaseResult, extract_catalog_result
 from mulder.patterns import DISK_IMAGE_EXTS, extract_iocs_from_text, resolve_db_dir
+from mulder.triage import find_triage_roots
+from mulder.triage.prepare import artifact_coverage, missing_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -30,6 +33,27 @@ _MEMORY_EXTENSIONS: frozenset[str] = frozenset(
 _ARCHIVE_EXTENSIONS: frozenset[str] = frozenset(
     (".7z", ".zip", ".gz", ".tar", ".xz", ".bz2", ".rar", ".zst")
 )
+
+_MAX_LISTED_SCRIPTS: int = 30
+
+
+def _triage_summary(root: Path) -> str:
+    """One-line artifact coverage of a triage root for the planner prompt."""
+    cov = artifact_coverage(root)
+    hives = cov.get("registry_hives")
+    present = [h for h, ok in hives.items() if ok] if isinstance(hives, dict) else []
+    parts = [
+        f"hives: {', '.join(present) or 'none'}",
+        f"user hives: {len(cov.get('ntuser_dat') or [])}",  # type: ignore[arg-type]
+        f"Prefetch: {cov.get('prefetch_files')}",
+        f"EVTX: {cov.get('evtx_files')}",
+        f"$MFT: {'yes' if cov.get('mft') else 'no'}",
+        f"Amcache: {'yes' if cov.get('amcache') else 'no'}",
+    ]
+    missing = missing_artifacts(cov)
+    if missing:
+        parts.append(f"MISSING: {', '.join(missing)}")
+    return "; ".join(parts)
 
 
 class EvidenceContext:
@@ -102,8 +126,19 @@ class EvidenceContext:
                 if sys_lower in rel:
                     disk_images.append(str(f))
 
+        triage_roots: list[Path] = []
+        if evidence_path.is_dir():
+            for root in find_triage_roots(evidence_path):
+                try:
+                    rel = str(root.relative_to(evidence_path)).lower()
+                except ValueError:
+                    rel = str(root).lower()
+                if sys_lower in rel or rel == ".":
+                    triage_roots.append(root)
+
         memory_dumps: list[str] = []
         nested_archives: list[str] = []
+        scripts: list[str] = []
 
         if evidence_path.is_dir():
             for f in evidence_path.rglob("*"):
@@ -116,7 +151,18 @@ class EvidenceContext:
                 if sys_lower not in rel:
                     continue
                 ext = f.suffix.lower()
-                if ext in _MEMORY_EXTENSIONS:
+                in_triage = any(f.is_relative_to(r) for r in triage_roots)
+                if (
+                    ext in SCRIPT_EXTS
+                    or (in_triage and ext in TRIAGE_ONLY_SCRIPT_EXTS)
+                    or f.name.lower() == "consolehost_history.txt"
+                ):
+                    scripts.append(str(f))
+                elif in_triage:
+                    # Collected artifacts (hives, logs, .dat files) are read by
+                    # the triage-aware parsers, never as memory or archives.
+                    continue
+                elif ext in _MEMORY_EXTENSIONS:
                     memory_dumps.append(str(f))
                 elif ext in _ARCHIVE_EXTENSIONS:
                     nested_archives.append(str(f))
@@ -147,6 +193,22 @@ class EvidenceContext:
                     )
                 else:
                     lines.append(f"  {p}")
+        if triage_roots:
+            lines.append(
+                "Triage collections (files collected from a live Windows host, laid out "
+                "as the volume root; pass the path as image_path, it is NOT a raw image):"
+            )
+            for root in triage_roots:
+                lines.append(f"  {root}  ({_triage_summary(root)})")
+        if scripts:
+            lines.append(
+                "Scripts and PowerShell history (read with read_evidence_file; "
+                f"{len(scripts)} found):"
+            )
+            for p in sorted(scripts)[:_MAX_LISTED_SCRIPTS]:
+                lines.append(f"  {p}")
+            if len(scripts) > _MAX_LISTED_SCRIPTS:
+                lines.append(f"  ... {len(scripts) - _MAX_LISTED_SCRIPTS} more")
         if memory_dumps:
             lines.append("Extracted memory dumps (ready for Volatility):")
             for p in sorted(memory_dumps):
@@ -158,7 +220,7 @@ class EvidenceContext:
             )
             for p in sorted(nested_archives):
                 lines.append(f"  {p}")
-        if not disk_images and not memory_dumps and not nested_archives:
+        if not disk_images and not memory_dumps and not nested_archives and not triage_roots:
             lines.append(
                 "(No pre-populated paths available. "
                 f"Call list_directory on {self.evidence_path} to discover files.)"
@@ -241,7 +303,7 @@ class EvidenceContext:
             if not isinstance(evidence, list):
                 evidence = []
 
-            has_disk = "disk_image" in evidence
+            has_disk = "disk_image" in evidence or "triage_collection" in evidence
             has_memory = "memory_dump" in evidence
 
             if has_disk:

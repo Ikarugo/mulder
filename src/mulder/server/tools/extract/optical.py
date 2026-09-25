@@ -29,6 +29,7 @@ from mulder.server.helpers import (
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
+from mulder.server.tools.extract.tsk import _triage_redirect
 
 __all__ = ["extract_optical_file", "run_optical_listing"]
 
@@ -60,6 +61,11 @@ def run_optical_listing(image_path: str, force: bool = False) -> dict[str, objec
         force: Re-run even if ``optical.listing`` already exists.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(
+        tc_id, "run_optical_listing", {"image_path": image_path}, image_path
+    )
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params = {"image_path": image_path, "force": force}
 
@@ -126,6 +132,11 @@ def extract_optical_file(image_path: str, file_path: str) -> dict[str, object]:
             (e.g. ``/design/winter_storm.amr``).
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(
+        tc_id, "extract_optical_file", {"image_path": image_path}, image_path
+    )
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params = {"image_path": image_path, "file_path": file_path}
 

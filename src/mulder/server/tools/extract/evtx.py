@@ -31,6 +31,7 @@ from mulder.server.tools.extract.tsk import (
     _tsk_extract_dirs,
     _tsk_lock,
 )
+from mulder.triage import is_triage_root, iter_tree_files
 
 __all__ = [
     "_cleanup_temp_dirs",
@@ -62,6 +63,9 @@ def _extract_evtx_from_image(image_path: str, dest_dir: str) -> list[Path]:
     Returns:
         List of paths to extracted .evtx files.
     """
+    if is_triage_root(image_path):
+        return _copy_evtx_from_tree(image_path, dest_dir)
+
     chunk_groups = _collect_fls_chunks(image_path)
     if not chunk_groups:
         return []
@@ -92,6 +96,26 @@ def _extract_evtx_from_image(image_path: str, dest_dir: str) -> list[Path]:
                 except (subprocess.TimeoutExpired, OSError):
                     continue
     return extracted
+
+
+def _copy_evtx_from_tree(root: str, dest_dir: str) -> list[Path]:
+    """``_extract_evtx_from_image`` for a triage root: copy every ``.evtx`` file.
+
+    Uses the same flattened names as the TSK path so the manifest,
+    ``index_evtx_file`` and Hayabusa see an identical extraction directory.
+    """
+    copied: list[Path] = []
+    for rel_path, src in iter_tree_files(root):
+        if not rel_path.lower().endswith(".evtx"):
+            continue
+        out_path = Path(dest_dir) / rel_path.replace("/", "_")
+        try:
+            shutil.copyfile(src, out_path)
+        except OSError:
+            logger.warning("Could not copy %s from triage root %s", rel_path, root)
+            continue
+        copied.append(out_path)
+    return copied
 
 
 def _find_carved_evtx(dest_dir: str) -> list[Path]:
@@ -312,7 +336,13 @@ def run_evtx_parser(evtx_path: str, force: bool = False) -> dict[str, object]:
     if not target.exists():
         return error_response(tc_id, "run_evtx_parser", params, f"Path not found: {evtx_path}")
 
-    is_image = target.suffix.lower() in (".e01", ".dd", ".img", ".raw", ".001")
+    is_image = target.suffix.lower() in (
+        ".e01",
+        ".dd",
+        ".img",
+        ".raw",
+        ".001",
+    ) or is_triage_root(target)
 
     if is_image:
         extract_dir = tempfile.mkdtemp(prefix="mulder_evtx_extract_")

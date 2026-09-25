@@ -27,6 +27,7 @@ from mulder.server.helpers import (
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
+from mulder.server.tools.extract.tsk import _triage_redirect
 
 __all__ = [
     "run_binwalk",
@@ -382,6 +383,16 @@ def run_bulk_extractor(
         force: Re-run extraction even if sources already exist.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(
+        tc_id,
+        "run_bulk_extractor",
+        {"image_path": image_path},
+        image_path,
+        "Carving needs a raw image. On a triage collection use yara_scan_files on this "
+        "path and search() over the indexed artifacts.",
+    )
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, object] = {
         "image_path": image_path,
@@ -511,6 +522,15 @@ def run_foremost(image_path: str) -> dict[str, object]:
         image_path: Path to the disk image.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(
+        tc_id,
+        "run_foremost",
+        {"image_path": image_path},
+        image_path,
+        "Carving needs a raw image. On a triage collection use yara_scan_files on this path.",
+    )
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, object] = {"image_path": image_path}
 
@@ -575,6 +595,15 @@ def run_scalpel(image_path: str) -> dict[str, object]:
         image_path: Path to the disk image or raw partition.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(
+        tc_id,
+        "run_scalpel",
+        {"image_path": image_path},
+        image_path,
+        "Carving needs a raw image. On a triage collection use yara_scan_files on this path.",
+    )
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, object] = {"image_path": image_path}
 
@@ -714,6 +743,15 @@ def run_photorec(image_path: str) -> dict[str, object]:
         image_path: Path to the disk image or partition.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(
+        tc_id,
+        "run_photorec",
+        {"image_path": image_path},
+        image_path,
+        "Carving needs a raw image. On a triage collection use yara_scan_files on this path.",
+    )
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, object] = {"image_path": image_path}
 
