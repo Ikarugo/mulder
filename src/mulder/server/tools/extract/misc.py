@@ -19,22 +19,31 @@ from mulder.assets.paths import asset_candidates, asset_search_summary, register
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index, mount_disk_image
 from mulder.server.helpers import (
-    _PREVIEW_CHAR_LIMIT,
     TOOL_TIMEOUT,
+    ToolRun,
     adaptive_timeout,
     error_response,
+    failure_key,
     make_tool_call_id,
+    remember_failure,
+    repeated_failure_response,
     require_binary,
     run_cli_tool,
+    run_failure_response,
+    run_tool,
     sources_already_indexed,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.tsk import (
+    IcatFailure,
     _cleanup_tsk_extract_dir,
     _resolve_partition_offset,
     _triage_redirect,
     _tsk_extract_files,
+    add_extraction_failures,
+    failures_named,
+    icat_file,
 )
 from mulder.server.tools.tsk import _detect_filesystem_type
 from mulder.triage import child_ci, descend_ci, is_triage_root
@@ -168,34 +177,6 @@ _EZ_FAILURE_HINTS: dict[str, str] = {
 }
 
 
-def _tool_output_tail(stdout: str | None, stderr: str | None, lines: int = 15) -> str:
-    """The last non-empty lines a tool printed, for error messages."""
-    text = "\n".join(part for part in (stdout, stderr) if part)
-    kept = [line.rstrip() for line in text.splitlines() if line.strip()]
-    return "\n".join(kept[-lines:])[-2000:]
-
-
-def _get_kv(key: str) -> str | None:
-    from mulder.server.app import get_ctx, has_ctx
-
-    if not has_ctx():
-        return None
-    try:
-        value = get_ctx().db.get_kv(key)
-    except Exception:
-        return None
-    return str(value) if value else None
-
-
-def _set_kv(key: str, value: str) -> None:
-    from mulder.server.app import get_ctx, has_ctx
-
-    if not has_ctx():
-        return
-    with contextlib.suppress(Exception):
-        get_ctx().db.set_kv(key, value)
-
-
 def _run_ez_tool(
     dll_name: str,
     args: list[str],
@@ -238,42 +219,26 @@ def _run_ez_tool(
             error_type="binary_missing",
         )
 
-    failure_key = f"ez_failed:{tool_name}:{source_path}"
-    if not params.get("force"):
-        previous = _get_kv(failure_key)
-        if previous:
-            return error_response(
-                tc_id,
-                tool_name,
-                params,
-                f"{dll_name} already failed on this evidence: {previous}",
-                (time.monotonic() - t0) * 1000,
-                error_type="tool_failed",
-                suggestion=(
-                    "Running it again on the same input fails the same way. Record the gap, "
-                    "use other sources, or pass force=True after changing the input."
-                ),
-            )
+    memory_key = failure_key(tool_name, source_path, dll_name)
+    if (
+        repeated := repeated_failure_response(tc_id, tool_name, params, memory_key, t0)
+    ) is not None:
+        return repeated
 
     with tempfile.TemporaryDirectory(prefix="mulder_ez_") as tmpdir:
-        cmd = [_DOTNET, dll, *args, "--csv", tmpdir]
-
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, check=False
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id, tool_name, params, f"{dll_name} timed out", (time.monotonic() - t0) * 1000
+        run = run_tool([_DOTNET, dll, *args, "--csv", tmpdir], timeout=timeout)
+        if run.timed_out:
+            return run_failure_response(
+                tc_id, tool_name, params, run, t0, memory_key=memory_key, context=dll_name
             )
 
         csv_files = list(Path(tmpdir).glob("*.csv"))
         if not csv_files:
-            output = _tool_output_tail(proc.stdout, proc.stderr)
-            message = f"{dll_name} produced no CSV output (exit code {proc.returncode})"
+            output = run.tail()
+            message = f"{dll_name} produced no CSV output (exit code {run.returncode})"
             if output:
                 message += f". Tool output (last lines):\n{output}"
-            _set_kv(failure_key, message[:1000])
+            remember_failure(memory_key, message)
             return error_response(
                 tc_id,
                 tool_name,
@@ -301,6 +266,45 @@ def _run_ez_tool(
 # ---------------------------------------------------------------------------
 # EZ Tools MCP handlers
 # ---------------------------------------------------------------------------
+
+
+def _not_found_after_fallbacks(
+    tc_id: str,
+    tool_name: str,
+    params: Mapping[str, object],
+    t0: float,
+    what: str,
+    failures: list[IcatFailure],
+    mount_error: str | None,
+) -> dict[str, object]:
+    """Error once Sleuth Kit and the mount fallback both came back empty-handed.
+
+    Says which of the two failed and why: "not on this system" is only
+    claimed when Sleuth Kit listed no such file and the mount worked.
+    """
+    if failures:
+        listed = "; ".join(f"{f.path}: {f.reason}" for f in failures[:5])
+        tsk = f"Sleuth Kit found it but could not read it ({listed})"
+    else:
+        tsk = "Sleuth Kit listed no matching file"
+    parts = [f"{what} not found. {tsk}"]
+    if mount_error:
+        parts.append(f"The mount fallback failed: {mount_error}")
+    unreadable = bool(failures or mount_error)
+    return error_response(
+        tc_id,
+        tool_name,
+        params,
+        ". ".join(parts),
+        (time.monotonic() - t0) * 1000,
+        error_type="extraction_failed" if unreadable else "artifact_missing",
+        suggestion=(
+            "This is a read failure, not evidence that the artifact is absent: record the "
+            "gap, check the image (run_mmls, run_fsstat) and use other sources."
+            if unreadable
+            else None
+        ),
+    )
 
 
 @mcp.tool()
@@ -336,11 +340,14 @@ def run_prefetch_parser(image_path: str, force: bool = False) -> dict[str, objec
                 0.0,
             )
 
-    extracted = _tsk_extract_files(image_path, ["Prefetch/", ".pf"])
+    failures: list[IcatFailure] = []
+    extracted = _tsk_extract_files(image_path, ["Prefetch/", ".pf"], failures=failures)
+    # ".pf" also matches ".pfx", ".pfm"...: only prefetch files are missing pieces.
+    failures = [f for f in failures if f.path.lower().endswith(".pf")]
     if extracted:
         extract_dir = str(extracted[0][1].parent)
         try:
-            return _run_ez_tool(
+            result = _run_ez_tool(
                 "PECmd.dll",
                 ["-d", extract_dir],
                 "ez.prefetch",
@@ -352,14 +359,17 @@ def run_prefetch_parser(image_path: str, force: bool = False) -> dict[str, objec
             )
         finally:
             _cleanup_tsk_extract_dir(extract_dir)
+        return add_extraction_failures(result, failures)
+
+    mount_error: str | None = None
 
     try:
         with mount_disk_image(image_path) as mount_point:
             found = descend_ci(Path(mount_point), ("Windows", "Prefetch"))
             prefetch_dir = str(found) if found is not None and found.is_dir() else None
             if prefetch_dir is None:
-                return error_response(
-                    tc_id, "run_prefetch_parser", params, "No Prefetch directory found"
+                return _not_found_after_fallbacks(
+                    tc_id, "run_prefetch_parser", params, t0, "Prefetch directory", failures, None
                 )
             return _run_ez_tool(
                 "PECmd.dll",
@@ -371,15 +381,11 @@ def run_prefetch_parser(image_path: str, force: bool = False) -> dict[str, objec
                 params,
                 t0,
             )
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:  # MountError, or a FUSE failure while mounted
+        mount_error = str(exc)
 
-    return error_response(
-        tc_id,
-        "run_prefetch_parser",
-        params,
-        "No Prefetch files found via TSK extraction or mount",
-        (time.monotonic() - t0) * 1000,
+    return _not_found_after_fallbacks(
+        tc_id, "run_prefetch_parser", params, t0, "Prefetch files", failures, mount_error
     )
 
 
@@ -415,11 +421,12 @@ def run_amcache_parser(image_path: str, force: bool = False) -> dict[str, object
                 0.0,
             )
 
-    extracted = _tsk_extract_files(image_path, ["Amcache.hve"])
+    failures: list[IcatFailure] = []
+    extracted = _tsk_extract_files(image_path, ["Amcache.hve"], failures=failures)
     if extracted:
         extract_dir = str(extracted[0][1].parent)
         try:
-            return _run_ez_tool(
+            result = _run_ez_tool(
                 "AmcacheParser.dll",
                 ["-f", str(extracted[0][1])],
                 "ez.amcache",
@@ -431,6 +438,9 @@ def run_amcache_parser(image_path: str, force: bool = False) -> dict[str, object
             )
         finally:
             _cleanup_tsk_extract_dir(extract_dir)
+        return add_extraction_failures(result, failures)
+
+    mount_error: str | None = None
 
     try:
         with mount_disk_image(image_path) as mount_point:
@@ -439,7 +449,9 @@ def run_amcache_parser(image_path: str, force: bool = False) -> dict[str, object
             )
             amcache_path = str(found) if found is not None and found.is_file() else None
             if amcache_path is None:
-                return error_response(tc_id, "run_amcache_parser", params, "Amcache.hve not found")
+                return _not_found_after_fallbacks(
+                    tc_id, "run_amcache_parser", params, t0, "Amcache.hve", failures, None
+                )
             return _run_ez_tool(
                 "AmcacheParser.dll",
                 ["-f", amcache_path],
@@ -450,15 +462,11 @@ def run_amcache_parser(image_path: str, force: bool = False) -> dict[str, object
                 params,
                 t0,
             )
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:  # MountError, or a FUSE failure while mounted
+        mount_error = str(exc)
 
-    return error_response(
-        tc_id,
-        "run_amcache_parser",
-        params,
-        "Amcache.hve not found via TSK extraction or mount",
-        (time.monotonic() - t0) * 1000,
+    return _not_found_after_fallbacks(
+        tc_id, "run_amcache_parser", params, t0, "Amcache.hve", failures, mount_error
     )
 
 
@@ -496,7 +504,9 @@ def run_shimcache_parser(image_path: str, force: bool = False) -> dict[str, obje
                 0.0,
             )
 
-    extracted = _tsk_extract_files(image_path, ["config/SYSTEM"])
+    failures: list[IcatFailure] = []
+    extracted = _tsk_extract_files(image_path, ["config/SYSTEM"], failures=failures)
+    failures = failures_named(failures, ("SYSTEM",))
     if extracted:
         system_files = [
             (r, p)
@@ -522,13 +532,14 @@ def run_shimcache_parser(image_path: str, force: bool = False) -> dict[str, obje
             extract_dir = str(extracted[0][1].parent)
             _cleanup_tsk_extract_dir(extract_dir)
 
+    mount_error: str | None = None
     try:
         with mount_disk_image(image_path) as mount_point:
             found = descend_ci(Path(mount_point), ("Windows", "System32", "config", "SYSTEM"))
             system_hive = str(found) if found is not None and found.is_file() else None
             if system_hive is None:
-                return error_response(
-                    tc_id, "run_shimcache_parser", params, "SYSTEM hive not found"
+                return _not_found_after_fallbacks(
+                    tc_id, "run_shimcache_parser", params, t0, "SYSTEM hive", failures, None
                 )
             return _run_ez_tool(
                 "AppCompatCacheParser.dll",
@@ -540,15 +551,11 @@ def run_shimcache_parser(image_path: str, force: bool = False) -> dict[str, obje
                 params,
                 t0,
             )
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:  # MountError, or a FUSE failure while mounted
+        mount_error = str(exc)
 
-    return error_response(
-        tc_id,
-        "run_shimcache_parser",
-        params,
-        "SYSTEM hive not found via TSK extraction or mount",
-        (time.monotonic() - t0) * 1000,
+    return _not_found_after_fallbacks(
+        tc_id, "run_shimcache_parser", params, t0, "SYSTEM hive", failures, mount_error
     )
 
 
@@ -603,21 +610,12 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
             (time.monotonic() - t0) * 1000,
         )
 
+    failures: list[IcatFailure] = []
     if not triage and require_binary("icat"):
         with tempfile.TemporaryDirectory(prefix="mulder_mft_") as tmpdir:
             mft_dest = Path(tmpdir) / "$MFT"
-            cmd = ["icat"]
-            if offset > 0:
-                cmd.extend(["-o", str(offset)])
-            cmd.extend([image_path, "0"])
-            try:
-                proc = subprocess.run(cmd, capture_output=True, timeout=TOOL_TIMEOUT, check=False)
-            except subprocess.TimeoutExpired:
-                logger.warning("icat timed out extracting $MFT from %s; trying mount", image_path)
-                proc = None
-
-            if proc is not None and proc.returncode == 0 and proc.stdout:
-                mft_dest.write_bytes(proc.stdout)
+            ok, reason = icat_file(image_path, offset, "0", mft_dest, timeout=TOOL_TIMEOUT * 2)
+            if ok:
                 return _run_ez_tool(
                     "MFTECmd.dll",
                     ["-f", str(mft_dest)],
@@ -627,14 +625,13 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
                     "run_mft_parser",
                     params,
                     t0,
+                    timeout=adaptive_timeout(mft_dest, base=TOOL_TIMEOUT * 2),
                 )
-            elif proc is not None:
-                logger.warning(
-                    "icat $MFT extraction failed (rc=%d) for %s; trying mount",
-                    proc.returncode,
-                    image_path,
-                )
+            if reason is not None:
+                logger.warning("icat $MFT failed for %s (%s); trying mount", image_path, reason)
+                failures.append(IcatFailure("$MFT", "0", reason))
 
+    mount_error: str | None = None
     try:
         with mount_disk_image(image_path) as mount_point:
             mft_path = None
@@ -646,8 +643,8 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
                     mft_path = str(candidate)
                     break
             if mft_path is None:
-                return error_response(
-                    tc_id, "run_mft_parser", params, "$MFT not found on mounted image"
+                return _not_found_after_fallbacks(
+                    tc_id, "run_mft_parser", params, t0, "$MFT", failures, None
                 )
             return _run_ez_tool(
                 "MFTECmd.dll",
@@ -659,21 +656,72 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
                 params,
                 t0,
             )
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:  # MountError, or a FUSE failure while mounted
+        mount_error = str(exc)
 
-    return error_response(
-        tc_id,
-        "run_mft_parser",
-        params,
-        "$MFT not found via TSK icat or mount",
-        (time.monotonic() - t0) * 1000,
+    return _not_found_after_fallbacks(
+        tc_id, "run_mft_parser", params, t0, "$MFT", failures, mount_error
     )
 
 
 # ---------------------------------------------------------------------------
 # Utility MCP handlers
 # ---------------------------------------------------------------------------
+
+
+def _incomplete_warning(run: ToolRun, what: str = "output") -> str:
+    """``tool_warning`` for a run that did not complete but left usable results."""
+    return f"{run.describe()}\nThe {what} written before that was indexed; it may be incomplete."
+
+
+def _index_run_stdout(
+    run: ToolRun,
+    *,
+    tc_id: str,
+    tool_name: str,
+    params: Mapping[str, object],
+    t0: float,
+    source_name: str,
+    source_path: str,
+    extractor: str,
+    usable: bool | None = None,
+    context: str = "",
+    suggestion: str | None = None,
+) -> dict[str, object]:
+    """Index *run*'s stdout, or return an error when the run left nothing usable.
+
+    *usable* defaults to "exited 0, or wrote something to stdout". A run that
+    is not usable is never indexed: an empty source would tell the rest of
+    the system the tool ran and found nothing. A usable run that did not exit
+    0 is indexed with a ``tool_warning`` (top-level ``partial``).
+    """
+    if usable is None:
+        usable = run.ok or run.has_output
+    if not usable:
+        return run_failure_response(
+            tc_id, tool_name, params, run, t0, context=context, suggestion=suggestion
+        )
+    summary = extract_and_index(run.stdout.strip(), source_name, source_path, extractor)
+    if not run.ok:
+        summary["tool_warning"] = _incomplete_warning(run)
+    elapsed = (time.monotonic() - t0) * 1000
+    return tool_response(tc_id, tool_name, params, summary, source_name, elapsed)
+
+
+_LIBYAL_BANNER_RE = re.compile(r"^\s*[a-z]+ \d{8}\s*$")
+
+
+def _libyal_has_body(stdout: str) -> bool:
+    """Whether a libyal ``*info`` tool printed more than its version banner.
+
+    vshadowinfo, bdeinfo and fvdeinfo print ``<name> <yyyymmdd>`` on stdout
+    before opening the input, and the "Unable to open" error on stderr: a
+    failed run therefore still has non-blank stdout, which is not a result.
+    """
+    lines = [line for line in stdout.splitlines() if line.strip()]
+    if lines and _LIBYAL_BANNER_RE.match(lines[0]):
+        lines = lines[1:]
+    return bool(lines)
 
 
 @mcp.tool()
@@ -716,25 +764,55 @@ def run_clamav(target_path: str) -> dict[str, object]:
     params = {"target_path": target_path}
 
     if not require_binary("clamscan"):
-        return error_response(tc_id, "run_clamav", params, "clamscan not found on PATH")
-
-    try:
-        proc = subprocess.run(
-            ["clamscan", "-r", "--no-summary", target_path],
-            capture_output=True,
-            text=True,
-            timeout=adaptive_timeout(target_path),
-            check=False,
+        return error_response(
+            tc_id,
+            "run_clamav",
+            params,
+            "clamscan not found on PATH",
+            error_type="binary_missing",
         )
-    except subprocess.TimeoutExpired:
-        return error_response(tc_id, "run_clamav", params, "clamscan timed out")
 
-    output = proc.stdout.strip()
-    infected_lines = [line for line in output.splitlines() if "FOUND" in line]
+    if not Path(target_path).exists():
+        return error_response(
+            tc_id,
+            "run_clamav",
+            params,
+            f"File not found: {target_path}",
+            (time.monotonic() - t0) * 1000,
+            error_type="file_not_found",
+        )
+
+    run = run_tool(
+        ["clamscan", "-r", "--no-summary", target_path], timeout=adaptive_timeout(target_path)
+    )
+
+    # clamscan exits 0 when clean, 1 when a virus was found, 2 on error.
+    completed = run.returncode in (0, 1) and not run.timed_out
+    output = run.stdout.strip()
+    lines = output.splitlines()
+    infected_lines = [line for line in lines if "FOUND" in line]
+    scanned = [line for line in lines if line.endswith((" FOUND", ": OK"))]
+    scan_errors = [line for line in lines if line.endswith("ERROR")]
+    if not completed and not scanned:
+        return run_failure_response(
+            tc_id,
+            "run_clamav",
+            params,
+            run,
+            t0,
+            context="clamscan did not scan anything",
+            suggestion=(
+                "This is a scan failure, not a clean result: read the tool output above "
+                "(signature database, permissions, path) before concluding."
+            ),
+        )
+
     summary_text = "\n".join(infected_lines) if infected_lines else output
-
     summary = extract_and_index(summary_text, "clamav.scan", target_path, "clamav")
     summary["detections"] = len(infected_lines)
+    summary["scan_errors"] = len(scan_errors)
+    if not completed:
+        summary["tool_warning"] = _incomplete_warning(run, "scan results")
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_clamav", params, summary, "clamav.scan", elapsed)
 
@@ -804,7 +882,23 @@ def run_regripper(hive_path: str, profile: str | None = None) -> dict[str, objec
 
     rip = require_binary("rip.pl") or require_binary("regripper")
     if not rip:
-        return error_response(tc_id, "run_regripper", params, "RegRipper not found on PATH")
+        return error_response(
+            tc_id,
+            "run_regripper",
+            params,
+            "RegRipper not found on PATH",
+            error_type="binary_missing",
+        )
+
+    if not Path(hive_path).is_file():
+        return error_response(
+            tc_id,
+            "run_regripper",
+            params,
+            f"File not found: {hive_path}",
+            (time.monotonic() - t0) * 1000,
+            error_type="file_not_found",
+        )
 
     cmd = [rip, "-r", hive_path]
     if profile:
@@ -812,22 +906,24 @@ def run_regripper(hive_path: str, profile: str | None = None) -> dict[str, objec
     else:
         cmd.append("-a")
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return error_response(tc_id, "run_regripper", params, "RegRipper timed out")
+    run = run_tool(cmd, timeout=TOOL_TIMEOUT)
 
     hive_label = Path(hive_path).stem.lower()
-    source_name = f"regripper.{hive_label}"
-    summary = extract_and_index(proc.stdout.strip(), source_name, hive_path, "regripper")
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(tc_id, "run_regripper", params, summary, source_name, elapsed)
+    return _index_run_stdout(
+        run,
+        tc_id=tc_id,
+        tool_name="run_regripper",
+        params=params,
+        t0=t0,
+        source_name=f"regripper.{hive_label}",
+        source_path=hive_path,
+        extractor="regripper",
+        context="RegRipper produced no output",
+        suggestion=(
+            "The hive was not parsed: read the tool output above (unknown profile, "
+            "not a registry hive, dirty hive). run_registry_parser is an alternative."
+        ),
+    )
 
 
 @mcp.tool()
@@ -926,30 +1022,24 @@ def run_vshadow_info(image_path: str, offset: int = 0) -> dict[str, object]:
         cmd.extend(["-o", str(offset)])
     cmd.append(image_path)
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return error_response(
-            tc_id,
-            "run_vshadow_info",
-            params,
-            "vshadowinfo timed out",
-            error_type="timeout",
-        )
-
-    output = proc.stdout.strip()
-    if not output and proc.stderr.strip():
-        output = proc.stderr.strip()
-
-    summary = extract_and_index(output, "vshadow.info", image_path, "vshadowinfo")
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(tc_id, "run_vshadow_info", params, summary, "vshadow.info", elapsed)
+    run = run_tool(cmd, timeout=TOOL_TIMEOUT)
+    return _index_run_stdout(
+        run,
+        tc_id=tc_id,
+        tool_name="run_vshadow_info",
+        params=params,
+        t0=t0,
+        source_name="vshadow.info",
+        source_path=image_path,
+        extractor="vshadowinfo",
+        usable=run.ok or _libyal_has_body(run.stdout),
+        context="vshadowinfo could not read the volume",
+        suggestion=(
+            "This says nothing about whether shadow copies exist. vshadowinfo needs an "
+            "NTFS volume: on a whole-disk image pass offset= the partition start in bytes "
+            "(start sector from run_mmls x sector size)."
+        ),
+    )
 
 
 @mcp.tool()
@@ -969,6 +1059,21 @@ def run_chkrootkit(target_path: str | None = None) -> dict[str, object]:
     t0 = time.monotonic()
     params = {"target_path": target_path}
 
+    if target_path and is_triage_root(target_path):
+        return error_response(
+            tc_id,
+            "run_chkrootkit",
+            params,
+            f"{target_path} is a Windows triage collection; chkrootkit checks a Linux root "
+            "filesystem and does not apply",
+            error_type="not_applicable_triage",
+            suggestion=(
+                "Scan the collected files with run_clamav, and use the Windows artifact "
+                "parsers (run_registry_parser, run_evtx_parser, run_hayabusa, "
+                "run_amcache_parser) on this path."
+            ),
+        )
+
     if not require_binary("chkrootkit"):
         return error_response(
             tc_id,
@@ -978,36 +1083,33 @@ def run_chkrootkit(target_path: str | None = None) -> dict[str, object]:
             error_type="binary_missing",
         )
 
-    cmd = ["chkrootkit"]
-    if target_path:
-        cmd.extend(["-r", target_path])
-
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=adaptive_timeout(target_path or "/"),
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
+    if target_path and not Path(target_path).is_dir():
         return error_response(
             tc_id,
             "run_chkrootkit",
             params,
-            "chkrootkit timed out",
-            error_type="timeout",
+            f"Not a directory: {target_path} (chkrootkit -r needs a mounted root filesystem)",
+            (time.monotonic() - t0) * 1000,
+            error_type="file_not_found",
         )
 
-    source_path = target_path or "/"
-    summary = extract_and_index(
-        proc.stdout.strip(),
-        "chkrootkit.scan",
-        source_path,
-        "chkrootkit",
+    cmd = ["chkrootkit"]
+    if target_path:
+        cmd.extend(["-r", target_path])
+
+    run = run_tool(cmd, timeout=adaptive_timeout(target_path or "/"))
+    return _index_run_stdout(
+        run,
+        tc_id=tc_id,
+        tool_name="run_chkrootkit",
+        params=params,
+        t0=t0,
+        source_name="chkrootkit.scan",
+        source_path=target_path or "/",
+        extractor="chkrootkit",
+        context="chkrootkit produced no output",
+        suggestion="No rootkit check was done: read the tool output above.",
     )
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(tc_id, "run_chkrootkit", params, summary, "chkrootkit.scan", elapsed)
 
 
 # ---------------------------------------------------------------------------
@@ -1087,31 +1189,32 @@ def run_radare2(
             error_type="file_not_found",
         )
 
-    try:
-        proc = subprocess.run(
-            ["r2", "-q", "-c", _sandboxed(commands), target_path],
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
+    if Path(target_path).is_dir():
         return error_response(
             tc_id,
             "run_radare2",
             params,
-            "radare2 timed out",
-            error_type="timeout",
+            f"{target_path} is a directory; radare2 analyses one binary file",
+            (time.monotonic() - t0) * 1000,
+            error_type="invalid_input",
+            suggestion="Pass the path of an executable inside that directory.",
         )
 
-    summary = extract_and_index(
-        proc.stdout.strip(),
-        "radare2.analysis",
-        target_path,
-        "radare2",
+    run = run_tool(["r2", "-q", "-c", _sandboxed(commands), target_path], timeout=TOOL_TIMEOUT)
+    # r2 can exit 0 after "Cannot open" (stderr) with an empty stdout.
+    cannot_open = not run.has_output and "Cannot open" in run.stderr
+    return _index_run_stdout(
+        run,
+        tc_id=tc_id,
+        tool_name="run_radare2",
+        params=params,
+        t0=t0,
+        source_name="radare2.analysis",
+        source_path=target_path,
+        extractor="radare2",
+        usable=(run.ok or run.has_output) and not cannot_open,
+        context="radare2 did not analyse the file",
     )
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(tc_id, "run_radare2", params, summary, "radare2.analysis", elapsed)
 
 
 @mcp.tool()
@@ -1149,41 +1252,56 @@ def run_tcpflow(pcap_path: str) -> dict[str, object]:
         )
 
     with tempfile.TemporaryDirectory(prefix="mulder_tcpflow_") as tmpdir:
-        try:
-            subprocess.run(
-                ["tcpflow", "-r", pcap_path, "-o", tmpdir],
-                capture_output=True,
-                text=True,
-                timeout=adaptive_timeout(pcap_path),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                "run_tcpflow",
-                params,
-                "tcpflow timed out",
-                error_type="timeout",
-            )
+        run = run_tool(
+            ["tcpflow", "-r", pcap_path, "-o", tmpdir], timeout=adaptive_timeout(pcap_path)
+        )
 
         parts: list[str] = []
+        failures: list[dict[str, str]] = []
         for stream_file in sorted(Path(tmpdir).iterdir()):
-            if not stream_file.is_file():
+            # report.xml is tcpflow's own run report (DFXML), not a stream.
+            if not stream_file.is_file() or stream_file.name == "report.xml":
                 continue
-            st = stream_file.stat()
-            if st.st_size == 0:
-                continue
-            with contextlib.suppress(OSError):
+            try:
+                st = stream_file.stat()
+                if st.st_size == 0:
+                    continue
                 preview = stream_file.read_text(
                     encoding="utf-8",
                     errors="replace",
                 )[:4096]
-                parts.append(f"=== {stream_file.name} ({st.st_size} bytes) ===\n{preview}")
+            except OSError as exc:
+                failures.append({"file": stream_file.name, "error": str(exc)})
+                continue
+            parts.append(f"=== {stream_file.name} ({st.st_size} bytes) ===\n{preview}")
 
-        combined = "\n\n".join(parts) if parts else "No TCP streams reconstructed"
+    if not parts and not run.ok:
+        return run_failure_response(
+            tc_id,
+            "run_tcpflow",
+            params,
+            run,
+            t0,
+            context="tcpflow reconstructed no streams",
+            suggestion=(
+                "This is a read failure, not an absence of TCP traffic: check the capture "
+                "(run_pcap_analysis) and use other sources."
+            ),
+        )
 
+    # Exit 0 with no stream: the capture genuinely holds no TCP payload.
+    combined = "\n\n".join(parts) if parts else "No TCP streams reconstructed"
     summary = extract_and_index(combined, "tcpflow.streams", pcap_path, "tcpflow")
     summary["stream_count"] = len(parts)
+    warnings: list[str] = []
+    if not run.ok:
+        warnings.append(_incomplete_warning(run, "streams"))
+    if failures:
+        summary["files_failed"] = len(failures)
+        summary["failures"] = failures[:10]
+        warnings.append(f"{len(failures)} reconstructed stream file(s) could not be read.")
+    if warnings:
+        summary["tool_warning"] = "\n".join(warnings)
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_tcpflow", params, summary, "tcpflow.streams", elapsed)
 
@@ -1223,32 +1341,40 @@ def run_tcpxtract(pcap_path: str) -> dict[str, object]:
         )
 
     with tempfile.TemporaryDirectory(prefix="mulder_tcpxtract_") as tmpdir:
-        try:
-            proc = subprocess.run(
-                ["tcpxtract", "-f", pcap_path, "-o", tmpdir],
-                capture_output=True,
-                text=True,
-                timeout=adaptive_timeout(pcap_path),
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                "run_tcpxtract",
-                params,
-                "tcpxtract timed out",
-                error_type="timeout",
-            )
+        run = run_tool(
+            ["tcpxtract", "-f", pcap_path, "-o", tmpdir], timeout=adaptive_timeout(pcap_path)
+        )
 
         parts: list[str] = []
         for carved in sorted(Path(tmpdir).iterdir()):
             if carved.is_file():
                 parts.append(f"{carved.name}  {carved.stat().st_size} bytes")
 
-        inventory = "\n".join(parts) if parts else proc.stdout.strip()
+    printed_usage = "usage:" in f"{run.stdout}\n{run.stderr}".lower()
+    if not parts and (not run.ok or printed_usage):
+        return run_failure_response(
+            tc_id,
+            "run_tcpxtract",
+            params,
+            run,
+            t0,
+            context=(
+                "tcpxtract printed its usage text and carved nothing"
+                if printed_usage
+                else "tcpxtract carved nothing"
+            ),
+            suggestion=(
+                "This is a tool failure, not an absence of files in the traffic: read the "
+                "tool output above (unreadable capture, missing tcpxtract.conf)."
+            ),
+        )
 
+    # Exit 0 and nothing carved: keep what tcpxtract reported for the empty case.
+    inventory = "\n".join(parts) if parts else run.stdout.strip()
     summary = extract_and_index(inventory, "tcpxtract.carved", pcap_path, "tcpxtract")
     summary["files_carved"] = len(parts)
+    if not run.ok:
+        summary["tool_warning"] = _incomplete_warning(run, "carved files")
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_tcpxtract", params, summary, "tcpxtract.carved", elapsed)
 
@@ -1256,6 +1382,13 @@ def run_tcpxtract(pcap_path: str) -> dict[str, object]:
 # ---------------------------------------------------------------------------
 # Encrypted volume tools: dislocker, bdeinfo, fvdeinfo
 # ---------------------------------------------------------------------------
+
+
+_ENCRYPTION_PROBE_HINT = (
+    "The volume was not read, which is not evidence that it is or is not encrypted. These "
+    "tools read one volume, not a whole-disk image with a partition table (check with "
+    "run_mmls); read the tool output above."
+)
 
 
 def _run_dislocker_metadata_mode(
@@ -1283,36 +1416,18 @@ def _run_dislocker_metadata_mode(
             "dislocker-metadata not found on PATH",
             error_type="binary_missing",
         )
-    try:
-        proc = subprocess.run(
-            ["dislocker-metadata", "-V", image_path],
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return error_response(
-            tc_id,
-            "run_dislocker",
-            params,
-            "dislocker-metadata timed out",
-            error_type="timeout",
-        )
-    summary = extract_and_index(
-        proc.stdout.strip(),
-        "dislocker.metadata",
-        image_path,
-        "dislocker",
-    )
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(
-        tc_id,
-        "run_dislocker",
-        params,
-        summary,
-        "dislocker.metadata",
-        elapsed,
+    run = run_tool(["dislocker-metadata", "-V", image_path], timeout=TOOL_TIMEOUT)
+    return _index_run_stdout(
+        run,
+        tc_id=tc_id,
+        tool_name="run_dislocker",
+        params=params,
+        t0=t0,
+        source_name="dislocker.metadata",
+        source_path=image_path,
+        extractor="dislocker",
+        context="dislocker-metadata could not read BitLocker metadata",
+        suggestion=_ENCRYPTION_PROBE_HINT,
     )
 
 
@@ -1354,29 +1469,13 @@ def _run_dislocker_decrypt_mode(
         cmd.extend(["-u", password])
     cmd.extend(["--", image_path, mount_point])
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return error_response(
-            tc_id,
-            "run_dislocker",
-            params,
-            "dislocker-fuse timed out",
-            error_type="timeout",
-        )
-
-    if proc.returncode != 0:
-        return error_response(
-            tc_id,
-            "run_dislocker",
-            params,
-            f"dislocker-fuse failed: {proc.stderr.strip()[:_PREVIEW_CHAR_LIMIT]}",
+    run = run_tool(cmd, timeout=TOOL_TIMEOUT)
+    if not run.ok:
+        # Nothing was mounted: do not leave the empty mount point behind.
+        with contextlib.suppress(OSError):
+            Path(mount_point).rmdir()
+        return run_failure_response(
+            tc_id, "run_dislocker", params, run, t0, context="dislocker-fuse failed"
         )
 
     with _dislocker_lock:
@@ -1486,31 +1585,20 @@ def run_bdeinfo(image_path: str) -> dict[str, object]:
             error_type="file_not_found",
         )
 
-    try:
-        proc = subprocess.run(
-            ["bdeinfo", image_path],
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return error_response(
-            tc_id,
-            "run_bdeinfo",
-            params,
-            "bdeinfo timed out",
-            error_type="timeout",
-        )
-
-    summary = extract_and_index(
-        proc.stdout.strip(),
-        "bde.info",
-        image_path,
-        "bdeinfo",
+    run = run_tool(["bdeinfo", image_path], timeout=TOOL_TIMEOUT)
+    return _index_run_stdout(
+        run,
+        tc_id=tc_id,
+        tool_name="run_bdeinfo",
+        params=params,
+        t0=t0,
+        source_name="bde.info",
+        source_path=image_path,
+        extractor="bdeinfo",
+        usable=run.ok or _libyal_has_body(run.stdout),
+        context="bdeinfo could not read the volume",
+        suggestion=_ENCRYPTION_PROBE_HINT,
     )
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(tc_id, "run_bdeinfo", params, summary, "bde.info", elapsed)
 
 
 @mcp.tool()
@@ -1549,28 +1637,17 @@ def run_fvdeinfo(image_path: str) -> dict[str, object]:
             error_type="file_not_found",
         )
 
-    try:
-        proc = subprocess.run(
-            ["fvdeinfo", image_path],
-            capture_output=True,
-            text=True,
-            timeout=TOOL_TIMEOUT,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return error_response(
-            tc_id,
-            "run_fvdeinfo",
-            params,
-            "fvdeinfo timed out",
-            error_type="timeout",
-        )
-
-    summary = extract_and_index(
-        proc.stdout.strip(),
-        "fvde.info",
-        image_path,
-        "fvdeinfo",
+    run = run_tool(["fvdeinfo", image_path], timeout=TOOL_TIMEOUT)
+    return _index_run_stdout(
+        run,
+        tc_id=tc_id,
+        tool_name="run_fvdeinfo",
+        params=params,
+        t0=t0,
+        source_name="fvde.info",
+        source_path=image_path,
+        extractor="fvdeinfo",
+        usable=run.ok or _libyal_has_body(run.stdout),
+        context="fvdeinfo could not read the volume",
+        suggestion=_ENCRYPTION_PROBE_HINT,
     )
-    elapsed = (time.monotonic() - t0) * 1000
-    return tool_response(tc_id, "run_fvdeinfo", params, summary, "fvde.info", elapsed)

@@ -23,10 +23,11 @@ from mulder.assets.paths import asset_path, register_cache_clear
 from mulder.server.app import get_ctx, mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
-    _PREVIEW_CHAR_LIMIT,
+    ToolRun,
     adaptive_timeout,
     hash_output,
     make_tool_call_id,
+    run_tool,
 )
 from mulder.server.tool_access import Role, tool_access
 
@@ -139,76 +140,119 @@ def _collect_rules_for_ruleset(ruleset: str) -> list[str]:
     return _collect_signature_base()
 
 
-_valid_rules_cache: dict[int, list[str]] = {}
+_valid_rules_cache: dict[int, tuple[list[str], list[dict[str, str]]]] = {}
 _valid_rules_lock = threading.Lock()
 
+#: How many rule files that failed to compile are named in a response.
+_MAX_REPORTED_RULE_FAILURES = 20
+#: How many per-file scan errors are listed in a response.
+_MAX_REPORTED_SCAN_ERRORS = 10
 
-def _validate_rule_files(rule_paths: list[str]) -> list[str]:
-    """Return only rule files that compile without errors when combined.
+
+def _first_error_line(run: ToolRun) -> str:
+    """The first line yara printed about why a rule file did not compile."""
+    if run.timed_out or run.launch_error is not None:
+        return run.describe()
+    for line in (run.stderr + "\n" + run.stdout).splitlines():
+        if line.strip() and not line.lstrip().lower().startswith("warning"):
+            return line.strip()[:300]
+    return f"yara exited {run.returncode}"
+
+
+#: External variables that LOKI/THOR-style rules (signature-base) reference.
+#: yara refuses to compile a rule file that uses an undefined external, so
+#: without these every such file was dropped from every scan. They are set
+#: to empty strings: rules that key on the file name then simply do not match
+#: on that condition.
+_YARA_EXTERNALS: tuple[str, ...] = tuple(
+    arg
+    for name in ("filename", "filepath", "extension", "filetype", "owner")
+    for arg in ("-d", f"{name}=")
+)
+
+
+def _compile_error(paths: list[str], timeout: int, externals: bool = True) -> str | None:
+    """None if *paths* compile together, else yara's first error line.
+
+    *externals* defines :data:`_YARA_EXTERNALS`, as the yara CLI scans do;
+    Volatility's yara-python scans do not, so their rules are checked without.
+    """
+    ext = _YARA_EXTERNALS if externals else ()
+    if len(paths) == 1:
+        run = run_tool(["yara", *ext, paths[0], "/dev/null"], timeout=timeout)
+        return None if run.ok else _first_error_line(run)
+    fd, idx_path = tempfile.mkstemp(suffix=".yar", prefix="mulder_yara_combined_")
+    try:
+        with os.fdopen(fd, "w") as fh:
+            for rp in paths:
+                fh.write(f'include "{rp}"\n')
+        run = run_tool(["yara", *ext, idx_path, "/dev/null"], timeout=timeout)
+        return None if run.ok else _first_error_line(run)
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(idx_path)
+
+
+def _validate_rules(
+    rule_paths: list[str], externals: bool = True
+) -> tuple[list[str], list[dict[str, str]]]:
+    """Split rule files into those that compile together and those that do not.
 
     Caches results so repeated scans don't re-validate.  Attempts batch
     validation via a single index file first; falls back to individual
     compilation if the batch fails.  After individual validation, runs a
     final combined pass to catch cross-file conflicts (e.g. duplicate
     rule identifiers across different files).
+
+    Returns:
+        (valid paths, failures) where each failure is ``{"file", "error"}``
+        with yara's first error line. Failures used to be logged only: a
+        scan with half the rules silently excluded read as a full scan.
     """
-    cache_key = hash(tuple(sorted(rule_paths)))
+    cache_key = hash((externals, *sorted(rule_paths)))
     with _valid_rules_lock:
         if cache_key in _valid_rules_cache:
             return _valid_rules_cache[cache_key]
 
     if not shutil.which("yara"):
-        return rule_paths
+        return rule_paths, []
 
-    fd, idx_path = tempfile.mkstemp(suffix=".yar", prefix="mulder_yara_validate_")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            for rp in rule_paths:
-                fh.write(f'include "{rp}"\n')
-        proc = subprocess.run(
-            ["yara", idx_path, "/dev/null"],
-            capture_output=True,
-            timeout=120,
-            check=False,
+    if _compile_error(rule_paths, 120, externals) is None:
+        logger.info(
+            "YARA rule validation: %d/%d files valid (batch)", len(rule_paths), len(rule_paths)
         )
-        if proc.returncode == 0:
-            logger.info(
-                "YARA rule validation: %d/%d files valid (batch)", len(rule_paths), len(rule_paths)
-            )
-            with _valid_rules_lock:
-                _valid_rules_cache[cache_key] = rule_paths
-            return rule_paths
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    finally:
-        os.unlink(idx_path)
+        with _valid_rules_lock:
+            _valid_rules_cache[cache_key] = (rule_paths, [])
+        return rule_paths, []
 
     valid: list[str] = []
+    failures: list[dict[str, str]] = []
     for rp in rule_paths:
-        try:
-            proc = subprocess.run(
-                ["yara", rp, "/dev/null"],
-                capture_output=True,
-                timeout=10,
-                check=False,
-            )
-            if proc.returncode == 0:
-                valid.append(rp)
-        except (subprocess.TimeoutExpired, OSError):
-            continue
+        error = _compile_error([rp], 10, externals)
+        if error is None:
+            valid.append(rp)
+        else:
+            failures.append({"file": rp, "error": error})
 
     logger.info(
         "YARA rule validation: %d/%d files valid (individual)", len(valid), len(rule_paths)
     )
 
-    valid = _resolve_cross_file_conflicts(valid)
+    valid = _resolve_cross_file_conflicts(valid, failures, externals)
 
     with _valid_rules_lock:
-        _valid_rules_cache[cache_key] = valid
-    return valid
+        _valid_rules_cache[cache_key] = (valid, failures)
+    return valid, failures
 
 
-def _resolve_cross_file_conflicts(valid_paths: list[str]) -> list[str]:
+def _validate_rule_files(rule_paths: list[str]) -> list[str]:
+    """Return only rule files that compile without errors when combined."""
+    return _validate_rules(rule_paths)[0]
+
+
+def _resolve_cross_file_conflicts(
+    valid_paths: list[str], failures: list[dict[str, str]] | None = None, externals: bool = True
+) -> list[str]:
     """Remove files that cause cross-file compilation errors.
 
     Individual rule files may each compile fine on their own but conflict
@@ -219,6 +263,8 @@ def _resolve_cross_file_conflicts(valid_paths: list[str]) -> list[str]:
 
     Args:
         valid_paths: Rule file paths that each compile individually.
+        failures: When given, each excluded file is recorded here with the
+            compiler's error.
 
     Returns:
         Subset of *valid_paths* that compile together without conflicts.
@@ -226,7 +272,7 @@ def _resolve_cross_file_conflicts(valid_paths: list[str]) -> list[str]:
     if len(valid_paths) <= 1:
         return valid_paths
 
-    if _try_combined_compile(valid_paths):
+    if _compile_error(valid_paths, 120, externals) is None:
         return valid_paths
 
     logger.info(
@@ -237,11 +283,13 @@ def _resolve_cross_file_conflicts(valid_paths: list[str]) -> list[str]:
 
     kept: list[str] = []
     for rp in valid_paths:
-        candidate = kept + [rp]
-        if _try_combined_compile(candidate):
+        error = _compile_error([*kept, rp], 120, externals) if kept else None
+        if error is None:
             kept.append(rp)
         else:
             logger.debug("Excluding conflicting rule file: %s", rp)
+            if failures is not None:
+                failures.append({"file": rp, "error": f"conflicts with other rule files: {error}"})
 
     logger.info(
         "Cross-file conflict resolution: %d/%d files retained",
@@ -260,34 +308,23 @@ def _try_combined_compile(paths: list[str]) -> bool:
     Returns:
         True if YARA compiles the combined file successfully.
     """
-    fd, idx_path = tempfile.mkstemp(suffix=".yar", prefix="mulder_yara_combined_")
-    try:
-        with os.fdopen(fd, "w") as fh:
-            for rp in paths:
-                fh.write(f'include "{rp}"\n')
-        proc = subprocess.run(
-            ["yara", idx_path, "/dev/null"],
-            capture_output=True,
-            timeout=120,
-            check=False,
-        )
-        return proc.returncode == 0
-    except (subprocess.TimeoutExpired, OSError):
-        return False
-    finally:
-        with contextlib.suppress(OSError):
-            os.unlink(idx_path)
+    return _compile_error(paths, 120) is None
 
 
-def _build_index_file(rule_paths: list[str]) -> tuple[str, bool]:
+def _build_index_file(
+    rule_paths: list[str], failures: list[dict[str, str]] | None = None, externals: bool = True
+) -> tuple[str, bool]:
     """Create a temp .yar file with ``include`` directives for valid paths.
 
-    Pre-validates rule files to skip ones with compilation errors.
+    Pre-validates rule files to skip ones with compilation errors; those are
+    added to *failures* when given.
     """
     if not rule_paths:
         return "", False
 
-    valid_paths = _validate_rule_files(rule_paths)
+    valid_paths, failed = _validate_rules(rule_paths, externals)
+    if failures is not None:
+        failures.extend(failed)
     if not valid_paths:
         return "", False
     if len(valid_paths) == 1:
@@ -303,8 +340,14 @@ def _build_index_file(rule_paths: list[str]) -> tuple[str, bool]:
 def _build_rules_args(
     rules: str | None,
     ruleset: str = "builtin",
+    failures: list[dict[str, str]] | None = None,
+    externals: bool = True,
 ) -> tuple[list[str], bool]:
-    """Build the CLI args list for yara rules and return cleanup flag."""
+    """Build the CLI args list for yara rules and return cleanup flag.
+
+    Rule files that do not compile are left out and, when *failures* is
+    given, recorded there.
+    """
     _update_community_rules()
 
     if rules is not None:
@@ -315,7 +358,7 @@ def _build_rules_args(
             dir_rules = sorted(str(p) for p in Path(stripped).rglob("*.yar"))
             if not dir_rules:
                 return [], False
-            idx, cleanup = _build_index_file(dir_rules)
+            idx, cleanup = _build_index_file(dir_rules, failures, externals)
             return ([idx], cleanup) if idx else ([], False)
         if re.search(r"^\s*include\s+", stripped, re.MULTILINE | re.IGNORECASE):
             return [], False
@@ -327,7 +370,7 @@ def _build_rules_args(
     all_rules = _collect_rules_for_ruleset(ruleset)
     if not all_rules:
         return [], False
-    idx, cleanup = _build_index_file(all_rules)
+    idx, cleanup = _build_index_file(all_rules, failures, externals)
     return ([idx], cleanup) if idx else ([], False)
 
 
@@ -421,6 +464,91 @@ def _parse_yara_output(stdout: str) -> list[dict[str, object]]:
     return results
 
 
+_VOL_BANNER_PREFIX = "Volatility 3 Framework"
+
+
+def _parse_vadyarascan_output(stdout: str) -> tuple[list[dict[str, object]], bool]:
+    """Parse ``windows.vadyarascan`` text output into match dicts.
+
+    Volatility prints its banner and a column header on stdout before any
+    row. Read with the ``yara`` CLI parser, those two lines were counted as
+    rule hits ("Volatility" matching "3 Framework ..."), and a failed run
+    was taken for a successful one because stdout was not empty.
+
+    Returns:
+        (matches, header_seen). ``header_seen`` is False when the plugin
+        never printed its table, i.e. it did not run.
+    """
+    results: list[dict[str, object]] = []
+    columns: list[str] | None = None
+    for line in stdout.splitlines():
+        if not line.strip() or line.startswith(_VOL_BANNER_PREFIX):
+            continue
+        cells = [c.strip() for c in line.split("\t")]
+        if columns is None:
+            if "Rule" in cells:
+                columns = cells
+            continue
+        row = dict(zip(columns, cells, strict=False))
+        rule = row.get("Rule", "")
+        if not rule:
+            continue
+        pid = row.get("PID", "")
+        results.append(
+            {
+                "rule": rule,
+                "file": f"pid {pid}" if pid else "",
+                "pid": pid,
+                "matched_strings": [
+                    {
+                        "offset": row.get("Offset", ""),
+                        "identifier": row.get("Component", ""),
+                        "data": row.get("Value", ""),
+                    }
+                ],
+            }
+        )
+    return results, columns is not None
+
+
+def _strip_vol_banner(stdout: str) -> str:
+    """Volatility's stdout without its banner line, for indexing."""
+    return "\n".join(
+        line for line in stdout.splitlines() if not line.startswith(_VOL_BANNER_PREFIX)
+    ).strip()
+
+
+def _scan_errors(stderr: str) -> list[dict[str, str]]:
+    """Per-file errors yara printed on stderr (``error scanning <file>: <why>``).
+
+    Compile warnings (``warning: ...``) are not scan errors and are skipped.
+    """
+    errors: list[dict[str, str]] = []
+    for raw in stderr.splitlines():
+        line = raw.strip()
+        if not line.lower().startswith("error"):
+            continue
+        match = re.match(r"error scanning (.+?): (.+)$", line, re.IGNORECASE)
+        if match:
+            errors.append({"file": match.group(1), "error": match.group(2)})
+        else:
+            errors.append({"file": "", "error": line[:300]})
+    return errors
+
+
+def _no_rules_message(failures: list[dict[str, str]]) -> str:
+    """The error for a scan with no usable rule, naming why rules were dropped."""
+    if not failures:
+        return _ERR_NO_RULES
+    listed = "; ".join(
+        f"{Path(f['file']).name}: {f['error']}" for f in failures[:_MAX_REPORTED_RULE_FAILURES]
+    )
+    return (
+        f"No YARA rule compiled: {len(failures)} rule file(s) failed to compile, so nothing "
+        f"was scanned. {listed}"
+    )
+
+
 def _cleanup(path: str) -> None:
     """Remove a temporary file, ignoring errors."""
     with contextlib.suppress(OSError):
@@ -435,6 +563,7 @@ def _yara_error(
     source: str,
     error_msg: str,
     t0: float,
+    error_type: str = "tool_failed",
 ) -> dict[str, object]:
     """Build a standardized YARA error response with audit logging."""
     elapsed = (time.monotonic() - t0) * 1000
@@ -448,6 +577,7 @@ def _yara_error(
     return {
         "tool_call_id": tc_id,
         "status": "error",
+        "error_type": error_type,
         "error_message": error_msg,
         "results": [],
         "source": source,
@@ -503,10 +633,12 @@ def _run_yara_scan(
     t0: float,
     audit_params: dict[str, object],
     target_path: str,
+    rule_failures: list[dict[str, str]] | None = None,
+    volatility: bool = False,
 ) -> dict[str, object]:
     """Execute a YARA scan command with standardized error handling.
 
-    Handles TimeoutExpired, OSError, non-zero exit codes, result parsing,
+    Handles timeouts, launch failures, non-zero exit codes, result parsing,
     indexing, and audit logging. Returns the final tool response dict.
 
     Args:
@@ -521,56 +653,46 @@ def _run_yara_scan(
         t0: Start time for elapsed calculation.
         audit_params: Parameters dict for audit logging.
         target_path: Evidence file path for indexing.
+        rule_failures: Rule files left out because they did not compile.
+        volatility: *cmd* is Volatility's vadyarascan, not the yara CLI.
 
     Returns:
-        Standardized tool response dict (success or error).
+        Standardized tool response dict (success, partial or error).
     """
-    try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
-    except subprocess.TimeoutExpired:
-        if cleanup:
-            _cleanup(rules_args[0])
-        return _yara_error(
-            ctx,
-            tc_id,
-            tool_name,
-            audit_params,
-            source_name,
-            f"yara timed out after {timeout}s",
-            t0,
-        )
-    except OSError as exc:
-        if cleanup:
-            _cleanup(rules_args[0])
-        return _yara_error(
-            ctx,
-            tc_id,
-            tool_name,
-            audit_params,
-            source_name,
-            f"Failed to run yara: {exc}",
-            t0,
-        )
+    run = run_tool(cmd, timeout=timeout)
 
     if cleanup:
         _cleanup(rules_args[0])
 
-    if proc.returncode != 0 and not proc.stdout.strip():
-        stderr_text = (proc.stderr or "")[:_PREVIEW_CHAR_LIMIT]
+    if volatility:
+        results, header_seen = _parse_vadyarascan_output(run.stdout)
+        # The banner alone is not output: without the table the plugin did
+        # not run, whatever the exit code says.
+        failed = not header_seen
+        index_text = _strip_vol_banner(run.stdout) if header_seen else ""
+    else:
+        results = _parse_yara_output(run.stdout)
+        failed = run.failed
+        index_text = run.stdout if run.stdout.strip() else ""
+
+    if failed:
+        message = run.describe()
+        if volatility and run.ok:
+            message = f"{message}. vadyarascan printed no result table, so the scan did not run."
         return _yara_error(
             ctx,
             tc_id,
             tool_name,
             audit_params,
             source_name,
-            f"yara exited {proc.returncode}: {stderr_text}".rstrip(": "),
+            message,
             t0,
+            error_type=run.error_type,
         )
 
-    results = _parse_yara_output(proc.stdout)
     index_summary: dict[str, object] = {}
-    if proc.stdout.strip():
-        index_summary = extract_and_index(proc.stdout, source_name, target_path, "yara")
+    if index_text:
+        index_summary = extract_and_index(index_text, source_name, target_path, "yara")
 
     hit_metadata = _compute_hit_metadata(results)
 
@@ -600,6 +722,34 @@ def _run_yara_scan(
             "generic content found in legitimate software."
         ),
     }
+
+    warnings: list[str] = []
+    if rule_failures:
+        response["rules_failed_to_compile"] = [
+            {"file": Path(f["file"]).name, "error": f["error"]}
+            for f in rule_failures[:_MAX_REPORTED_RULE_FAILURES]
+        ]
+        response["rules_failed_count"] = len(rule_failures)
+        warnings.append(
+            f"{len(rule_failures)} rule file(s) failed to compile and were not used: "
+            "no match from them is possible (see rules_failed_to_compile)."
+        )
+    scan_errors = [] if volatility else _scan_errors(run.stderr)
+    if scan_errors:
+        response["files_failed"] = len(scan_errors)
+        response["scan_errors"] = scan_errors[:_MAX_REPORTED_SCAN_ERRORS]
+        warnings.append(
+            f"yara could not scan {len(scan_errors)} file(s) (see scan_errors): they were "
+            "not checked."
+        )
+    if not run.ok:
+        warnings.append(
+            f"{run.describe()}\nThe matches printed before that were indexed; the scan may "
+            "be incomplete."
+        )
+    if warnings:
+        response["status"] = "partial"
+        response["tool_warning"] = "\n".join(warnings)
     return response
 
 
@@ -643,7 +793,8 @@ def yara_scan_files(
             t0,
         )
 
-    rules_args, cleanup = _build_rules_args(rules, ruleset=ruleset)
+    rule_failures: list[dict[str, str]] = []
+    rules_args, cleanup = _build_rules_args(rules, ruleset=ruleset, failures=rule_failures)
     if not rules_args:
         return _yara_error(
             ctx,
@@ -651,11 +802,12 @@ def yara_scan_files(
             "yara_scan_files",
             audit_params,
             _SRC_FILE_SCAN,
-            _ERR_NO_RULES,
+            _no_rules_message(rule_failures),
             t0,
+            error_type="no_rules",
         )
 
-    cmd = ["yara", "-r", "-s", *rules_args, target_path]
+    cmd = ["yara", *_YARA_EXTERNALS, "-r", "-s", *rules_args, target_path]
     return _run_yara_scan(
         cmd=cmd,
         timeout=adaptive_timeout(target_path, per_gib=300),
@@ -668,6 +820,7 @@ def yara_scan_files(
         t0=t0,
         audit_params=audit_params,
         target_path=target_path,
+        rule_failures=rule_failures,
     )
 
 
@@ -729,7 +882,8 @@ def yara_scan_memory(
             t0,
         )
 
-    rules_args, cleanup = _build_rules_args(rules, ruleset=ruleset)
+    rule_failures: list[dict[str, str]] = []
+    rules_args, cleanup = _build_rules_args(rules, ruleset=ruleset, failures=rule_failures)
     if not rules_args:
         return _yara_error(
             ctx,
@@ -737,11 +891,12 @@ def yara_scan_memory(
             "yara_scan_memory",
             audit_params,
             _SRC_MEMORY_SCAN,
-            _ERR_NO_RULES,
+            _no_rules_message(rule_failures),
             t0,
+            error_type="no_rules",
         )
 
-    cmd = ["yara", "-s", *rules_args, image_path]
+    cmd = ["yara", *_YARA_EXTERNALS, "-s", *rules_args, image_path]
     return _run_yara_scan(
         cmd=cmd,
         timeout=adaptive_timeout(image_path, per_gib=300),
@@ -754,6 +909,7 @@ def yara_scan_memory(
         t0=t0,
         audit_params=audit_params,
         target_path=image_path,
+        rule_failures=rule_failures,
     )
 
 
@@ -804,7 +960,8 @@ def yara_scan_with_volatility(
             t0,
         )
 
-    rules_args, cleanup = _build_rules_args(rules)
+    rule_failures: list[dict[str, str]] = []
+    rules_args, cleanup = _build_rules_args(rules, failures=rule_failures, externals=False)
     if not rules_args:
         return _yara_error(
             ctx,
@@ -812,8 +969,9 @@ def yara_scan_with_volatility(
             "yara_scan_with_volatility",
             audit_params,
             _SRC_VOL_SCAN,
-            _ERR_NO_RULES,
+            _no_rules_message(rule_failures),
             t0,
+            error_type="no_rules",
         )
 
     rules_path = rules_args[0]
@@ -840,4 +998,6 @@ def yara_scan_with_volatility(
         t0=t0,
         audit_params=audit_params,
         target_path=image_path,
+        rule_failures=rule_failures,
+        volatility=True,
     )

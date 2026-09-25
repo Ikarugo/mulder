@@ -23,14 +23,14 @@ from typing import Any
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    TOOL_TIMEOUT,
     detect_text_encoding,
     error_response,
     make_tool_call_id,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
-from mulder.server.tools.extract.tsk import _resolve_partition_offset
-from mulder.server.tools.extract.user_activity import _icat_to_file
+from mulder.server.tools.extract.tsk import _resolve_partition_offset, icat_file
 from mulder.triage import child_ci, is_triage_root
 
 __all__ = ["extract_mft_record", "parse_mft_record"]
@@ -188,14 +188,16 @@ def _find_by_name(mft: Any, record_size: int, name: str, limit: int) -> list[int
     return entries
 
 
-def _locate_mft(image_path: str, tmpdir: str) -> Path | None:
+def _locate_mft(image_path: str, tmpdir: str) -> tuple[Path | None, str | None]:
+    """The $MFT to read, or ``(None, why it could not be read)``."""
     if is_triage_root(image_path):
         found = child_ci(Path(image_path), "$MFT")
-        return found if found is not None and found.is_file() else None
+        return (found, None) if found is not None and found.is_file() else (None, None)
     dest = Path(tmpdir) / "$MFT"
-    if _icat_to_file(image_path, _resolve_partition_offset(image_path), "0", dest):
-        return dest
-    return None
+    ok, reason = icat_file(
+        image_path, _resolve_partition_offset(image_path), "0", dest, timeout=TOOL_TIMEOUT * 4
+    )
+    return (dest, None) if ok else (None, reason)
 
 
 def _describe(rec: dict[str, Any]) -> tuple[dict[str, Any], str]:
@@ -286,8 +288,17 @@ def extract_mft_record(
         )
 
     with tempfile.TemporaryDirectory(prefix="mulder_mft_record_") as tmpdir:
-        mft_path = _locate_mft(image_path, tmpdir)
+        mft_path, reason = _locate_mft(image_path, tmpdir)
         if mft_path is None:
+            if reason is not None:
+                return error_response(
+                    tc_id,
+                    "extract_mft_record",
+                    params,
+                    f"The $MFT could not be read out of the image: {reason}",
+                    (time.monotonic() - t0) * 1000,
+                    error_type="extraction_failed",
+                )
             return error_response(
                 tc_id,
                 "extract_mft_record",

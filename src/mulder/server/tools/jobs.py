@@ -14,6 +14,7 @@ calls are conditional rather than mandatory.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from typing import TYPE_CHECKING, Any
@@ -324,33 +325,19 @@ def get_completed_results(
             "error_message": f"Unknown batch: {batch_id}",
         }
 
-    sub_call_ids = []
+    sub_call_ids: list[str] = []
     summaries: list[dict[str, object]] = []
     for r in results:
-        res = r.get("result")
-        summary: dict[str, object] = {
-            "tool": r.get("tool", "unknown"),
-            "status": r.get("status", "unknown"),
-        }
-        if isinstance(res, dict):
-            if "tool_call_id" in res:
-                sub_call_ids.append(res["tool_call_id"])
-                summary["tool_call_id"] = res["tool_call_id"]
-            if "source_name" in res:
-                summary["source_name"] = res["source_name"]
-            if "windows_indexed" in res:
-                summary["windows_indexed"] = res["windows_indexed"]
-            if "line_count" in res:
-                summary["line_count"] = res["line_count"]
-            if "error_message" in res:
-                summary["error_message"] = res["error_message"]
-            if "status" in res:
-                summary["result_status"] = res["status"]
-        elif isinstance(res, str) and len(res) > 200:
-            summary["result_preview"] = res[:200]
-        else:
-            summary["result"] = res
+        summary = _job_summary(r)
+        call_id = summary.get("tool_call_id")
+        if isinstance(call_id, str):
+            sub_call_ids.append(call_id)
         summaries.append(summary)
+    not_clean = [
+        f"{s['tool']} ({s['result_status']})"
+        for s in summaries
+        if s.get("result_status") in ("error", "partial")
+    ]
 
     try:
         ctx = get_ctx()
@@ -365,18 +352,90 @@ def get_completed_results(
     except RuntimeError:
         logger.warning("Audit skipped: no active case context for get_completed_results")
 
-    return {
+    response: dict[str, Any] = {
         "tool_call_id": tc_id,
         "status": "success",
         "batch_id": batch_id,
         "results_returned": len(summaries),
         "results": summaries,
         "hint": (
-            "Results show metadata only. Use search(query, source=source_name) "
-            "or get_raw_output(source_name) to access the actual evidence data. "
-            "Use tool_call_id values in submit_finding evidence_refs."
+            "Each result keeps the tool's status, errors, warnings and a bounded view of its "
+            "details. Use search(query, source=source_name) or get_raw_output(source_name) "
+            "for indexed evidence, and wait(job_id=...) for a tool's full result when "
+            "details_truncated is set. Use tool_call_id values in submit_finding evidence_refs."
         ),
     }
+    if not_clean:
+        response["results_not_clean"] = not_clean
+        response["hint"] = (
+            f"{len(not_clean)} tool(s) did not complete cleanly: {', '.join(not_clean)}. "
+            "Read their error_message / tool_warning: what they did not process is a gap, "
+            "not a negative result. " + str(response["hint"])
+        )
+    return response
+
+
+#: Result keys copied as they are into a batch summary.
+_JOB_SUMMARY_KEYS = (
+    "tool_call_id",
+    "windows_indexed",
+    "line_count",
+    "error_message",
+    "error_type",
+    "suggestion",
+    "tool_warning",
+    "hint",
+    "preview_truncated",
+)
+#: Characters of a tool's details (preview or inline results) kept per job.
+_JOB_DETAILS_BUDGET = 1500
+
+
+def _job_summary(job: dict[str, Any]) -> dict[str, object]:
+    """What a batch caller needs from one completed job, bounded in size.
+
+    This used to keep five keys, dropping warnings, suggestions, hints,
+    truncation flags and every field a tool returns inline (a Volatility
+    plugin's error, the non-PKI downloads of the CryptnetUrlCache parser):
+    an agent reading batch results could not tell a partial run from a
+    complete one.
+    """
+    res = job.get("result")
+    summary: dict[str, object] = {
+        "tool": job.get("tool", "unknown"),
+        "status": job.get("status", "completed"),
+    }
+    if job.get("job_id"):
+        summary["job_id"] = job["job_id"]
+    if not isinstance(res, dict):
+        text = json.dumps(res, default=str) if not isinstance(res, str) else res
+        summary["result"] = _bounded(text, summary)
+        return summary
+    for key in _JOB_SUMMARY_KEYS:
+        if key in res:
+            summary[key] = res[key]
+    source = res.get("source_name") or res.get("source")
+    if source:
+        summary["source_name"] = source
+    if "status" in res:
+        summary["result_status"] = res["status"]
+    details = res.get("preview")
+    if details is None and "results" in res:
+        details = json.dumps(res["results"], default=str)
+    if details:
+        summary["details"] = _bounded(str(details), summary)
+    return summary
+
+
+def _bounded(text: str, summary: dict[str, object]) -> str:
+    if len(text) <= _JOB_DETAILS_BUDGET:
+        return text
+    summary["details_truncated"] = True
+    return (
+        text[:_JOB_DETAILS_BUDGET]
+        + f" [...{len(text) - _JOB_DETAILS_BUDGET} more chars not shown: wait(job_id=...) "
+        "returns the full result]"
+    )
 
 
 @mcp.tool()

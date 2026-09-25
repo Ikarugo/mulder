@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import subprocess
 import time
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
@@ -20,6 +21,7 @@ from mulder.server.helpers import (
     adaptive_timeout,
     error_response,
     make_tool_call_id,
+    output_tail,
     sources_already_indexed,
     tool_response,
 )
@@ -64,6 +66,47 @@ _NETSCAN_FALLBACKS: list[str] = [
 ]
 
 
+#: Plugins that report findings: printing only headers means "nothing found".
+#: For the others (process, module, handle listings) a table with no rows
+#: means the plugin could not read the image (usually missing symbols).
+_DETECTION_PLUGINS = frozenset(
+    {
+        "malfind",
+        "hollowprocesses",
+        "suspicious_threads",
+        "processghosting",
+        "unhooked_system_calls",
+        "skeleton_key_check",
+        "yarascan",
+        "vadyarascan",
+        "ldrmodules",
+        "psxview",
+    }
+)
+
+
+def _header_only_result(plugin: str, short: str) -> dict[str, object]:
+    """Result for a plugin that printed its column headers and no row."""
+    if short.lower() in _DETECTION_PLUGINS:
+        return {
+            "plugin": plugin,
+            "status": "no_results",
+            "source_name": f"volatility.{short}",
+            "message": f"{plugin} ran and reported nothing (column headers only).",
+        }
+    return {
+        "plugin": plugin,
+        "status": "header_only",
+        "source_name": f"volatility.{short}",
+        "message": (
+            f"Plugin {plugin} produced only column headers. "
+            f"This usually means ISF symbols are missing for this "
+            f"memory dump's Windows version, or the memory format "
+            f"is not fully supported."
+        ),
+    }
+
+
 def _resolve_plugin_name(plugin: str) -> str:
     """Resolve a short plugin name to the full Volatility 3 class path."""
     if "." in plugin:
@@ -81,6 +124,43 @@ def _is_xp_unsupported_error(stderr: str) -> bool:
         kw in lower
         for kw in ("unsupported", "not a valid plugin", "not found", "unable to validate")
     )
+
+
+_VOL_NOISE_RE = re.compile(r"^(Volatility 3 Framework|Progress:|PDB scanning finished)")
+
+
+#: Lines Volatility 3 prints on stdout when a plugin cannot run.
+_VOL_ERROR_RE = re.compile(
+    r"^(Unsatisfied requirement|A \w+( \w+)* requirement was not fulfilled|"
+    r"Unable to validate the plugin requirements|Volatility was unable|Traceback \(|"
+    r"\w*(Error|Exception):)"
+)
+
+
+def _split_vol_errors(table: str) -> tuple[str, list[str]]:
+    """Separate Volatility's error lines from the table it printed."""
+    rows: list[str] = []
+    errors: list[str] = []
+    in_error = False
+    for line in table.splitlines():
+        # An error line is followed by its indented explanation ("Please verify that:").
+        in_error = bool(_VOL_ERROR_RE.match(line)) or (in_error and line[:1] in (" ", "\t"))
+        (errors if in_error else rows).append(line)
+    return "\n".join(rows).strip(), errors
+
+
+def _strip_vol_banner(stdout: str) -> str:
+    """The plugin's table without the framework banner, progress lines and blanks.
+
+    The banner line made a header-only output look like two lines of
+    results, so missing symbols went undetected and the banner was indexed.
+    """
+    kept = [
+        line
+        for line in stdout.splitlines()
+        if line.strip() and not _VOL_NOISE_RE.match(line.strip())
+    ]
+    return "\n".join(kept).strip()
 
 
 def _run_single_vol_plugin(
@@ -132,7 +212,33 @@ def _run_single_vol_plugin(
         }
 
     stderr_text = proc.stderr or ""
-    if proc.returncode != 0 or not proc.stdout.strip():
+    # Volatility 3 prints its banner and errors such as "Unsatisfied
+    # requirement" on stdout: judge the run on the table it printed, and
+    # read both streams for the reason when there is none.
+    table, vol_errors = _split_vol_errors(_strip_vol_banner(proc.stdout or ""))
+    has_rows = len(table.splitlines()) > 1
+    if vol_errors and proc.returncode != 0:
+        # "Unsatisfied requirement ..." and the like: the plugin did not run.
+        # Its error text must not be indexed as results (it used to be, and
+        # the batch then skipped the plugin as "already indexed").
+        has_rows = False
+        table = ""
+        stderr_text = "\n".join(vol_errors) + ("\n" + stderr_text if stderr_text else "")
+    if proc.returncode != 0 and has_rows:
+        summary = extract_and_index(
+            raw_output=table,
+            source_name=f"volatility.{short}",
+            source_path=memory_path,
+            extractor_name="volatility3",
+        )
+        summary["plugin"] = plugin
+        summary["tool_warning"] = (
+            f"{plugin} exited {proc.returncode} after printing results; they were indexed "
+            f"but may be incomplete. {output_tail(proc.stdout, stderr_text, 5)}"
+        )
+        return summary
+    if proc.returncode != 0 or not table:
+        stderr_text = output_tail(proc.stdout, stderr_text) or stderr_text
         is_netscan = short == "netscan"
         if is_netscan and _is_xp_unsupported_error(stderr_text):
             for fallback_plugin in _NETSCAN_FALLBACKS:
@@ -167,7 +273,11 @@ def _run_single_vol_plugin(
             "status": "error",
             "error_type": error_type,
             "source_name": f"volatility.{short}",
-            "error_message": stderr_text[:300],
+            "error_message": (
+                f"{plugin} exited {proc.returncode}: {stderr_text[-1500:]}"
+                if stderr_text
+                else f"{plugin} exited {proc.returncode} with no output"
+            ),
         }
         if is_netscan:
             result["suggestion"] = (
@@ -176,20 +286,10 @@ def _run_single_vol_plugin(
             )
         return result
 
-    output = proc.stdout.strip()
+    output = table
     lines = output.split("\n")
     if len(lines) <= 1:
-        return {
-            "plugin": plugin,
-            "status": "header_only",
-            "source_name": f"volatility.{short}",
-            "message": (
-                f"Plugin {plugin} produced only column headers. "
-                f"This usually means ISF symbols are missing for this "
-                f"memory dump's Windows version, or the memory format "
-                f"is not fully supported."
-            ),
-        }
+        return _header_only_result(plugin, short)
 
     summary = extract_and_index(
         raw_output=output,
@@ -373,17 +473,7 @@ def _run_batch_plugin(
 
     lines = stripped.split("\n")
     if len(lines) <= 1:
-        return {
-            "plugin": plugin_name,
-            "status": "header_only",
-            "source_name": f"volatility.{short}",
-            "message": (
-                f"Plugin {plugin_name} produced only column headers. "
-                f"This usually means ISF symbols are missing for this "
-                f"memory dump's Windows version, or the memory format "
-                f"is not fully supported."
-            ),
-        }
+        return _header_only_result(plugin_name, short)
 
     summary = extract_and_index(
         raw_output=stripped,
@@ -513,6 +603,7 @@ def _aggregate_batch_results(
     t0: float,
     *,
     fallback_used: bool = False,
+    fallback_reason: str | None = None,
 ) -> dict[str, object]:
     """Compute summary statistics from per-plugin results and build the response.
 
@@ -523,6 +614,7 @@ def _aggregate_batch_results(
         params: Original tool parameters for audit logging.
         t0: Monotonic start time for elapsed calculation.
         fallback_used: If True, marks the response as using subprocess fallback.
+        fallback_reason: Why the Python API could not be used.
 
     Returns:
         Standard batch tool response dict.
@@ -554,6 +646,23 @@ def _aggregate_batch_results(
     }
     if fallback_used:
         payload["execution_mode"] = "subprocess_fallback"
+        if fallback_reason:
+            payload["fallback_reason"] = fallback_reason
+    not_ok = [
+        f"{name} ({r.get('status')})"
+        for name, r in results.items()
+        if r.get("status") in ("error", "empty", "header_only")
+    ]
+    if results and succeeded == 0:
+        payload["status"] = "error"
+        payload["error_message"] = "No plugin produced results: " + ", ".join(not_ok)
+    elif not_ok:
+        payload["status"] = "partial"
+        payload["tool_warning"] = (
+            f"{len(not_ok)} of {len(results)} plugins produced no results: "
+            + ", ".join(not_ok)
+            + ". See per_plugin for each error."
+        )
 
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(
@@ -572,6 +681,7 @@ def _run_batch_subprocess_fallback(
     tc_id: str,
     t0: float,
     params: dict[str, object],
+    reason: str | None = None,
 ) -> dict[str, object]:
     """Execute batch plugins via subprocess when the Python API fails.
 
@@ -608,7 +718,20 @@ def _run_batch_subprocess_fallback(
         full_name = _resolve_plugin_name(plugin_name)
         results[plugin_name] = _run_single_vol_plugin(vol_cmd, memory_path, full_name, timeout)
 
-    return _aggregate_batch_results(results, plugins, tc_id, params, t0, fallback_used=True)
+    return _aggregate_batch_results(
+        results, plugins, tc_id, params, t0, fallback_used=True, fallback_reason=reason
+    )
+
+
+def _note_already_indexed(resp: dict[str, object], done: list[str]) -> dict[str, object]:
+    """Say which requested plugins were not re-run because they are already indexed."""
+    payload = resp.get("results")
+    if done and isinstance(payload, dict):
+        payload["plugins_already_indexed"] = done
+        payload["plugins_already_indexed_hint"] = (
+            "Query them with search(source='volatility.<plugin>'); pass force=True to re-run."
+        )
+    return resp
 
 
 @mcp.tool()
@@ -643,21 +766,32 @@ def run_volatility_batch(
     t0 = time.monotonic()
     params: dict[str, object] = {"plugins": plugins, "memory_path": memory_path}
 
+    done: list[str] = []
     if not force:
-        existing = sources_already_indexed(["volatility."], evidence_path=memory_path)
-        if existing:
+        # Skip only the plugins already indexed: asking for malfind after a
+        # pslist run used to return "skipped" for the whole batch.
+        existing = set(sources_already_indexed(["volatility."], evidence_path=memory_path))
+        done[:] = [
+            p
+            for p in plugins
+            if f"volatility.{_plugin_short_name(_resolve_plugin_name(p))}" in existing
+        ]
+        if done and len(done) == len(plugins):
             return tool_response(
                 tc_id,
                 "run_volatility_batch",
                 params,
                 {
                     "status": "skipped",
-                    "reason": "Sources already indexed from prior extraction",
-                    "existing_sources": existing,
+                    "reason": "Every requested plugin is already indexed",
+                    "existing_sources": sorted(existing),
                 },
                 "volatility",
                 0.0,
             )
+        plugins = [p for p in plugins if p not in done]
+        if done:
+            logger.info("Volatility batch: already indexed, not re-run: %s", done)
 
     if not Path(memory_path).exists():
         return error_response(
@@ -674,14 +808,34 @@ def run_volatility_batch(
         logger.info(
             "Volatility 3 Python library not available; falling back to subprocess execution"
         )
-        return _run_batch_subprocess_fallback(plugins, memory_path, tc_id, t0, params)
+        return _note_already_indexed(
+            _run_batch_subprocess_fallback(
+                plugins,
+                memory_path,
+                tc_id,
+                t0,
+                params,
+                "volatility3 Python library not importable",
+            ),
+            done,
+        )
     except Exception as exc:
         logger.warning(
             "Volatility Python API context build failed (%s); "
             "falling back to subprocess execution",
             exc,
         )
-        return _run_batch_subprocess_fallback(plugins, memory_path, tc_id, t0, params)
+        return _note_already_indexed(
+            _run_batch_subprocess_fallback(
+                plugins,
+                memory_path,
+                tc_id,
+                t0,
+                params,
+                f"Python API context build failed: {type(exc).__name__}: {str(exc)[:300]}",
+            ),
+            done,
+        )
 
     timeout = adaptive_timeout(memory_path, base=_PLUGIN_TIMEOUT)
     logger.info(
@@ -746,4 +900,6 @@ def run_volatility_batch(
             results.get(plugin_name, {}).get("status", "?"),
         )
 
-    return _aggregate_batch_results(results, plugins, tc_id, params, t0)
+    return _note_already_indexed(
+        _aggregate_batch_results(results, plugins, tc_id, params, t0), done
+    )

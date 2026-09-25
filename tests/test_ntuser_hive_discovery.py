@@ -20,6 +20,25 @@ from mulder.server.tools.extract.registry import (
 )
 
 
+class _IcatMock(MagicMock):
+    """A ``subprocess.run`` mock for icat, which streams to the ``stdout`` file.
+
+    Tests set ``stdout`` bytes on the returned process, as for a captured
+    run; this writes them into the file the helper passed.
+    """
+
+    def __call__(self, *args: Any, **kwargs: Any) -> Any:
+        result = super().__call__(*args, **kwargs)
+        out = kwargs.get("stdout")
+        data = getattr(result, "stdout", b"")
+        if hasattr(out, "write") and isinstance(data, bytes):
+            out.write(data)
+        return result
+
+
+_ICAT_RUN = "mulder.server.tools.extract.tsk.subprocess.run"
+
+
 class TestExtractUsername:
     """Tests for _extract_username."""
 
@@ -69,7 +88,7 @@ class TestDiscoverUserHivesViaTsk:
         """Create a single fls output line."""
         return f"r/r {inode}:\t{path}"
 
-    @patch("mulder.server.tools.extract.registry.subprocess.run")
+    @patch(_ICAT_RUN, new_callable=_IcatMock)
     @patch("mulder.server.tools.extract.registry._collect_fls_chunks")
     def test_discovers_xp_ntuser(
         self,
@@ -100,7 +119,7 @@ class TestDiscoverUserHivesViaTsk:
         assert all(h[1] == "ntuser" for h in hives)
         assert extract_dir is not None
 
-    @patch("mulder.server.tools.extract.registry.subprocess.run")
+    @patch(_ICAT_RUN, new_callable=_IcatMock)
     @patch("mulder.server.tools.extract.registry._collect_fls_chunks")
     def test_discovers_modern_ntuser(
         self,
@@ -122,7 +141,7 @@ class TestDiscoverUserHivesViaTsk:
         assert hives[0][1] == "ntuser"
         assert hives[0][2] == "Alice"
 
-    @patch("mulder.server.tools.extract.registry.subprocess.run")
+    @patch(_ICAT_RUN, new_callable=_IcatMock)
     @patch("mulder.server.tools.extract.registry._collect_fls_chunks")
     def test_discovers_usrclass(
         self,
@@ -147,7 +166,7 @@ class TestDiscoverUserHivesViaTsk:
         assert hives[0][1] == "usrclass"
         assert hives[0][2] == "jdoe"
 
-    @patch("mulder.server.tools.extract.registry.subprocess.run")
+    @patch(_ICAT_RUN, new_callable=_IcatMock)
     @patch("mulder.server.tools.extract.registry._collect_fls_chunks")
     def test_mixed_layout_discovery(
         self,
@@ -190,7 +209,7 @@ class TestDiscoverUserHivesViaTsk:
         assert hives == []
         assert extract_dir is None
 
-    @patch("mulder.server.tools.extract.registry.subprocess.run")
+    @patch(_ICAT_RUN, new_callable=_IcatMock)
     @patch("mulder.server.tools.extract.registry._collect_fls_chunks")
     def test_icat_failure_skips_hive(
         self,
@@ -391,7 +410,8 @@ class TestRunRegistryParserUserHives:
 
         fn(image_path="/images/disk.dd")
 
-        mock_user_hives.assert_called_once_with("/images/disk.dd")
+        mock_user_hives.assert_called_once()
+        assert mock_user_hives.call_args.args[0] == "/images/disk.dd"
 
     @patch("mulder.server.tools.extract.registry._parse_all_user_hives")
     @patch("mulder.server.tools.extract.registry._cleanup_tsk_extract_dir")

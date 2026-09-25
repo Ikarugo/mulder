@@ -11,22 +11,27 @@ import csv
 import io
 import logging
 import os
+import re
 import shutil
-import subprocess
 import tempfile
 import time
 from collections import Counter
 from pathlib import Path
+from typing import NamedTuple
 
 from mulder.assets.paths import asset_path, asset_search_summary
 from mulder.patterns import DISK_IMAGE_EXTS
 from mulder.server.app import get_ctx, mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
-    _PREVIEW_CHAR_LIMIT,
+    ToolRun,
     adaptive_timeout,
     error_response,
+    failure_key,
     make_tool_call_id,
+    repeated_failure_response,
+    run_failure_response,
+    run_tool,
     sources_already_indexed,
     tool_response,
 )
@@ -59,7 +64,9 @@ def _dir_has_evtx(directory: str) -> bool:
     return next(Path(directory).rglob("*.evtx"), None) is not None
 
 
-def _resolve_evtx_dir(evtx_dir: str | None, image_path: str | None = None) -> str | None:
+def _resolve_evtx_dir(
+    evtx_dir: str | None, image_path: str | None = None, *, extract: bool = True
+) -> str | None:
     """Return a valid EVTX directory path, or None.
 
     Each candidate is validated to contain at least one ``.evtx`` file
@@ -76,11 +83,13 @@ def _resolve_evtx_dir(evtx_dir: str | None, image_path: str | None = None) -> st
        ``evtx_extract_dir``), for cross-process persistence when the
        server restarts between orchestrator phases.
     5. Inline EVTX extraction from *image_path* using the same TSK +
-       carved-EVTX strategy as ``run_evtx_parser``.
+       carved-EVTX strategy as ``run_evtx_parser`` (only when *extract*).
 
     Args:
         evtx_dir: Explicit directory containing ``.evtx`` files.
         image_path: Disk image path; used for lookup or inline extraction.
+        extract: False to look up existing directories only (steps 1-4),
+            e.g. to find what a previous run registered as its source.
 
     Returns:
         Path to a directory containing EVTX files, or None.
@@ -112,7 +121,8 @@ def _resolve_evtx_dir(evtx_dir: str | None, image_path: str | None = None) -> st
         logger.debug("Failed to read evtx_extract_dir from DB kv_store", exc_info=True)
 
     if (
-        image_path
+        extract
+        and image_path
         and Path(image_path).exists()
         and (Path(image_path).suffix.lower() in DISK_IMAGE_EXTS or is_triage_root(image_path))
     ):
@@ -192,7 +202,8 @@ def run_hayabusa(
             should be used.  Only needed when *evtx_dir* is empty and
             multiple images have been processed.  Matches the path
             previously passed to ``run_evtx_parser``.
-        force: Re-run extraction even if sources already exist.
+        force: Re-run extraction even if sources already exist, or after an
+            earlier run on the same directory failed.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -202,24 +213,16 @@ def run_hayabusa(
         "image_path": image_path,
         "force": force,
     }
+    tool_name = "run_hayabusa"
+
+    severity = min_severity.lower()
+    if severity not in _VALID_SEVERITIES:
+        severity = "medium"
 
     if not force:
-        hayabusa_evidence = evtx_dir or image_path
-        existing = sources_already_indexed(["hayabusa."], evidence_path=hayabusa_evidence or None)
-        if existing:
-            return tool_response(
-                tc_id,
-                "run_hayabusa",
-                params,
-                {
-                    "status": "skipped",
-                    "reason": "Sources already indexed from prior extraction",
-                    "existing_sources": existing,
-                },
-                "hayabusa.alerts",
-                0.0,
-            )
-    tool_name = "run_hayabusa"
+        skipped = _already_indexed_response(tc_id, params, evtx_dir, image_path)
+        if skipped is not None:
+            return skipped
 
     hayabusa_bin = _hayabusa_binary()
     if hayabusa_bin is None:
@@ -254,9 +257,12 @@ def run_hayabusa(
             elapsed_ms=(time.monotonic() - t0) * 1000,
         )
 
-    severity = min_severity.lower()
-    if severity not in _VALID_SEVERITIES:
-        severity = "medium"
+    # A Hayabusa run takes minutes: do not repeat one that already failed on
+    # the same directory with the same severity floor.
+    memory_key = failure_key(tool_name, resolved_dir, severity)
+    repeated = repeated_failure_response(tc_id, tool_name, params, memory_key, t0)
+    if repeated is not None:
+        return repeated
 
     with tempfile.NamedTemporaryFile(suffix=".csv", delete=False) as tmp:
         out_path = tmp.name
@@ -282,66 +288,86 @@ def run_hayabusa(
 
     timeout = adaptive_timeout(image_path or resolved_dir, base=_HAYABUSA_TIMEOUT)
     try:
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                tool_name,
-                params,
-                f"Hayabusa timed out after {timeout}s",
-                elapsed_ms=(time.monotonic() - t0) * 1000,
-            )
-
+        run = run_tool(cmd, timeout=timeout)
         try:
             csv_text = Path(out_path).read_text(errors="replace")
         except OSError:
             csv_text = ""
+    finally:
+        Path(out_path).unlink(missing_ok=True)
 
+    report = _parse_run_report(run.stdout)
+    warnings: list[str] = []
+
+    if not csv_text.strip():
         # The output path is pre-created above, so "the file exists" says
-        # nothing about whether Hayabusa ran. Gate on content instead: a
-        # non-zero exit that wrote no timeline produced no evidence, and
-        # must not be reported as a scan that found nothing. Conjunctive on
-        # purpose -- Hayabusa exits non-zero on an unreadable EVTX after
-        # having already written detections for the rest, and those are kept.
-        if proc.returncode != 0 and not csv_text.strip():
-            detail = ((proc.stderr or "").strip() or (proc.stdout or "").strip())[
-                :_PREVIEW_CHAR_LIMIT
-            ]
+        # nothing about whether Hayabusa ran. A non-zero exit that wrote no
+        # timeline produced no evidence and must not be reported as a scan
+        # that found nothing.
+        if not run.ok:
+            return run_failure_response(
+                tc_id,
+                tool_name,
+                params,
+                run,
+                t0,
+                memory_key=memory_key,
+                context=f"Hayabusa wrote no timeline for {resolved_dir}",
+            )
+        # Exit 0 is not enough either: Hayabusa exits 0 when it refuses to
+        # run (existing output file, no rules, no .evtx found). Only its own
+        # report ("Total event log files", "Results Summary") shows that the
+        # logs were actually scanned and simply matched no rule.
+        if not report.processed:
+            message = (
+                f"Hayabusa exited 0 but did not report scanning any event log in "
+                f"{resolved_dir} ({report.describe()}); no alert count can be given. "
+                + _tail_message(run)
+            )
+            # Not remembered: this rests on reading Hayabusa's console report,
+            # whose wording can change between versions.
             return error_response(
                 tc_id,
                 tool_name,
                 params,
-                f"Hayabusa exited {proc.returncode} and wrote no timeline: {detail}",
+                message,
                 elapsed_ms=(time.monotonic() - t0) * 1000,
                 error_type="tool_failed",
+                suggestion=(
+                    "Check the Hayabusa output above (rules missing: run 'mulder setup'; "
+                    "unreadable directory: pass another evtx_dir), then pass force=True."
+                ),
             )
-    finally:
-        Path(out_path).unlink(missing_ok=True)
-
-    if not csv_text.strip():
+        if report.total_events == 0:
+            warnings.append(
+                f"Hayabusa scanned {report.files} event log file(s) in {resolved_dir} but "
+                "read 0 events: the logs may be empty, unreadable, or of channels no rule "
+                "targets. Zero alerts here does not mean the host is clean. " + _tail_message(run)
+            )
+        warnings.extend(_error_log_warning(report))
+        result: dict[str, object] = {
+            "total_alerts": 0,
+            "by_severity": {},
+            "top_rules": [],
+            "mitre_techniques": [],
+            "evtx_dir": resolved_dir,
+            "evtx_file_count": len(evtx_files),
+            **report.as_result(),
+            "windows_indexed": 0,
+        }
+        if warnings:
+            result["tool_warning"] = "\n".join(warnings)
         elapsed = (time.monotonic() - t0) * 1000
-        return tool_response(
-            tc_id,
-            tool_name,
-            params,
-            {
-                "total_alerts": 0,
-                "by_severity": {},
-                "top_rules": [],
-                "mitre_techniques": [],
-                "evtx_dir": resolved_dir,
-                "evtx_file_count": len(evtx_files),
-            },
-            "hayabusa.alerts",
-            elapsed,
+        return tool_response(tc_id, tool_name, params, result, "hayabusa.alerts", elapsed)
+
+    if not run.ok:
+        # Hayabusa can stop on one unreadable EVTX after writing detections
+        # for the others: keep them, but say the scan did not complete.
+        warnings.append(
+            f"{run.describe()}\nThe alerts written before that were indexed; "
+            "they may be incomplete."
         )
+    warnings.extend(_error_log_warning(report))
 
     alerts = _parse_hayabusa_csv(csv_text)
 
@@ -374,7 +400,7 @@ def run_hayabusa(
     top_rules = [{"rule": name, "count": count} for name, count in rule_counts.most_common(10)]
 
     elapsed = (time.monotonic() - t0) * 1000
-    result: dict[str, object] = {
+    result = {
         "total_alerts": len(alerts),
         "by_severity": dict(severity_counts),
         "top_rules": top_rules,
@@ -382,9 +408,143 @@ def run_hayabusa(
         "evtx_dir": resolved_dir,
         "evtx_file_count": len(evtx_files),
         "index": index_result,
+        **report.as_result(),
     }
+    if warnings:
+        result["tool_warning"] = "\n".join(warnings)
 
     return tool_response(tc_id, tool_name, params, result, "hayabusa.alerts", elapsed)
+
+
+def _already_indexed_response(
+    tc_id: str, params: dict[str, object], evtx_dir: str, image_path: str
+) -> dict[str, object] | None:
+    """The "skipped" response when this directory's alerts are already indexed.
+
+    ``hayabusa.alerts`` is registered with the *resolved* EVTX directory as
+    its source path, so that is what must be compared: keying on the raw
+    ``evtx_dir or image_path`` never matched an image path, and with both
+    empty the unscoped check skipped the run because of alerts from another
+    piece of evidence. Only directories found without extracting anything
+    are considered; with none, there is nothing to compare and the tool runs.
+    """
+    candidates = [
+        d
+        for d in dict.fromkeys(
+            (_resolve_evtx_dir(evtx_dir or None, image_path or None, extract=False), evtx_dir)
+        )
+        if d
+    ]
+    existing: list[str] = []
+    for directory in candidates:
+        for name in sources_already_indexed(["hayabusa."], evidence_path=directory):
+            if name not in existing:
+                existing.append(name)
+    if not existing:
+        return None
+    return tool_response(
+        tc_id,
+        "run_hayabusa",
+        params,
+        {
+            "status": "skipped",
+            "reason": (
+                f"Hayabusa alerts are already indexed for {', '.join(candidates)}. "
+                "Pass force=True to scan again (for example with another min_severity)."
+            ),
+            "existing_sources": existing,
+            "evtx_dir": candidates[0],
+        },
+        "hayabusa.alerts",
+        0.0,
+    )
+
+
+_ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_FILES_RE = re.compile(r"Total event log files:\s*([\d,]+)")
+_EVENTS_RE = re.compile(r"Events with hits\s*/\s*Total events:\s*([\d,]+)\s*/\s*([\d,]+)")
+_ERROR_LOG_RE = re.compile(r"Errors were generated\. Please check (\S+?) for details")
+
+
+class _RunReport(NamedTuple):
+    """What Hayabusa's own console report says it scanned.
+
+    Hayabusa prints ``Total event log files: N`` before scanning and a
+    ``Results Summary:`` with ``Events with hits / Total events: X / Y``
+    after it, in colour even when not on a terminal.
+    """
+
+    files: int | None
+    summary: bool
+    events_with_hits: int | None
+    total_events: int | None
+    error_log: str | None
+
+    @property
+    def processed(self) -> bool:
+        """Hayabusa reports having scanned at least one event log file."""
+        return bool(self.files) and (self.summary or self.total_events is not None)
+
+    def describe(self) -> str:
+        if self.files is None:
+            return "no 'Total event log files' line"
+        if not self.files:
+            return "it found 0 event log files"
+        return "no 'Results Summary'"
+
+    def as_result(self) -> dict[str, object]:
+        out: dict[str, object] = {}
+        if self.files is not None:
+            out["event_log_files_scanned"] = self.files
+        if self.total_events is not None:
+            out["events_scanned"] = self.total_events
+        return out
+
+
+def _count(text: str) -> int:
+    return int(text.replace(",", ""))
+
+
+def _parse_run_report(stdout: str) -> _RunReport:
+    """Read the processed-file and event counts from Hayabusa's console output."""
+    text = _ANSI_RE.sub("", stdout)
+    files_match = _FILES_RE.search(text)
+    events_match = _EVENTS_RE.search(text)
+    log_match = _ERROR_LOG_RE.search(text)
+    return _RunReport(
+        files=_count(files_match.group(1)) if files_match else None,
+        summary="Results Summary" in text,
+        events_with_hits=_count(events_match.group(1)) if events_match else None,
+        total_events=_count(events_match.group(2)) if events_match else None,
+        error_log=log_match.group(1) if log_match else None,
+    )
+
+
+def _tail_message(run: ToolRun) -> str:
+    tail = run.tail()
+    return f"Tool output (last lines):\n{tail}" if tail else "Hayabusa printed nothing."
+
+
+def _error_log_warning(report: _RunReport) -> list[str]:
+    """Hayabusa writes per-file errors (unreadable EVTX...) to a log it only names."""
+    if not report.error_log:
+        return []
+    log_path = Path(report.error_log)
+    if not log_path.is_absolute():
+        log_path = Path.cwd() / log_path
+    detail = ""
+    try:
+        lines = [ln for ln in log_path.read_text(errors="replace").splitlines()[1:] if ln.strip()]
+        if lines:
+            shown = "\n".join(lines[:10])
+            more = f"\n... {len(lines) - 10} more" if len(lines) > 10 else ""
+            detail = f":\n{shown}{more}"
+    except OSError:
+        detail = " (the log could not be read)"
+    return [
+        f"Hayabusa reported errors while scanning (see {log_path}){detail}\n"
+        "Files it could not read were not scanned."
+    ]
 
 
 def _parse_hayabusa_csv(csv_text: str) -> list[dict[str, str]]:

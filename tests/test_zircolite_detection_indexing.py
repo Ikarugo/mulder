@@ -80,7 +80,7 @@ def _run(evidence: dict[str, Path], raw: list[dict[str, Any]]) -> tuple[Any, str
             "mulder.server.tools.zircolite._zircolite_script",
             return_value=evidence["script"],
         ),
-        patch("mulder.server.tools.zircolite.subprocess.run", side_effect=_write),
+        patch("mulder.server.helpers.subprocess.run", side_effect=_write),
         patch("mulder.server.tools.zircolite.extract_and_index", side_effect=_record),
         patch("mulder.server.tools.zircolite.tool_response", side_effect=_capture),
     ):

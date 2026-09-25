@@ -72,19 +72,13 @@ _BINARY_STRINGS_CAP = 20_000
 
 
 def _icat_extract(image_path: str, offset: int, inode: str, dest: Path) -> bool:
-    """Extract a file from disk image to dest using icat."""
-    cmd = ["icat"]
-    if offset > 0:
-        cmd.extend(["-o", str(offset)])
-    cmd.extend([image_path, inode])
-    try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=30, check=False)
-        if proc.returncode == 0 and proc.stdout:
-            dest.write_bytes(proc.stdout)
-            return True
-    except (subprocess.TimeoutExpired, OSError):
-        pass
-    return False
+    """Extract a file from disk image to dest using icat (streamed, failures logged)."""
+    from mulder.server.tools.extract.tsk import icat_file
+
+    ok, reason = icat_file(image_path, offset, inode, dest)
+    if reason is not None:
+        logger.warning("icat could not extract inode %s from %s: %s", inode, image_path, reason)
+    return ok
 
 
 def _resolve_image_and_offset() -> tuple[str, int]:

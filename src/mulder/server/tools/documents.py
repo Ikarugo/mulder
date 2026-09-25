@@ -16,9 +16,11 @@ from mulder.assets.paths import asset_path, asset_search_summary
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    ToolRun,
     error_response,
     make_tool_call_id,
     require_binary,
+    run_tool,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
@@ -421,18 +423,40 @@ def _assess_office_risk(
 # ---------------------------------------------------------------------------
 
 
-def _run_pdfid(file_path: Path) -> list[dict[str, object]]:
+def _record_analyzer_error(
+    errors: list[dict[str, object]] | None, analyzer: str, run: ToolRun
+) -> None:
+    """Note in *errors* that *analyzer* did not complete.
+
+    pdfid and pdf-parser failures used to vanish: a crashed pdfid gave no
+    indicators, which the risk assessment read as a clean PDF.
+    """
+    if errors is None or run.ok:
+        return
+    errors.append(
+        {
+            "analyzer": analyzer,
+            "error_type": run.error_type,
+            "error": run.describe(),
+            # False: nothing usable came out, this part of the analysis is missing.
+            "partial_output_used": run.has_output,
+        }
+    )
+
+
+def _run_pdfid(
+    file_path: Path, errors: list[dict[str, object]] | None = None
+) -> list[dict[str, object]]:
     """Execute pdfid and parse indicator results.
 
     Args:
         file_path: Path to the PDF file.
+        errors: When given, a run that did not complete is recorded here
+            (see :func:`_record_analyzer_error`); whatever it printed is
+            still parsed.
 
     Returns:
         List of PDF structural indicators with risk levels.
-
-    Raises:
-        subprocess.TimeoutExpired: If pdfid exceeds the timeout.
-        OSError: If pdfid cannot be executed.
     """
     script = _pdfid_script()
     if script is not None:
@@ -441,16 +465,11 @@ def _run_pdfid(file_path: Path) -> list[dict[str, object]]:
         pdfid_bin = require_binary("pdfid") or "pdfid"
         cmd = [pdfid_bin, "--force", str(file_path)]
 
-    proc = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
-        timeout=_PDFID_TIMEOUT,
-        check=False,
-    )
+    run = run_tool(cmd, timeout=_PDFID_TIMEOUT)
+    _record_analyzer_error(errors, "pdfid", run)
 
     indicators: list[dict[str, object]] = []
-    for line in proc.stdout.splitlines():
+    for line in run.stdout.splitlines():
         stripped = line.strip()
         for keyword, (risk, description) in _PDF_INDICATOR_RISK_MAP.items():
             clean_keyword = keyword.lstrip("/")
@@ -509,27 +528,26 @@ def _pdf_parser_cmd(file_path: Path, *args: str) -> list[str]:
     return [parser_bin, *args, str(file_path)]
 
 
-def _run_pdf_parser(file_path: Path, *args: str) -> str:
+def _run_pdf_parser(
+    file_path: Path,
+    *args: str,
+    errors: list[dict[str, object]] | None = None,
+    purpose: str = "",
+) -> str:
     """Run pdf-parser and return its stdout, or "" if it could not run.
 
     Args:
         file_path: Path to the PDF file.
         args: Extra pdf-parser arguments.
+        errors: When given, a run that did not complete is recorded here.
+        purpose: What the run was for, named in the recorded error.
 
     Returns:
         stdout text, empty when pdf-parser is missing or times out.
     """
-    try:
-        proc = subprocess.run(
-            _pdf_parser_cmd(file_path, *args),
-            capture_output=True,
-            text=True,
-            timeout=_PDF_PARSER_TIMEOUT,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return ""
-    return proc.stdout
+    run = run_tool(_pdf_parser_cmd(file_path, *args), timeout=_PDF_PARSER_TIMEOUT)
+    _record_analyzer_error(errors, "pdf-parser" + (f" ({purpose})" if purpose else ""), run)
+    return run.stdout
 
 
 def _iter_pdf_objects(output: str) -> list[tuple[int, str]]:
@@ -558,7 +576,9 @@ def _iter_pdf_objects(output: str) -> list[tuple[int, str]]:
     return objects
 
 
-def _extract_pdf_urls(file_path: Path) -> list[dict[str, object]]:
+def _extract_pdf_urls(
+    file_path: Path, errors: list[dict[str, object]] | None = None
+) -> list[dict[str, object]]:
     """Extract URLs reachable from the PDF's actions and object bodies.
 
     ``/URI`` action values are reported as ``uri_action`` -- those are the
@@ -568,11 +588,12 @@ def _extract_pdf_urls(file_path: Path) -> list[dict[str, object]]:
 
     Args:
         file_path: Path to the PDF file.
+        errors: When given, a pdf-parser run that did not complete is recorded here.
 
     Returns:
         List of dicts with url, source and object_id, de-duplicated by URL.
     """
-    output = _run_pdf_parser(file_path)
+    output = _run_pdf_parser(file_path, errors=errors, purpose="URLs")
     if not output:
         return []
 
@@ -592,16 +613,19 @@ def _extract_pdf_urls(file_path: Path) -> list[dict[str, object]]:
     return urls
 
 
-def _extract_pdf_embedded_files(file_path: Path) -> list[dict[str, object]]:
+def _extract_pdf_embedded_files(
+    file_path: Path, errors: list[dict[str, object]] | None = None
+) -> list[dict[str, object]]:
     """List files carried inside the PDF via /Filespec entries.
 
     Args:
         file_path: Path to the PDF file.
+        errors: When given, a pdf-parser run that did not complete is recorded here.
 
     Returns:
         List of dicts with filename, object_id and a suspicious flag.
     """
-    output = _run_pdf_parser(file_path)
+    output = _run_pdf_parser(file_path, errors=errors, purpose="embedded files")
     if not output:
         return []
 
@@ -626,7 +650,9 @@ def _extract_pdf_embedded_files(file_path: Path) -> list[dict[str, object]]:
     return embedded
 
 
-def _extract_pdf_javascript(file_path: Path) -> list[dict[str, object]]:
+def _extract_pdf_javascript(
+    file_path: Path, errors: list[dict[str, object]] | None = None
+) -> list[dict[str, object]]:
     """Extract JavaScript code from PDF objects.
 
     Uses pdf-parser to identify and extract JavaScript streams
@@ -634,27 +660,21 @@ def _extract_pdf_javascript(file_path: Path) -> list[dict[str, object]]:
 
     Args:
         file_path: Path to the PDF file.
+        errors: When given, a pdf-parser run that did not complete is recorded here.
 
     Returns:
         List of JavaScript extractions with analysis.
     """
-    try:
-        proc = subprocess.run(
-            _pdf_parser_cmd(file_path, "--type", "/JS", "--filter"),
-            capture_output=True,
-            text=True,
-            timeout=_PDF_PARSER_TIMEOUT,
-            check=False,
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return []
+    stdout = _run_pdf_parser(
+        file_path, "--type", "/JS", "--filter", errors=errors, purpose="JavaScript"
+    )
 
     scripts: list[dict[str, object]] = []
     obj_re = re.compile(r"obj (\d+)")
     current_obj_id: int | None = None
     current_code: list[str] = []
 
-    for line in proc.stdout.splitlines():
+    for line in stdout.splitlines():
         obj_match = obj_re.match(line)
         if obj_match:
             if current_obj_id is not None and current_code:
@@ -1009,41 +1029,54 @@ def analyze_pdf(
             error_type="invalid_input",
         )
 
-    try:
-        indicators = _run_pdfid(target)
-    except subprocess.TimeoutExpired:
+    analyzer_errors: list[dict[str, object]] = []
+    indicators = _run_pdfid(target, analyzer_errors)
+    pdfid_errors = [e for e in analyzer_errors if e.get("analyzer") == "pdfid"]
+    if pdfid_errors and not pdfid_errors[0].get("partial_output_used"):
+        # pdfid produced nothing: the verdict rests on its indicators, so
+        # "no indicators" here would read as a clean PDF that was never checked.
         return error_response(
             tc_id,
             "analyze_pdf",
             params,
-            f"pdfid timed out after {_PDFID_TIMEOUT}s",
+            f"pdfid failed, so the PDF was not analysed: {pdfid_errors[0]['error']}",
             (time.monotonic() - t0) * 1000,
-            error_type="timeout",
-        )
-    except OSError as exc:
-        return error_response(
-            tc_id,
-            "analyze_pdf",
-            params,
-            f"Failed to execute pdfid: {exc}",
-            (time.monotonic() - t0) * 1000,
+            error_type=str(pdfid_errors[0].get("error_type") or "tool_failed"),
+            suggestion=(
+                "Check that the file is a PDF (pdfid runs with --force) and that the "
+                "Didier Stevens suite runs ('mulder setup --minimal'). Do not treat this "
+                "document as clean."
+            ),
         )
 
     javascript: list[dict[str, object]] = []
     if extract_javascript:
         has_js_indicator = any(i.get("keyword") in ("/JS", "/JavaScript") for i in indicators)
         if has_js_indicator:
-            javascript = _extract_pdf_javascript(target)
+            javascript = _extract_pdf_javascript(target, analyzer_errors)
 
     urls: list[dict[str, object]] = []
     if extract_urls:
-        urls = _extract_pdf_urls(target)
+        urls = _extract_pdf_urls(target, analyzer_errors)
 
     embedded_files: list[dict[str, object]] = []
     if extract_embedded:
-        embedded_files = _extract_pdf_embedded_files(target)
+        embedded_files = _extract_pdf_embedded_files(target, analyzer_errors)
 
     risk = _compute_pdf_risk(indicators, javascript)
+    # The verdict is built from pdfid's indicators and the JavaScript
+    # extraction; if either did not complete, a low verdict proves nothing.
+    verdict_inputs_failed = [
+        str(e["analyzer"])
+        for e in analyzer_errors
+        if e.get("analyzer") in ("pdfid", "pdf-parser (JavaScript)")
+    ]
+    risk["verdict_incomplete"] = bool(verdict_inputs_failed)
+    if verdict_inputs_failed:
+        risk["incomplete_reason"] = (
+            f"{', '.join(verdict_inputs_failed)} did not complete: risk_level "
+            f"'{risk['risk_level']}' is a lower bound, not a clean result."
+        )
 
     index_parts: list[str] = [f"PDF Analysis: {file_path}"]
     for ind in indicators:
@@ -1070,6 +1103,18 @@ def analyze_pdf(
     summary["javascript"] = javascript if extract_javascript else []
     summary["urls"] = urls
     summary["embedded_files"] = embedded_files
+    if analyzer_errors:
+        summary["analyzer_errors"] = analyzer_errors
+        failed = ", ".join(str(e["analyzer"]) for e in analyzer_errors)
+        summary["tool_warning"] = (
+            f"Part of the PDF analysis did not complete ({failed}); the results above "
+            "are missing what it would have found. See analyzer_errors."
+            + (
+                " The risk verdict is incomplete (risk_assessment.verdict_incomplete)."
+                if risk["verdict_incomplete"]
+                else ""
+            )
+        )
 
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "analyze_pdf", params, summary, "pdf.analysis", elapsed)

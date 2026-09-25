@@ -625,23 +625,37 @@ _PARALLEL_TEXT_CAP = 500
 _PARALLEL_RESULTS_CAP = 5
 
 
-def _slim_result(result: Any) -> Any:
+def _cut(text: str) -> str:
+    return text[:_PARALLEL_TEXT_CAP] + (
+        f" [...{len(text) - _PARALLEL_TEXT_CAP} more chars not shown...]"
+    )
+
+
+def _slim_result(result: Any, tool_name: str = "") -> Any:
     """Trim a sub-tool result for inclusion in a run_parallel response.
 
-    Caps inline ``raw_text`` and large ``results`` arrays so the
-    combined parallel response stays within a reasonable token budget.
-    Full data remains in the case DB for retrieval via ``search()`` or
-    ``get_raw_output()``.
+    Caps inline ``raw_text``, large ``results`` arrays and long strings so
+    the combined response stays within a reasonable token budget. What is
+    cut is marked, and ``truncation_note`` says how to see all of it. The
+    note does not claim the data is in the case DB: for tools that read
+    files or list directories it is not, and only a direct call shows it.
     """
     if not isinstance(result, dict):
         return result
     slimmed = dict(result)
+    cut = False
 
     if isinstance(slimmed.get("raw_text"), str):
         text = slimmed["raw_text"]
         if len(text) > _PARALLEL_TEXT_CAP:
-            slimmed["raw_text"] = text[:_PARALLEL_TEXT_CAP]
+            slimmed["raw_text"] = _cut(text)
             slimmed["raw_text_truncated"] = True
+            cut = True
+
+    if isinstance(slimmed.get("preview"), str) and len(slimmed["preview"]) > _PARALLEL_TEXT_CAP:
+        slimmed["preview"] = _cut(slimmed["preview"])
+        slimmed["preview_truncated"] = True
+        cut = True
 
     if isinstance(slimmed.get("results"), list):
         full = slimmed["results"]
@@ -649,15 +663,24 @@ def _slim_result(result: Any) -> Any:
             slimmed["results"] = full[:_PARALLEL_RESULTS_CAP]
             slimmed["results_truncated"] = True
             slimmed["results_total"] = len(full)
+            cut = True
 
     if isinstance(slimmed.get("results"), dict):
         inner = dict(slimmed["results"])
         slimmed["results"] = inner
         for k, v in inner.items():
             if isinstance(v, str) and len(v) > _PARALLEL_TEXT_CAP:
-                inner[k] = v[:_PARALLEL_TEXT_CAP]
+                inner[k] = _cut(v)
                 slimmed.setdefault("truncated_fields", []).append(k)
+                cut = True
 
+    if cut:
+        name = tool_name or "the tool"
+        slimmed["truncation_note"] = (
+            f"run_parallel shows part of this result. Call {name} directly with the same "
+            "arguments to see all of it (or search/get_raw_output when it indexed a source) "
+            "before concluding that something is absent."
+        )
     return slimmed
 
 
@@ -755,7 +778,7 @@ async def run_parallel(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "batch_id": batch_id,
         "parallel_results": [
-            {"tool": tasks[i]["tool"], "result": _slim_result(results[i])}
+            {"tool": tasks[i]["tool"], "result": _slim_result(results[i], str(tasks[i]["tool"]))}
             for i in range(len(tasks))
         ],
         "total_tasks": len(tasks),

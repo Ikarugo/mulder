@@ -43,7 +43,7 @@ def _invoke(evidence: dict[str, Path], proc: subprocess.CompletedProcess[str]) -
             "mulder.server.tools.zircolite._zircolite_script",
             return_value=evidence["script"],
         ),
-        patch("mulder.server.tools.zircolite.subprocess.run", return_value=proc),
+        patch("mulder.server.helpers.subprocess.run", return_value=proc),
         patch("mulder.server.tools.zircolite.extract_and_index", return_value={}),
     ):
         return run_zircolite.__wrapped__(  # type: ignore[attr-defined]
@@ -141,7 +141,7 @@ def test_partial_results_are_kept_when_zircolite_exits_non_zero(
             "mulder.server.tools.zircolite._zircolite_script",
             return_value=evidence["script"],
         ),
-        patch("mulder.server.tools.zircolite.subprocess.run", side_effect=_write_results),
+        patch("mulder.server.helpers.subprocess.run", side_effect=_write_results),
         patch("mulder.server.tools.zircolite.extract_and_index", return_value={}),
     ):
         result = run_zircolite.__wrapped__(  # type: ignore[attr-defined]
@@ -150,4 +150,6 @@ def test_partial_results_are_kept_when_zircolite_exits_non_zero(
         )
 
     assert written, "the fake Zircolite never ran"
-    assert result["status"] == "success"
+    # Kept, but flagged: the unreadable input was not scanned.
+    assert result["status"] == "partial"
+    assert "one input was unreadable" in str(result["tool_warning"])

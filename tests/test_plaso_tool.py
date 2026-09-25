@@ -70,7 +70,7 @@ def fake_env(tmp_path: Path) -> Any:
 
 def test_argv_uses_storage_file_and_never_prompts(fake_env: MagicMock, tmp_path: Path) -> None:
     fake = _FakePlaso()
-    with patch(f"{_MOD}.subprocess.run", fake):
+    with patch("mulder.server.helpers.subprocess.run", fake):
         resp = run_plaso.__wrapped__(  # type: ignore[attr-defined]
             "/evidence/disk.E01", parsers="winevtx,prefetch", time_range="2015-08-01"
         )
@@ -94,7 +94,12 @@ def test_argv_uses_storage_file_and_never_prompts(fake_env: MagicMock, tmp_path:
     assert psort[0] == "/usr/bin/psort"
     assert _argv_after(psort, "-o") == "l2tcsv"
     assert _argv_after(psort, "-w").endswith("timeline.csv")
-    assert psort[-2:] == [_argv_after(l2t, "--storage_file"), "date > '2015-08-01'"]
+    # plaso's event filter compares ``timestamp`` with DATETIME(); the legacy
+    # ``date > '...'`` form names no event attribute and matches nothing.
+    assert psort[-2:] == [
+        _argv_after(l2t, "--storage_file"),
+        "timestamp > DATETIME('2015-08-01')",
+    ]
     assert "-u" in psort
 
     assert pinfo[0] == "/usr/bin/pinfo"
@@ -108,7 +113,7 @@ def test_argv_uses_storage_file_and_never_prompts(fake_env: MagicMock, tmp_path:
 
 def test_l2t_failure_reports_last_stderr_line_and_exit_code(fake_env: MagicMock) -> None:
     fake = _FakePlaso(l2t_returncode=2, l2t_stderr=_ARGPARSE_STDERR)
-    with patch(f"{_MOD}.subprocess.run", fake):
+    with patch("mulder.server.helpers.subprocess.run", fake):
         resp = run_plaso.__wrapped__("/evidence/disk.E01")  # type: ignore[attr-defined]
 
     assert resp["status"] == "error"

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import subprocess
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -18,6 +19,14 @@ from mulder.server.tools.extract.masquerade import (
 )
 
 MOD = "mulder.server.tools.extract.masquerade"
+# fls goes through run_tool, which calls subprocess.run from the helpers module.
+_RUN = "mulder.server.helpers.subprocess.run"
+
+
+def _proc(code: int, stdout: str = "", stderr: str = "") -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess(["fls"], code, stdout=stdout, stderr=stderr)
+
+
 _tool: Any = detect_masquerading.__wrapped__  # type: ignore[attr-defined]  # sync body under the async bridge
 
 
@@ -141,7 +150,7 @@ HEADS = {
 
 
 def _run(**kwargs: Any) -> tuple[dict[str, object], MagicMock, list[str]]:
-    fls = MagicMock(returncode=0, stdout=FLS_LONG.encode(), stderr=b"")
+    fls = _proc(0, FLS_LONG)
     read: list[str] = []
 
     def fake_head(_image: str, _offset: int, inode: str, _n: int) -> bytes:
@@ -149,7 +158,7 @@ def _run(**kwargs: Any) -> tuple[dict[str, object], MagicMock, list[str]]:
         return HEADS[inode]
 
     with (
-        patch(f"{MOD}.subprocess.run", return_value=fls),
+        patch(_RUN, return_value=fls),
         patch(f"{MOD}._read_head", side_effect=fake_head),
         patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),
         patch(f"{MOD}.sources_already_indexed", return_value=[]),
@@ -201,8 +210,8 @@ def test_walk_is_bounded_by_max_files() -> None:
 
 
 def test_fls_command_uses_long_listing_and_offset() -> None:
-    with patch(f"{MOD}.subprocess.run") as run:
-        run.return_value = MagicMock(returncode=0, stdout=b"", stderr=b"")
+    with patch(_RUN) as run:
+        run.return_value = _proc(0)
         with (
             patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),
             patch(f"{MOD}.sources_already_indexed", return_value=[]),
@@ -214,7 +223,7 @@ def test_fls_command_uses_long_listing_and_offset() -> None:
 
 def test_fls_failure_is_an_error_response() -> None:
     with (
-        patch(f"{MOD}.subprocess.run", return_value=MagicMock(returncode=1, stderr=b"bad fs")),
+        patch(_RUN, return_value=_proc(1, stderr="bad fs")),
         patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),
         patch(f"{MOD}.sources_already_indexed", return_value=[]),
     ):
@@ -251,16 +260,16 @@ MMLS_TWO = (
 def test_no_offset_scans_every_partition_and_reports_skipped() -> None:
     """Issue #227: RM2 has an empty NTFS partition before the FAT32 one holding the hits."""
 
-    def fake_fls(cmd: list[str], **_: Any) -> MagicMock:
+    def fake_fls(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         offset = cmd[cmd.index("-o") + 1]
         if offset == "128":
-            return MagicMock(returncode=0, stdout=b"", stderr=b"")
+            return _proc(0)
         if offset == "409728":
-            return MagicMock(returncode=0, stdout=FLS_LONG.encode(), stderr=b"")
-        return MagicMock(returncode=1, stdout=b"", stderr=b"no fs")
+            return _proc(0, FLS_LONG)
+        return _proc(1, stderr="no fs")
 
     with (
-        patch(f"{MOD}.subprocess.run", side_effect=fake_fls) as run,
+        patch(_RUN, side_effect=fake_fls) as run,
         patch(f"{MOD}._partition_table_text", return_value=MMLS_TWO),
         patch(f"{MOD}._read_head", side_effect=lambda _i, _o, inode, _n: HEADS[inode]),
         patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),
@@ -283,13 +292,13 @@ def test_no_offset_scans_every_partition_and_reports_skipped() -> None:
 
 
 def test_unopenable_partition_is_reported_not_silenced() -> None:
-    def fake_fls(cmd: list[str], **_: Any) -> MagicMock:
+    def fake_fls(cmd: list[str], **_: Any) -> subprocess.CompletedProcess[str]:
         if cmd[cmd.index("-o") + 1] == "128":
-            return MagicMock(returncode=1, stdout=b"", stderr=b"Cannot determine file system type")
-        return MagicMock(returncode=0, stdout=FLS_LONG.encode(), stderr=b"")
+            return _proc(1, stderr="Cannot determine file system type")
+        return _proc(0, FLS_LONG)
 
     with (
-        patch(f"{MOD}.subprocess.run", side_effect=fake_fls),
+        patch(_RUN, side_effect=fake_fls),
         patch(f"{MOD}._partition_table_text", return_value=MMLS_TWO),
         patch(f"{MOD}._read_head", side_effect=lambda _i, _o, inode, _n: HEADS[inode]),
         patch(f"{MOD}.require_binary", return_value="/usr/bin/x"),

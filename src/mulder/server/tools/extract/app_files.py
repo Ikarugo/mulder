@@ -13,6 +13,7 @@ import logging
 import shutil
 import subprocess
 import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from mulder.patterns import fls_file_entries
 from mulder.server.app import get_ctx, mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    detect_text_encoding,
     error_response,
     make_tool_call_id,
     tool_response,
@@ -152,11 +154,14 @@ def _extract_and_read_file(
     inode_str: str,
     offset: int,
     max_size_bytes: int | None = None,
+    skipped: Counter[str] | None = None,
 ) -> str | None:
     """Extract a file via icat and return its text content.
 
     Returns None if icat fails, the file is binary, or the file
-    exceeds the text size limit.
+    exceeds the text size limit; *skipped* then counts which of the
+    three it was (``unreadable``, ``binary``, ``too_large``), so a read
+    failure is not reported as a binary file.
 
     Args:
         image_path: Path to the disk image.
@@ -166,12 +171,15 @@ def _extract_and_read_file(
             caller's ``max_file_size_kb`` used to be checked against a size
             field parsed out of the fls listing, but ``fls -r -p`` emits no
             size column, so that check could never fire.
+        skipped: Optional counter of skip reasons.
 
     Returns:
         Decoded text content or None if extraction fails or file
         is binary.
     """
+    counts: Counter[str] = skipped if skipped is not None else Counter()
     if not shutil.which("icat"):
+        counts["unreadable"] += 1
         return None
 
     cmd = ["icat"]
@@ -185,20 +193,36 @@ def _extract_and_read_file(
             capture_output=True,
             timeout=_ICAT_TIMEOUT,
             check=False,
+            stdin=subprocess.DEVNULL,
         )
     except (subprocess.TimeoutExpired, OSError):
+        counts["unreadable"] += 1
         return None
 
-    if proc.returncode != 0 or not proc.stdout:
+    if proc.returncode != 0:
+        counts["unreadable"] += 1
+        return None
+    if not proc.stdout:
+        counts["empty"] += 1
         return None
 
     if max_size_bytes is not None and len(proc.stdout) > max_size_bytes:
+        counts["too_large"] += 1
         return None
 
-    if _is_binary_content(proc.stdout):
-        return None
+    return _decode_text(proc.stdout, counts)
 
-    return proc.stdout[:_MAX_TEXT_BYTES].decode("utf-8", errors="replace")
+
+def _decode_text(data: bytes, counts: Counter[str]) -> str | None:
+    """Text of *data*, decoding UTF-16 (common for Windows configs); None if binary."""
+    encoding = detect_text_encoding(data[:4096])
+    if encoding == "binary" or (not encoding.startswith("utf-16") and _is_binary_content(data)):
+        counts["binary"] += 1
+        return None
+    if encoding.startswith("utf-16"):
+        text = data[: _MAX_TEXT_BYTES * 2].decode(encoding, errors="replace")
+        return text.lstrip("\ufeff")[:_MAX_TEXT_BYTES]
+    return data[:_MAX_TEXT_BYTES].decode("utf-8", errors="replace")
 
 
 def _find_matching_tree_files(
@@ -224,18 +248,24 @@ def _find_matching_tree_files(
     return matches
 
 
-def _read_tree_file(path: Path, max_size_bytes: int | None = None) -> str | None:
+def _read_tree_file(
+    path: Path, max_size_bytes: int | None = None, skipped: Counter[str] | None = None
+) -> str | None:
     """Read a collected text file; same filters as ``_extract_and_read_file``."""
+    counts: Counter[str] = skipped if skipped is not None else Counter()
     try:
         if max_size_bytes is not None and path.stat().st_size > max_size_bytes:
+            counts["too_large"] += 1
             return None
         with path.open("rb") as f:
-            data = f.read(_MAX_TEXT_BYTES + 1)
+            data = f.read(_MAX_TEXT_BYTES * 2 + 2)
     except OSError:
+        counts["unreadable"] += 1
         return None
-    if not data or _is_binary_content(data):
+    if not data:
+        counts["empty"] += 1
         return None
-    return data[:_MAX_TEXT_BYTES].decode("utf-8", errors="replace")
+    return _decode_text(data, counts)
 
 
 @mcp.tool()
@@ -346,17 +376,19 @@ def index_app_files(
     files_indexed = 0
     total_windows = 0
     sample_files: list[str] = []
-    skipped_binary = 0
+    skipped: Counter[str] = Counter()
 
     for inode_str, rel_path, offset in capped:
+        before = sum(skipped.values())
         if triage:
-            content = _read_tree_file(Path(inode_str), max_file_size_kb * 1024)
+            content = _read_tree_file(Path(inode_str), max_file_size_kb * 1024, skipped)
         else:
             content = _extract_and_read_file(
-                image_path, inode_str, offset, max_file_size_kb * 1024
+                image_path, inode_str, offset, max_file_size_kb * 1024, skipped
             )
         if content is None:
-            skipped_binary += 1
+            if sum(skipped.values()) == before:
+                skipped["binary"] += 1
             continue
 
         files_extracted += 1
@@ -382,13 +414,26 @@ def index_app_files(
         "files_capped_at": max_files if len(all_matches) > max_files else None,
         "files_extracted": files_extracted,
         "files_indexed": files_indexed,
-        "files_skipped_binary": skipped_binary,
+        "files_skipped_binary": skipped["binary"],
+        "files_skipped_too_large": skipped["too_large"],
+        "files_unreadable": skipped["unreadable"],
+        "files_empty": skipped["empty"],
         "windows_indexed": total_windows,
         "source_prefix": source_name,
         "sample_files": sample_files,
         "pattern": directory_pattern,
         "extensions_used": sorted(ext_set),
     }
+    if len(all_matches) > max_files:
+        results["note"] = (
+            f"Only the first {max_files} of {len(all_matches)} matching files were read; "
+            "raise max_files or narrow directory_pattern for the rest."
+        )
+    if skipped["unreadable"]:
+        results["tool_warning"] = (
+            f"{skipped['unreadable']} file(s) could not be read out of the image: their "
+            "content is missing from the index, not absent from the system."
+        )
 
     return tool_response(
         tc_id,

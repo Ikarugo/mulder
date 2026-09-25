@@ -18,11 +18,17 @@ from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
     _FILE_LIST_CAP,
-    _PREVIEW_CHAR_LIMIT,
+    ToolRun,
     adaptive_timeout,
     error_response,
+    failure_key,
     make_tool_call_id,
+    previous_failure,
+    remember_failure,
+    repeated_failure_response,
     require_binary,
+    run_failure_response,
+    run_tool,
     sources_already_indexed,
     tool_response,
 )
@@ -45,6 +51,8 @@ _SCALPEL_TIMEOUT = 1800
 _PHOTOREC_TIMEOUT = 3600
 _MAX_FEATURE_FILE_SIZE = 256 * 1024 * 1024  # 256 MiB read cap per feature file
 _MIN_FREE_SPACE_BYTES = 1024 * 1024 * 1024  # 1 GiB absolute minimum
+# scalpel with every file type commented out in scalpel.conf (the packaged default).
+_SCALPEL_NO_TYPES_RE = re.compile(r"didn't specify any file types|no file types", re.IGNORECASE)
 
 
 def _check_disk_space(image_path: str, multiplier: float = 0.1) -> str | None:
@@ -268,40 +276,49 @@ def _build_bulk_extractor_cmd(
     return cmd
 
 
-def _read_capped_feature_file(feature_file: Path) -> str | None:
-    """Read a single feature file, capped at ``_MAX_FEATURE_FILE_SIZE``.
+def _read_capped_feature_file(feature_file: Path) -> tuple[str | None, int]:
+    """Read a single feature file, capped at ``_MAX_FEATURE_FILE_SIZE`` bytes.
+
+    A file over the cap is cut at the last complete line before it.
 
     Args:
         feature_file: Path to a bulk_extractor feature file.
 
     Returns:
-        Stripped file content, or None on read failure or empty content.
+        ``(text, bytes_dropped)``: the stripped content (None on read failure
+        or empty content) and how many bytes of the file were not read.
     """
     try:
         file_size = feature_file.stat().st_size
-        if file_size > _MAX_FEATURE_FILE_SIZE:
-            logger.warning(
-                "Feature file %s is %d bytes; reading first %d only",
-                feature_file.name,
-                file_size,
-                _MAX_FEATURE_FILE_SIZE,
-            )
-        with open(feature_file, encoding="utf-8", errors="replace") as fh:
-            text = fh.read(_MAX_FEATURE_FILE_SIZE).strip()
+        with open(feature_file, "rb") as fh:
+            data = fh.read(_MAX_FEATURE_FILE_SIZE)
     except OSError:
-        return None
-    return text or None
+        return None, 0
+    dropped = 0
+    if file_size > len(data):
+        cut = data.rfind(b"\n")
+        if cut >= 0:
+            data = data[: cut + 1]
+        dropped = file_size - len(data)
+        logger.warning(
+            "Feature file %s is %d bytes; indexing first %d only",
+            feature_file.name,
+            file_size,
+            len(data),
+        )
+    text = data.decode("utf-8", errors="replace").strip()
+    return text or None, dropped
 
 
 def _stream_and_index_features(
     outdir: str,
     features: list[str] | None,
     image_path: str,
-) -> list[dict[str, object]]:
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Read, index, and discard each feature file sequentially.
 
     Bounds peak memory to a single feature file (capped at
-    ``_MAX_FEATURE_FILE_SIZE`` characters) rather than all combined.
+    ``_MAX_FEATURE_FILE_SIZE`` bytes) rather than all combined.
     Safely handles a missing or empty output directory so that partial
     results can be collected after a timeout.
 
@@ -311,12 +328,14 @@ def _stream_and_index_features(
         image_path: Disk image path for source registration.
 
     Returns:
-        List of per-feature index summary dicts.
+        ``(per_feature, truncated)``: per-feature index summary dicts, and
+        one entry per feature file that was cut before indexing.
     """
     results: list[dict[str, object]] = []
+    truncated: list[dict[str, object]] = []
     out_path = Path(outdir)
     if not out_path.is_dir():
-        return results
+        return results, truncated
     for feature_file in sorted(out_path.iterdir()):
         if not feature_file.is_file() or feature_file.suffix == ".xml":
             continue
@@ -326,16 +345,32 @@ def _stream_and_index_features(
         if features and stem not in features:
             continue
 
-        text = _read_capped_feature_file(feature_file)
+        text, dropped = _read_capped_feature_file(feature_file)
         if text is None:
             continue
 
         source_name = _FEATURE_SOURCE_MAP.get(stem, f"bulk.{stem}")
+        if dropped:
+            file_bytes = feature_file.stat().st_size
+            truncated.append(
+                {
+                    "feature": stem,
+                    "source_name": source_name,
+                    "file_bytes": file_bytes,
+                    "bytes_indexed": file_bytes - dropped,
+                    "bytes_dropped": dropped,
+                }
+            )
         summary = extract_and_index(text, source_name, image_path, "bulk_extractor")
         results.append(summary)
         del text
 
-    return results
+    return results, truncated
+
+
+def _incomplete_warning(run: ToolRun) -> str:
+    """Warning for a run that did not complete but left output files that were indexed."""
+    return f"{run.describe()}\nThe output written before that was indexed; it may be incomplete."
 
 
 @mcp.tool()
@@ -404,7 +439,8 @@ def run_bulk_extractor(
 
     if not force:
         existing = sources_already_indexed(["bulk."], evidence_path=image_path)
-        if existing:
+        partial = previous_failure(failure_key("run_bulk_extractor", image_path, "partial"))
+        if existing and partial is None:
             return tool_response(
                 tc_id,
                 "run_bulk_extractor",
@@ -451,38 +487,61 @@ def run_bulk_extractor(
             tc_id, "run_bulk_extractor", params, space_err, error_type="disk_space"
         )
 
+    memory_key = failure_key(
+        "run_bulk_extractor",
+        image_path,
+        ",".join(_resolve_scanners(scanners)) if scanners else "",
+        max_depth,
+    )
+    repeated = repeated_failure_response(tc_id, "run_bulk_extractor", params, memory_key, t0)
+    if repeated is not None:
+        return repeated
+
     timeout = adaptive_timeout(image_path, base=_BULK_TIMEOUT)
 
     with tempfile.TemporaryDirectory(prefix="mulder_bulk_") as tmpdir:
         cmd = _build_bulk_extractor_cmd(image_path, tmpdir, scanners, max_depth)
-        timed_out = False
+        run = run_tool(cmd, timeout=timeout)
 
-        try:
-            proc = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=timeout, check=False
+        if not run.ok and not run.timed_out:
+            logger.error("bulk_extractor failed: %s", run.describe())
+            return run_failure_response(
+                tc_id,
+                "run_bulk_extractor",
+                params,
+                run,
+                t0,
+                memory_key=memory_key,
+                suggestion=(
+                    "Nothing was indexed. Read the tool output above; fix the input or the "
+                    "scanner list and pass force=True to run it again."
+                ),
             )
-        except subprocess.TimeoutExpired:
-            timed_out = True
-            proc = None
+        if run.timed_out:
             logger.warning(
                 "bulk_extractor timed out after %ds on %s; salvaging partial results",
                 timeout,
                 image_path,
             )
 
-        if proc is not None and proc.returncode != 0:
-            stderr_hint = (proc.stderr or "")[:_PREVIEW_CHAR_LIMIT].strip()
-            logger.error("bulk_extractor exited %d: %r", proc.returncode, stderr_hint)
-            return error_response(
-                tc_id,
-                "run_bulk_extractor",
-                params,
-                f"bulk_extractor exited {proc.returncode}: {stderr_hint}",
-                error_type="extraction_failed",
-            )
+        results, truncated = _stream_and_index_features(tmpdir, features, image_path)
 
-        results = _stream_and_index_features(tmpdir, features, image_path)
+    if run.timed_out and not results:
+        return run_failure_response(
+            tc_id,
+            "run_bulk_extractor",
+            params,
+            run,
+            t0,
+            memory_key=memory_key,
+            context="bulk_extractor wrote no feature file before it was stopped",
+            suggestion=(
+                "Nothing was indexed. Retry with fewer scanners (scanners=[...]) or "
+                "max_depth=2, and force=True."
+            ),
+        )
 
+    partial_key = failure_key("run_bulk_extractor", image_path, "partial")
     total_windows = sum(cast(int, r.get("windows_indexed", 0)) for r in results)
     for r in results:
         r.pop("source_id", None)
@@ -493,12 +552,37 @@ def run_bulk_extractor(
         "total_windows_indexed": total_windows,
         "per_feature": results,
     }
-    if timed_out:
+    warnings: list[str] = []
+    if run.timed_out:
         response_data["partial"] = True
+        response_data["status"] = "partial"
         response_data["warning"] = (
             f"bulk_extractor timed out after {timeout}s; "
             f"indexed {len(results)} partial feature file(s)"
         )
+        warnings.append(
+            f"bulk_extractor timed out after {timeout}s: the {len(results)} bulk.* feature "
+            "source(s) indexed are incomplete (features found later in the image are "
+            "missing). A later run_bulk_extractor call on this image runs again instead "
+            "of skipping; use fewer scanners or max_depth=2 so it can finish."
+        )
+        # Sources from this run exist now; record that they are partial so the
+        # skip check does not treat them as a completed extraction.
+        remember_failure(partial_key, warnings[-1])
+    else:
+        remember_failure(partial_key, "")
+    if truncated:
+        response_data["truncated_features"] = truncated
+        cut = ", ".join(
+            f"{t['source_name']} ({t['bytes_dropped']} of {t['file_bytes']} bytes dropped)"
+            for t in truncated
+        )
+        warnings.append(
+            f"Feature files over {_MAX_FEATURE_FILE_SIZE // (1024 * 1024)} MiB were cut "
+            f"before indexing: {cut}. Features past the cut are not searchable."
+        )
+    if warnings:
+        response_data["tool_warning"] = "\n".join(warnings)
 
     return tool_response(
         tc_id,
@@ -554,30 +638,29 @@ def run_foremost(image_path: str) -> dict[str, object]:
 
     with tempfile.TemporaryDirectory(prefix="mulder_foremost_") as parent:
         outdir = os.path.join(parent, "output")
-        try:
-            subprocess.run(
-                ["foremost", "-i", image_path, "-o", outdir, "-T"],
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                "run_foremost",
-                params,
-                f"foremost timed out after {timeout}s",
-            )
+        run = run_tool(["foremost", "-i", image_path, "-o", outdir, "-T"], timeout=timeout)
 
         audit_text = ""
         for audit_file in Path(parent).rglob("audit.txt"):
             with contextlib.suppress(OSError):
                 audit_text += audit_file.read_text(encoding="utf-8", errors="replace")
 
+    if not run.ok and not audit_text.strip():
+        return run_failure_response(
+            tc_id,
+            "run_foremost",
+            params,
+            run,
+            t0,
+            context="foremost wrote no audit.txt",
+            suggestion="Nothing was indexed: this is not a carve that found no files.",
+        )
+
     summary = extract_and_index(
         audit_text or "No files carved", "foremost.audit", image_path, "foremost"
     )
+    if not run.ok:
+        summary["tool_warning"] = _incomplete_warning(run)
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_foremost", params, summary, "foremost.audit", elapsed)
 
@@ -634,32 +717,45 @@ def run_scalpel(image_path: str) -> dict[str, object]:
     with tempfile.TemporaryDirectory(prefix="mulder_scalpel_") as parent:
         outdir = os.path.join(parent, "output")
         cmd = ["scalpel", "-o", outdir, image_path]
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                "run_scalpel",
-                params,
-                f"scalpel timed out after {timeout}s",
-                error_type="timeout",
-            )
+        run = run_tool(cmd, timeout=timeout)
 
         audit_path = Path(outdir) / "audit.txt"
         audit_text = ""
         if audit_path.exists():
             audit_text = audit_path.read_text(errors="replace")
 
-        if not audit_text.strip():
-            audit_text = proc.stdout.strip() or "scalpel produced no output"
+    if not audit_text.strip() and _SCALPEL_NO_TYPES_RE.search(run.stdout + run.stderr):
+        return error_response(
+            tc_id,
+            "run_scalpel",
+            params,
+            "scalpel carved nothing: its configuration enables no file type. " + run.describe(),
+            (time.monotonic() - t0) * 1000,
+            error_type="tool_failed",
+            suggestion=(
+                "Uncomment the wanted file types in /etc/scalpel/scalpel.conf, or use "
+                "run_foremost / run_photorec. Nothing was indexed."
+            ),
+        )
+    if not audit_text.strip() and (not run.ok or not run.has_output):
+        return run_failure_response(
+            tc_id,
+            "run_scalpel",
+            params,
+            run,
+            t0,
+            context="scalpel wrote no audit.txt",
+            suggestion="Nothing was indexed: this is not a carve that found no files.",
+        )
 
-        summary = extract_and_index(audit_text, "scalpel.audit", image_path, "scalpel")
+    summary = extract_and_index(
+        audit_text if audit_text.strip() else run.stdout.strip(),
+        "scalpel.audit",
+        image_path,
+        "scalpel",
+    )
+    if not run.ok:
+        summary["tool_warning"] = _incomplete_warning(run)
 
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_scalpel", params, summary, "scalpel.audit", elapsed)
@@ -709,24 +805,20 @@ def run_binwalk(target_path: str, extract: bool = False) -> dict[str, object]:
         cmd.append("-e")
     cmd.append(target_path)
 
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=adaptive_timeout(target_path),
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return error_response(
+    run = run_tool(cmd, timeout=adaptive_timeout(target_path))
+    if run.failed:
+        return run_failure_response(
             tc_id,
             "run_binwalk",
             params,
-            "binwalk timed out",
-            error_type="timeout",
+            run,
+            t0,
+            suggestion="Nothing was indexed: this is not a scan that found no signature.",
         )
 
-    summary = extract_and_index(proc.stdout.strip(), "binwalk.scan", target_path, "binwalk")
+    summary = extract_and_index(run.stdout.strip(), "binwalk.scan", target_path, "binwalk")
+    if (warning := run.warning()) is not None:
+        summary["tool_warning"] = warning
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_binwalk", params, summary, "binwalk.scan", elapsed)
 

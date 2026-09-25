@@ -79,6 +79,13 @@ fls file listing and MAC timeline. A collection only holds what the
 collector targeted: artifacts listed as MISSING cannot be analyzed, so do
 not plan tools for them.
 
+When a tool FAILED earlier in this case (an error with the program's own
+output), do not plan it again with the same arguments: the same input
+fails the same way and the call is refused. Plan another tool that reads
+the same facts (e.g. hayabusa or chainsaw when EvtxECmd fails, the MFT
+or USN journal when a file cannot be extracted) and let the analyst
+record the gap. A timeout is the exception: it may be retried.
+
 When the evidence lists SCRIPTS or PowerShell history
 (ConsoleHost_history.txt), plan read_evidence_file on each one of them
 that sits in a user-writable or unusual location (Users, Temp,

@@ -12,7 +12,6 @@ import json
 import logging
 import os
 import shutil
-import subprocess
 import tarfile
 import time
 import zipfile
@@ -32,7 +31,7 @@ from mulder.server.app import (
     slugify,
     validate_case_id,
 )
-from mulder.server.helpers import error_response, hash_output, make_tool_call_id
+from mulder.server.helpers import error_response, hash_output, make_tool_call_id, run_tool
 from mulder.server.tool_access import ALL_ROLES, Role, tool_access
 from mulder.triage import RAW_COLLECTION_ARTIFACT_TYPE, TRIAGE_ARTIFACT_TYPE, iter_tree_files
 from mulder.triage.prepare import MANIFEST_NAME, artifact_coverage, missing_artifacts
@@ -683,10 +682,52 @@ def _tar_member_count(archive: Path) -> int:
         return 0
 
 
+_ENCRYPTED_ARCHIVE_MARKERS = (
+    "wrong password",
+    "can not open encrypted archive",
+    "cannot open encrypted archive",
+    "enter password",
+)
+
+
+class ArchiveToolError(Exception):
+    """The archive extractor (7z) did not complete; the message is its own."""
+
+    def __init__(self, message: str, error_type: str, suggestion: str | None = None) -> None:
+        super().__init__(message)
+        self.error_type = error_type
+        self.suggestion = suggestion
+
+
 def _extract_7z(archive: Path, dest: Path) -> list[str]:
-    """Extract via the ``7z`` CLI to *dest*; return paths relative to *dest*."""
+    """Extract via the ``7z`` CLI to *dest*; return paths relative to *dest*.
+
+    Raises:
+        ArchiveToolError: 7z did not complete. The message carries 7z's own
+            output (``check=True`` used to surface only "returned non-zero
+            exit status 2"), and an encrypted archive is named as such.
+            Standard input is closed, so 7z cannot wait on a password prompt.
+    """
     cmd = ["7z", "x", f"-o{dest}", "-y", str(archive)]
-    subprocess.run(cmd, capture_output=True, timeout=_EXTRACT_TIMEOUT, check=True)
+    run = run_tool(cmd, timeout=_EXTRACT_TIMEOUT)
+    if not run.ok:
+        output = f"{run.stdout}\n{run.stderr}".lower()
+        if any(marker in output for marker in _ENCRYPTED_ARCHIVE_MARKERS):
+            raise ArchiveToolError(
+                f"{archive.name} is encrypted (password-protected); 7z could not extract it "
+                f"without the password. {run.describe()}",
+                "encrypted_archive",
+                "Ask for the archive password (common DFIR defaults: 'infected', 'malware'); "
+                "extract_archive does not take one, so extract it manually with 7z -p.",
+            )
+        partial = sum(1 for f in dest.rglob("*") if f.is_file())
+        message = run.describe()
+        if partial:
+            message += (
+                f"\n{partial} file(s) were written to {dest} before the failure; the "
+                "extraction is incomplete and was not marked as finished."
+            )
+        raise ArchiveToolError(message, run.error_type)
     return [str(f.relative_to(dest)) for f in dest.rglob("*") if f.is_file()]
 
 
@@ -865,6 +906,17 @@ def extract_archive(
                 (time.monotonic() - t0) * 1000,
                 error_type="unsupported_format",
             )
+    except ArchiveToolError as exc:
+        logger.error("Archive extraction failed for %r: %s", archive, exc)
+        return error_response(
+            tc_id,
+            "extract_archive",
+            params,
+            f"Extraction failed: {exc}",
+            (time.monotonic() - t0) * 1000,
+            error_type=exc.error_type,
+            suggestion=exc.suggestion,
+        )
     except Exception as exc:
         logger.error("Archive extraction failed for %r: %s", archive, exc)
         return error_response(

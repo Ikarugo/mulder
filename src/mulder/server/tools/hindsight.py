@@ -20,6 +20,8 @@ from mulder.server.helpers import (
     error_response,
     interpreter_candidates,
     make_tool_call_id,
+    run_failure_response,
+    run_tool,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
@@ -111,22 +113,7 @@ def run_hindsight(
             "jsonl",
         ]
 
-        try:
-            proc = subprocess.run(
-                cmd,
-                capture_output=True,
-                text=True,
-                timeout=_HINDSIGHT_TIMEOUT,
-                check=False,
-            )
-        except subprocess.TimeoutExpired:
-            return error_response(
-                tc_id,
-                tool_name,
-                params,
-                f"Hindsight timed out after {_HINDSIGHT_TIMEOUT}s",
-                elapsed_ms=(time.monotonic() - t0) * 1000,
-            )
+        run = run_tool(cmd, timeout=_HINDSIGHT_TIMEOUT)
 
         raw_output = ""
         artifact_counts: dict[str, int] = {}
@@ -144,8 +131,33 @@ def run_hindsight(
             except OSError:
                 continue
 
+        tool_warning: str | None = None
         if not raw_output.strip():
-            raw_output = proc.stdout.strip() or proc.stderr.strip()
+            if not run.ok:
+                # Hindsight did not complete and wrote no result file: what it
+                # printed is a traceback or usage text, not browser artifacts.
+                return run_failure_response(
+                    tc_id,
+                    tool_name,
+                    params,
+                    run,
+                    t0,
+                    context=f"Hindsight wrote no output for {profile_path}",
+                    suggestion=(
+                        "Check that profile_path is a Chromium profile directory (it holds "
+                        "History, Cookies, Preferences...) and that browser matches it."
+                    ),
+                )
+            raw_output = run.stdout.strip() or run.stderr.strip()
+            tool_warning = (
+                "Hindsight exited 0 but wrote no result file; its console output was indexed "
+                "instead. No browser artifacts were parsed: this is not evidence of absence."
+            )
+        elif not run.ok:
+            tool_warning = (
+                f"{run.describe()}\nThe result files written before that were indexed; "
+                "they may be incomplete."
+            )
 
     index_result = extract_and_index(
         raw_output,
@@ -162,5 +174,7 @@ def run_hindsight(
         "total_artifacts": sum(artifact_counts.values()),
         "index": index_result,
     }
+    if tool_warning:
+        result["tool_warning"] = tool_warning
 
     return tool_response(tc_id, tool_name, params, result, "hindsight.browser", elapsed)

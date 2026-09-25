@@ -32,13 +32,18 @@ from pathlib import Path
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
-    error_response,
     make_tool_call_id,
     sources_already_indexed,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
-from mulder.server.tools.extract.tsk import _cleanup_tsk_extract_dir, _tsk_extract_files
+from mulder.server.tools.extract.tsk import (
+    IcatFailure,
+    _cleanup_tsk_extract_dir,
+    _tsk_extract_files,
+    extraction_failure_fields,
+    nothing_extracted_response,
+)
 from mulder.triage import is_triage_root, iter_tree_files
 
 __all__ = ["parse_cryptnet_metadata", "parse_cryptnet_url_cache"]
@@ -114,7 +119,9 @@ def _profile_of(rel_lower: str) -> str:
     return "unknown"
 
 
-def _cache_files(image_path: str) -> tuple[list[tuple[str, Path]], str | None]:
+def _cache_files(
+    image_path: str, failures: list[IcatFailure] | None = None
+) -> tuple[list[tuple[str, Path]], str | None]:
     """``(relative path, readable file)`` for every CryptnetUrlCache file, plus a dir to clean."""
     if is_triage_root(image_path):
         files = [
@@ -123,12 +130,14 @@ def _cache_files(image_path: str) -> tuple[list[tuple[str, Path]], str | None]:
             if "/cryptneturlcache/" in "/" + rel.lower()
         ]
         return files, None
-    extracted = _tsk_extract_files(image_path, ["CryptnetUrlCache/"])
+    extracted = _tsk_extract_files(image_path, ["CryptnetUrlCache/"], failures=failures)
     cleanup = str(extracted[0][1].parent) if extracted else None
     return extracted, cleanup
 
 
-def _entries(files: list[tuple[str, Path]]) -> Iterator[dict[str, object]]:
+def _entries(
+    files: list[tuple[str, Path]], unreadable: frozenset[str] = frozenset()
+) -> Iterator[dict[str, object]]:
     by_rel = {rel.lower().replace("\\", "/"): path for rel, path in files}
     for rel_lower, path in sorted(by_rel.items()):
         if "/metadata/" not in rel_lower:
@@ -139,13 +148,17 @@ def _entries(files: list[tuple[str, Path]]) -> Iterator[dict[str, object]]:
             continue
         if meta is None:
             continue
-        content = by_rel.get(rel_lower.replace("/metadata/", "/content/"))
+        content_rel = rel_lower.replace("/metadata/", "/content/")
+        content = by_rel.get(content_rel)
         entry: dict[str, object] = {
             **meta,
             "profile": _profile_of(rel_lower),
             "metadata_file": rel_lower,
             "content_present": content is not None,
         }
+        if content is None and content_rel in unreadable:
+            # Present in the image but unreadable: not the same as deleted.
+            entry["content_unreadable"] = True
         if content is not None:
             try:
                 blob = content.read_bytes()
@@ -214,21 +227,23 @@ def parse_cryptnet_url_cache(image_path: str, force: bool = False) -> dict[str, 
                 0.0,
             )
 
-    files, cleanup = _cache_files(image_path)
+    failures: list[IcatFailure] = []
+    files, cleanup = _cache_files(image_path, failures)
+    unreadable = frozenset(f.path.lower().replace("\\", "/") for f in failures)
     try:
-        entries = list(_entries(files))
+        entries = list(_entries(files, unreadable))
     finally:
         if cleanup:
             _cleanup_tsk_extract_dir(cleanup)
 
     if not entries:
-        return error_response(
+        return nothing_extracted_response(
             tc_id,
             "parse_cryptnet_url_cache",
             params,
+            t0,
             "No CryptnetUrlCache MetaData files found (not collected, or cache empty)",
-            (time.monotonic() - t0) * 1000,
-            error_type="artifact_missing",
+            failures,
         )
 
     entries.sort(key=lambda e: str(e.get("last_download_time") or ""))
@@ -255,9 +270,12 @@ def parse_cryptnet_url_cache(image_path: str, force: bool = False) -> dict[str, 
         summary["non_pki_not_listed"] = len(non_pki) - 25
     summary["indexed_as"] = SRC_CRYPTNET
     summary["hint"] = (
-        f"All {len(entries)} entries are indexed as '{SRC_CRYPTNET}'; "
-        "non-PKI downloads are listed here in full."
+        f"All {len(entries)} entries are indexed as '{SRC_CRYPTNET}'; the first 25 non-PKI "
+        "downloads are listed here (search the source for the others)."
     )
+    if failures:
+        summary.update(extraction_failure_fields(failures))
+        summary["tool_warning"] = summary["extraction_note"]
     # Returned in full (source=None): the non-PKI list is the finding, and the
     # indexed-source preview would cut it.
     return tool_response(

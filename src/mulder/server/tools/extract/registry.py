@@ -5,7 +5,6 @@ from __future__ import annotations
 import logging
 import re
 import shutil
-import subprocess
 import tempfile
 import time
 from pathlib import Path
@@ -15,20 +14,25 @@ from mulder.patterns import fls_file_entries
 from mulder.server.app import mcp
 from mulder.server.extract_helpers import extract_and_index, mount_disk_image
 from mulder.server.helpers import (
-    _HINT_CHAR_LIMIT,
     TOOL_TIMEOUT,
     error_response,
     make_tool_call_id,
     require_binary,
+    run_tool,
     sources_already_indexed,
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.misc import _DOTNET, _find_ez_tool
 from mulder.server.tools.extract.tsk import (
+    BULK_ICAT_TIMEOUT,
+    IcatFailure,
     _cleanup_tsk_extract_dir,
     _collect_fls_chunks,
     _tsk_extract_files,
+    extraction_failure_fields,
+    failures_named,
+    icat_file,
 )
 from mulder.triage import descend_ci, is_triage_root, iter_tree_files
 
@@ -127,6 +131,7 @@ def _extract_username(path: str) -> str | None:
 def _discover_user_hives_via_tsk(
     image_path: str,
     offset: int | None = None,
+    failures: list[IcatFailure] | None = None,
 ) -> tuple[list[tuple[Path, str, str]], str | None]:
     """Discover per-user registry hives from a disk image.
 
@@ -199,28 +204,15 @@ def _discover_user_hives_via_tsk(
                 sanitized = rel_path.replace("/", "_").replace(chr(92), "_")
                 safe_name = f"{username}_{hive_type}_{sanitized}"
                 out_path = extract_dir / safe_name
-                cmd = ["icat"]
-                if chunk_offset > 0:
-                    cmd.extend(["-o", str(chunk_offset)])
-                cmd.extend([image_path, inode_str])
-                try:
-                    proc = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        timeout=30,
-                        check=False,
-                    )
-                    if proc.returncode == 0 and proc.stdout:
-                        out_path.write_bytes(proc.stdout)
-                        hives.append((out_path, hive_type, username))
-                except (subprocess.TimeoutExpired, OSError):
-                    logger.warning(
-                        "Failed to extract %s hive for user %s (inode %s)",
-                        hive_type,
-                        username,
-                        inode_str,
-                    )
-                    continue
+                ok, reason = icat_file(
+                    image_path, chunk_offset, inode_str, out_path, timeout=BULK_ICAT_TIMEOUT
+                )
+                if ok:
+                    hives.append((out_path, hive_type, username))
+                elif reason is not None:
+                    logger.warning("Cannot extract %s: %s", rel_path, reason)
+                    if failures is not None:
+                        failures.append(IcatFailure(rel_path, inode_str, reason))
 
     return hives, str(extract_dir) if extract_dir else None
 
@@ -264,7 +256,7 @@ def _discover_user_hives_in_tree(root: str) -> tuple[list[tuple[Path, str, str]]
 
 
 def _discover_hives_via_tsk(
-    image_path: str, offset: int | None = None
+    image_path: str, offset: int | None = None, failures: list[IcatFailure] | None = None
 ) -> tuple[list[tuple[Path, str]], str | None]:
     """Extract registry hives from a disk image using The Sleuth Kit.
 
@@ -282,10 +274,16 @@ def _discover_hives_via_tsk(
         extracted.
     """
     _ = offset
+    seen_failures: list[IcatFailure] = []
     extracted = _tsk_extract_files(
         image_path,
         ["config/SYSTEM", "config/SOFTWARE", "config/SAM", "config/SECURITY", "config/DEFAULT"],
+        failures=seen_failures,
     )
+    if failures is not None:
+        failures.extend(
+            failures_named(seen_failures, ("SYSTEM", "SOFTWARE", "SAM", "SECURITY", "DEFAULT"))
+        )
 
     extract_dir: str | None = str(extracted[0][1].parent) if extracted else None
     return _select_system_hives(extracted), extract_dir
@@ -320,6 +318,7 @@ def _run_regripper_plugins(
     rip_binary: str,
     hive_path: Path,
     plugins: list[str],
+    failures: list[str] | None = None,
 ) -> str:
     """Run RegRipper with specific plugins and concatenate output.
 
@@ -332,20 +331,16 @@ def _run_regripper_plugins(
         Concatenated stdout from all successful plugin invocations.
     """
     outputs: list[str] = []
+    failed: list[str] = []
     for plugin in plugins:
-        try:
-            proc = subprocess.run(
-                [rip_binary, "-r", str(hive_path), "-p", plugin],
-                capture_output=True,
-                text=True,
-                timeout=TOOL_TIMEOUT,
-                check=False,
-            )
-            if proc.stdout.strip():
-                outputs.append(proc.stdout.strip())
-        except (subprocess.TimeoutExpired, OSError):
-            logger.debug("RegRipper plugin %s timed out or failed", plugin)
-            continue
+        run = run_tool([rip_binary, "-r", str(hive_path), "-p", plugin], timeout=TOOL_TIMEOUT)
+        if run.has_output:
+            outputs.append(run.stdout.strip())
+        elif not run.ok:
+            logger.debug("RegRipper plugin %s failed: %s", plugin, run.describe())
+            failed.append(f"{plugin}: {run.describe()}")
+    if failed and failures is not None:
+        failures.extend(failed)
     return "\n\n".join(outputs)
 
 
@@ -374,56 +369,46 @@ def _parse_single_hive(
         a status dict with ``source_name`` and ``status`` keys on failure.
     """
     hive_status: str | None = None
+    notes: list[str] = []
 
     if plugins is None:
         dll = _find_ez_tool("RECmd.dll")
         if dll and require_binary(_DOTNET):
             with tempfile.TemporaryDirectory(prefix="mulder_reg_") as tmpdir:
-                cmd = [_DOTNET, dll, "-f", str(hive_path), "--csv", tmpdir]
-                try:
-                    proc = subprocess.run(
-                        cmd,
-                        capture_output=True,
-                        text=True,
-                        timeout=TOOL_TIMEOUT,
-                        check=False,
-                    )
-                except subprocess.TimeoutExpired:
-                    hive_status = "recmd_timeout"
-                else:
-                    combined = ""
-                    for csv_file in sorted(Path(tmpdir).rglob("*.csv")):
-                        combined += csv_file.read_text(encoding="utf-8", errors="replace")
-                    if combined:
-                        return extract_and_index(combined, source_name, image_path, "eztools")
-                    stderr_hint = (proc.stderr or "")[:_HINT_CHAR_LIMIT].strip()
-                    hive_status = (
-                        f"recmd_empty_output ({stderr_hint})"
-                        if stderr_hint
-                        else "recmd_empty_output"
-                    )
+                run = run_tool(
+                    [_DOTNET, dll, "-f", str(hive_path), "--csv", tmpdir], timeout=TOOL_TIMEOUT
+                )
+                combined = ""
+                for csv_file in sorted(Path(tmpdir).rglob("*.csv")):
+                    combined += csv_file.read_text(encoding="utf-8", errors="replace")
+                if combined:
+                    return extract_and_index(combined, source_name, image_path, "eztools")
+                # EZ tools print their errors on stdout: describe() keeps both streams.
+                hive_status = f"recmd_failed ({run.describe()})"
 
     rip = require_binary("rip.pl") or require_binary("regripper")
     if rip:
-        try:
-            if plugins:
-                combined_output = _run_regripper_plugins(rip, hive_path, plugins)
-            else:
-                proc = subprocess.run(
-                    [rip, "-r", str(hive_path), "-a"],
-                    capture_output=True,
-                    text=True,
-                    timeout=TOOL_TIMEOUT,
-                    check=False,
+        if plugins:
+            plugin_failures: list[str] = []
+            combined_output = _run_regripper_plugins(rip, hive_path, plugins, plugin_failures)
+            if plugin_failures:
+                notes.append(
+                    f"{len(plugin_failures)} of {len(plugins)} RegRipper plugins failed: "
+                    + "; ".join(plugin_failures[:3])
                 )
-                combined_output = proc.stdout.strip()
-            if combined_output:
-                return extract_and_index(combined_output, source_name, image_path, "regripper")
-            hive_status = "regripper_empty_output"
-        except subprocess.TimeoutExpired:
-            hive_status = "regripper_timeout"
-        except OSError as exc:
-            hive_status = f"regripper_error ({exc})"
+            rr_problem = "; ".join(plugin_failures[:3]) or "no plugin produced output"
+        else:
+            run = run_tool([rip, "-r", str(hive_path), "-a"], timeout=TOOL_TIMEOUT)
+            combined_output = run.stdout.strip()
+            rr_problem = run.describe()
+        if combined_output:
+            result = extract_and_index(combined_output, source_name, image_path, "regripper")
+            if notes:
+                result["notes"] = notes
+            return result
+        hive_status = (
+            f"{hive_status}; " if hive_status else ""
+        ) + f"regripper_failed ({rr_problem})"
     elif hive_status is None:
         has_recmd = bool(_find_ez_tool("RECmd.dll") and require_binary(_DOTNET))
         hive_status = (
@@ -431,8 +416,10 @@ def _parse_single_hive(
             if not has_recmd
             else "no_regripper_fallback (RECmd failed, RegRipper not on PATH)"
         )
+    else:
+        hive_status += "; RegRipper not installed for a fallback"
 
-    return {"source_name": source_name, "status": hive_status}
+    return {"source_name": source_name, "status": "error", "error": hive_status}
 
 
 def _summarize_hive_results(statuses: list[dict[str, Any]]) -> dict[str, Any]:
@@ -452,12 +439,24 @@ def _summarize_hive_results(statuses: list[dict[str, Any]]) -> dict[str, Any]:
     for r in statuses:
         if isinstance(r, dict):
             r.pop("source_id", None)
+    failed = [r for r in statuses if isinstance(r, dict) and r.get("status") == "error"]
+    parsed = [r for r in statuses if isinstance(r, dict) and r.get("status") != "error"]
 
-    return {
-        "hives_parsed": len(statuses),
+    summary: dict[str, Any] = {
+        "hives_parsed": len(parsed),
+        "hives_failed": len(failed),
         "total_windows_indexed": total_windows,
         "per_hive": statuses,
     }
+    if failed:
+        names = ", ".join(str(r.get("source_name")) for r in failed)
+        if parsed:
+            summary["status"] = "partial"
+            summary["tool_warning"] = f"{len(failed)} hive(s) could not be parsed: {names}"
+        else:
+            summary["status"] = "error"
+            summary["error_message"] = f"No hive could be parsed: {names}"
+    return summary
 
 
 @mcp.tool()
@@ -502,7 +501,12 @@ def run_registry_parser(
     }
 
     if not force:
-        existing = sources_already_indexed(["registry."], evidence_path=image_path)
+        # A request for one hive only skips when that hive is indexed: an
+        # earlier run that parsed SOFTWARE says nothing about SYSTEM.
+        prefixes = [f"registry.{hive.lower()}"] if hive else ["registry."]
+        existing = sources_already_indexed(prefixes, evidence_path=image_path)
+        if hive:
+            existing = [e for e in existing if e == f"registry.{hive.lower()}"]
         if existing:
             return tool_response(
                 tc_id,
@@ -517,7 +521,8 @@ def run_registry_parser(
                 0.0,
             )
 
-    discovered_tsk, tsk_extract_dir = _discover_hives_via_tsk(image_path)
+    failures: list[IcatFailure] = []
+    discovered_tsk, tsk_extract_dir = _discover_hives_via_tsk(image_path, failures=failures)
     if hive:
         discovered_tsk = [(p, n) for p, n in discovered_tsk if n == hive.lower()]
 
@@ -529,7 +534,7 @@ def run_registry_parser(
                 results.append(_parse_single_hive(hive_path, source_name, image_path))
 
             if include_user_hives and not hive:
-                user_results = _parse_all_user_hives(image_path)
+                user_results = _parse_all_user_hives(image_path, failures)
                 results.extend(user_results)
 
             elapsed = (time.monotonic() - t0) * 1000
@@ -537,7 +542,7 @@ def run_registry_parser(
                 tc_id,
                 "run_registry_parser",
                 params,
-                _summarize_hive_results(results),
+                _with_failures(_summarize_hive_results(results), failures),
                 "registry",
                 elapsed,
             )
@@ -571,7 +576,7 @@ def run_registry_parser(
                 results_mount.append(_parse_single_hive(hive_path, source_name, image_path))
 
             if include_user_hives and not hive:
-                user_results = _parse_all_user_hives(image_path)
+                user_results = _parse_all_user_hives(image_path, failures)
                 results_mount.extend(user_results)
 
             elapsed = (time.monotonic() - t0) * 1000
@@ -579,23 +584,49 @@ def run_registry_parser(
                 tc_id,
                 "run_registry_parser",
                 params,
-                _summarize_hive_results(results_mount),
+                _with_failures(_summarize_hive_results(results_mount), failures),
                 "registry",
                 elapsed,
             )
-    except RuntimeError:
-        pass
+    except RuntimeError as exc:  # MountError, or a FUSE failure while mounted
+        mount_error: str | None = str(exc)
+    else:
+        mount_error = None
 
+    reasons = []
+    if failures:
+        reasons.append(
+            "Sleuth Kit found hives it could not read: "
+            + "; ".join(f"{f.path}: {f.reason}" for f in failures[:5])
+        )
+    if mount_error:
+        reasons.append(f"The mount fallback failed: {mount_error}")
     return error_response(
         tc_id,
         "run_registry_parser",
         params,
-        "No registry hives found via TSK extraction or mount",
+        "No registry hives found via TSK extraction or mount"
+        + (". " + ". ".join(reasons) if reasons else ""),
         (time.monotonic() - t0) * 1000,
+        error_type="extraction_failed" if reasons else "artifact_missing",
     )
 
 
-def _parse_all_user_hives(image_path: str) -> list[dict[str, Any]]:
+def _with_failures(summary: dict[str, Any], failures: list[IcatFailure]) -> dict[str, Any]:
+    """Add the hives that exist in the image but could not be read to *summary*."""
+    if failures:
+        summary.update(extraction_failure_fields(failures))
+        if summary.get("status") != "error":
+            summary["status"] = "partial"
+            summary["tool_warning"] = "; ".join(
+                w for w in (summary.get("tool_warning"), summary["extraction_note"]) if w
+            )
+    return summary
+
+
+def _parse_all_user_hives(
+    image_path: str, failures: list[IcatFailure] | None = None
+) -> list[dict[str, Any]]:
     """Discover and parse all per-user registry hives from a disk image.
 
     Iterates over discovered NTUSER.DAT and UsrClass.dat files, parsing
@@ -609,7 +640,7 @@ def _parse_all_user_hives(image_path: str) -> list[dict[str, Any]]:
     Returns:
         List of per-hive result dicts (indexed results or error status).
     """
-    user_hives, user_extract_dir = _discover_user_hives_via_tsk(image_path)
+    user_hives, user_extract_dir = _discover_user_hives_via_tsk(image_path, failures=failures)
     if not user_hives:
         return []
 

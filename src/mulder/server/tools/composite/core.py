@@ -162,20 +162,35 @@ def _get_cached_sources() -> list[SourceRow]:
     return sources
 
 
+def _matches(source_name: str, source_prefix: str) -> bool:
+    return source_name == source_prefix or source_name.startswith(source_prefix + ".")
+
+
 def _source_exists(source_prefix: str) -> bool:
-    """Return True if any indexed source matches *source_prefix* exactly or as a prefix."""
+    """Return True if a source matching *source_prefix* holds indexed data.
+
+    A source with no lines is a run that indexed nothing, often a tool
+    failure recorded as a result. Counting it as present made composite
+    tools report "nothing found" for data that was never extracted.
+    """
     return any(
-        s.source_name == source_prefix or s.source_name.startswith(source_prefix + ".")
-        for s in _get_cached_sources()
+        _matches(s.source_name, source_prefix) and s.line_count > 0 for s in _get_cached_sources()
+    )
+
+
+def _empty_source_exists(source_prefix: str) -> bool:
+    """True if a source matching *source_prefix* was registered but holds no data."""
+    return any(
+        _matches(s.source_name, source_prefix) and s.line_count == 0 for s in _get_cached_sources()
     )
 
 
 def _find_matching_sources(source_prefix: str) -> list[str]:
-    """Return all source names that match *source_prefix* exactly or as a prefix."""
+    """Return the names of non-empty sources matching *source_prefix*."""
     return [
         s.source_name
         for s in _get_cached_sources()
-        if s.source_name == source_prefix or s.source_name.startswith(source_prefix + ".")
+        if _matches(s.source_name, source_prefix) and s.line_count > 0
     ]
 
 
@@ -193,11 +208,18 @@ def _check_missing_sources(
     """
     missing = []
     for src, cmd in required:
-        if src in _NETWORK_SOURCE_ALTERNATIVES:
-            if not any(_source_exists(alt) for alt in _NETWORK_SOURCE_ALTERNATIVES):
-                missing.append({"source": src, "suggestion": cmd})
-        elif not _source_exists(src):
-            missing.append({"source": src, "suggestion": cmd})
+        alternatives = (
+            _NETWORK_SOURCE_ALTERNATIVES if src in _NETWORK_SOURCE_ALTERNATIVES else (src,)
+        )
+        if any(_source_exists(alt) for alt in alternatives):
+            continue
+        entry = {"source": src, "suggestion": cmd}
+        if any(_empty_source_exists(alt) for alt in alternatives):
+            entry["reason"] = (
+                "The extraction ran but indexed nothing: either it found nothing or it "
+                "failed. Check that tool's result before treating this as a negative."
+            )
+        missing.append(entry)
     return missing
 
 
@@ -348,7 +370,10 @@ def _build_coverage_metadata(
         when some required sources are not yet indexed.
     """
     all_sources = _get_cached_sources()
-    source_names: set[str] = {s.source_name for s in all_sources}
+    # Empty sources (a run that indexed nothing, often a failed one) are not
+    # evidence that was checked: list them apart instead of as "queried".
+    source_names: set[str] = {s.source_name for s in all_sources if s.line_count > 0}
+    empty_names = sorted({s.source_name for s in all_sources if s.line_count == 0})
     all_names = sorted(source_names)
     queried: list[str] = []
     not_indexed: list[str] = []
@@ -383,6 +408,17 @@ def _build_coverage_metadata(
             f"Queried {len(queried_unique)}/{len(all_names)} sources. "
             f"Sources not yet indexed: {sorted(not_indexed)}"
         )
+    empty_required = [
+        n for n in empty_names if any(n == p or n.startswith(p + ".") for p in required_sources)
+    ]
+    if empty_required:
+        meta["sources_empty"] = empty_required
+        empty_note = (
+            "Sources registered but empty (the extraction found nothing or failed; check "
+            f"its result before treating this as a negative): {empty_required}"
+        )
+        previous = str(meta.get("coverage_note", ""))
+        meta["coverage_note"] = f"{previous} {empty_note}" if previous else empty_note
     return meta
 
 
