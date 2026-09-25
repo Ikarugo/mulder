@@ -601,7 +601,7 @@ Runs a full multi-phase forensic investigation.
 | `--executor-model` | `claude-haiku-4-5` | Model for executor agents |
 | `--analyst-model` | `claude-opus-4-6` | Model for analyst agents |
 | `--config` | None | YAML config file for models and settings |
-| `--effort` | `max` | Effort level (`max`, `xhigh`, `high`) |
+| `--effort` | `max` | Effort level (`max`, `xhigh`, `high`, `medium`, `low`) |
 | `--no-thinking` | off | Disable extended thinking for all queries; overrides `--effort` |
 | `--workers` | `3` | Max concurrent extraction sessions |
 | `--max-compactions` | `3` | Continuation sessions allowed per role session after context exhaustion; `0` disables. Also settable via `MULDER_MAX_COMPACTIONS` (the flag wins) |

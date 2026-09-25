@@ -90,7 +90,7 @@ class Orchestrator:
             cwd: Working directory for agent sessions.
             model_config: Model identifiers for each agent role. Uses
                 built-in defaults when not provided.
-            effort: Effort level (max, xhigh, high).
+            effort: Effort level (max, xhigh, high, medium, low).
             env: Additional environment variables for agent sessions.
             parallel_extractions: Maximum number of extraction sessions
                 to run concurrently.

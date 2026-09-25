@@ -17,7 +17,7 @@ from mulder.orchestrator.types import EffortLevel
 
 
 @pytest.mark.parametrize("no_thinking", [False, True])
-@pytest.mark.parametrize("effort", ["max", "xhigh", "high"])
+@pytest.mark.parametrize("effort", ["max", "xhigh", "high", "medium", "low"])
 @pytest.mark.asyncio
 async def test_thinking_options_reach_both_queries(
     tmp_path: Path, no_thinking: bool, effort: EffortLevel
