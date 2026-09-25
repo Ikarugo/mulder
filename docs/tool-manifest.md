@@ -635,6 +635,19 @@ Parse every profile's `AppData\LocalLow\Microsoft\CryptnetUrlCache`: the URL, do
 
 **Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
 
+### parse_scheduled_tasks
+
+Parse every scheduled task twice: from its XML under `Windows\System32\Tasks` (command line, arguments, working directory, COM handler, triggers, principal, author, declared date, Hidden/Enabled settings) and from the SOFTWARE hive's `Microsoft\Windows NT\CurrentVersion\Schedule\TaskCache` (GUID, `SD`, UTC registration, last-run and last-success times and last result from `DynamicInfo`, actions decoded from the binary `Actions` value, trigger kind from `Boot`/`Logon`/`Plain`/`Maintenance`). Each task becomes one line of `tasks.scheduled`. A task is flagged `[REVIEW: reasons]` when it has no `SD` value (hidden from schtasks, the Tarrask technique), has registry actions that differ from its XML, is registered without its XML, has an inconsistent TaskCache entry (Tree and Tasks not pointing to each other), runs a script interpreter with script, download or evasion arguments, runs from a user-writable path, or has an XML without registration; `to_review` lists them in that order of seriousness, then the tasks that only sit outside `\Microsoft\` (`[NOTE: ...]`). A task file that exists but could not be read is reported as not read, never as missing, and a SOFTWARE hive without TaskCache makes no task "unregistered". A dirty SOFTWARE hive (unapplied transaction logs) is reported. On disk images, deleted task files are not read as live ones. Task folders found under longer paths (staged copies), `Tasks_Migrated` (pre-upgrade copies) and legacy `Windows\Tasks\*.job` files are listed, not parsed.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run extraction even if the source already exists |
+
+**Returns:** `tasks`, `from_xml`, `from_taskcache`, `flagged_review`, `software_hive`, `to_review[]` (up to 40, most serious first, in full: task, reasons, notes, actions, triggers, principal, UTC times, GUID, XML file), `indexed_as` (tasks.scheduled)
+
+**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
+
 ### parse_windows_search
 
 Parse the Windows Search index: `ProgramData\Microsoft\Search\Data\Applications\Windows\Windows.edb` (ESE) or `Windows.db` (SQLite, Windows 11). Each indexed item becomes one line of `windows.search`: path, dates, size, type, owner, title, author, e-mail sender and recipients, contact details, content summary, Timeline activity, and every other property except known noise. Deleted files: Windows 10 marks their records deleted (not read); on Windows 11, records still in the main database behind the `-wal` are recovered and flagged.

@@ -51,7 +51,8 @@ When the evidence includes a DISK IMAGE, always plan:
     run_registry_parser, run_prefetch_parser, run_amcache_parser,
     run_shimcache_parser, run_mft_parser, run_usn_parser,
     run_lnk_parser, run_jumplist_parser, run_shellbags_parser,
-    run_srum_parser, parse_cryptnet_url_cache, parse_windows_search
+    run_srum_parser, parse_cryptnet_url_cache, parse_windows_search,
+    parse_scheduled_tasks
   Linux: run_zircolite (Auditd/Sysmon Sigma), log parsers for
     syslog/auth/journal, run_chkrootkit
   macOS: run_plaso (unified log timeline), parse_plist
@@ -66,6 +67,8 @@ the Windows artifact parsers with image_path set to that directory:
   run_shellbags_parser, run_srum_parser (user and file activity)
 - parse_cryptnet_url_cache (files downloaded with certutil or CryptAPI)
 - parse_windows_search (every file, e-mail and contact Windows indexed)
+- parse_scheduled_tasks (every scheduled task: command line, triggers,
+  account, registration and last-run times)
 - run_evtx_parser, then run_hayabusa and run_chainsaw on the same path
 - query_registry_value for the timezone and system baseline (see
   ARTIFACT AWARENESS below)
@@ -154,6 +157,11 @@ question applies, on a disk image or a triage collection):
 - query_sqlite_file: SQLite databases present as files (browser
   history, Windows Timeline ActivitiesCache.db, chat apps). Call it
   with an empty query first to list tables and columns.
+- parse_scheduled_tasks: every scheduled task from its XML and from the
+  SOFTWARE hive's TaskCache: command line, triggers, account, UTC
+  registration and last-run times. Flags tasks hidden from schtasks,
+  tasks whose XML was deleted, and registry actions that differ from
+  the XML.
 - parse_cryptnet_url_cache: URLs, times, sizes and SHA-256 of files
   fetched through CryptAPI, including `certutil -urlcache -f` downloads
   whose tool or output was later deleted. Entries not served by a

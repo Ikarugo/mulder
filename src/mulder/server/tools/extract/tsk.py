@@ -598,6 +598,7 @@ def _tsk_extract_files(
     predicate: Callable[[str], bool] | None = None,
     failures: list[IcatFailure] | None = None,
     icat_timeout: int = BULK_ICAT_TIMEOUT,
+    include_deleted: bool = True,
 ) -> list[tuple[str, Path]]:
     """Extract files from a disk image via TSK fls + icat.
 
@@ -618,6 +619,9 @@ def _tsk_extract_files(
         failures: When given, receives an :class:`IcatFailure` for every
             matching file that icat could not read.
         icat_timeout: Seconds allowed per file (large databases need more).
+        include_deleted: When False, deleted fls entries are skipped: for
+            parsers that must not mistake a deleted file for a live one
+            (the tuples returned do not say which is which).
 
     Returns:
         List of ``(relative_path, extracted_path)`` tuples.
@@ -642,6 +646,8 @@ def _tsk_extract_files(
                 rel_lower = rel_path.lower().replace("\\", "/")
 
                 if not any(pat.lower() in rel_lower for pat in path_patterns):
+                    continue
+                if entry.deleted and not include_deleted:
                     continue
                 if predicate is not None and not predicate(rel_lower):
                     continue

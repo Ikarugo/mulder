@@ -15,6 +15,7 @@ from mulder.server.tools.extract import (  # noqa: F401
     plaso,
     registry,
     registry_query,
+    scheduled_tasks,
     tsk,
     user_activity,
     volatility,

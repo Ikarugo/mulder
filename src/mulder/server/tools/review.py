@@ -58,6 +58,7 @@ _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
         "run_srum_parser",
         "parse_cryptnet_url_cache",
         "parse_windows_search",
+        "parse_scheduled_tasks",
         "run_evtx_parser",
         "run_hayabusa",
         "yara_scan_files",

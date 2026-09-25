@@ -60,6 +60,10 @@ _PERSISTENCE_EXECUTABLES: set[str] = {
     "bitsadmin.exe",
 }
 
+#: Written by parse_scheduled_tasks: one task per line, "[REVIEW: ...]" on
+#: the ones worth a look.
+_SRC_TASKS = "tasks.scheduled"
+
 _STARTUP_PATH_PATTERNS: tuple[str, ...] = (
     "\\startup\\",
     "\\start menu\\programs\\startup\\",
@@ -222,6 +226,28 @@ def _collect_scheduled_task_persistence(
             )
 
 
+def _collect_task_definitions(
+    mechanisms: list[dict[str, Any]],
+    sub_call_ids: list[str],
+) -> None:
+    """Scheduled tasks that parse_scheduled_tasks flagged for review, with their actions."""
+    if not _source_exists(_SRC_TASKS):
+        return
+    wins, tc_id = _query_source(_SRC_TASKS, "find_persistence_mechanisms")
+    sub_call_ids.append(tc_id)
+    for w in wins:
+        for line in w.raw_text.splitlines():
+            if "[REVIEW:" in line:
+                mechanisms.append(
+                    {
+                        "type": "scheduled_task_definition",
+                        "source": _SRC_TASKS,
+                        "evidence_text": line.strip()[:_PREVIEW_CHAR_LIMIT],
+                        "source_window": slim_window(w),
+                    }
+                )
+
+
 def _collect_startup_files(
     mechanisms: list[dict[str, Any]],
     sub_call_ids: list[str],
@@ -258,8 +284,10 @@ def find_persistence_mechanisms() -> dict[str, object]:
     Userinit, AppInit_DLLs, etc.), cross-references with Volatility service
     scan output, checks event logs for service installation and scheduled
     task events, queries EZ Tools shimcache/amcache/prefetch for execution
-    of persistence-related tools, and inspects TSK file listings and the
-    Plaso timeline for modifications to startup directories.  Read-only.
+    of persistence-related tools, lists the scheduled tasks that
+    parse_scheduled_tasks flagged for review, and inspects TSK file
+    listings and the Plaso timeline for modifications to startup
+    directories.  Read-only.
     """
     ctx = get_ctx()
     composite_id = make_tool_call_id()
@@ -273,6 +301,7 @@ def find_persistence_mechanisms() -> dict[str, object]:
     _collect_startup_dir_modifications(mechanisms, sub_call_ids)
     _collect_ez_execution_persistence(mechanisms, sub_call_ids)
     _collect_scheduled_task_persistence(mechanisms, sub_call_ids)
+    _collect_task_definitions(mechanisms, sub_call_ids)
     _collect_startup_files(mechanisms, sub_call_ids)
 
     missing = _check_missing_sources(
@@ -283,6 +312,7 @@ def find_persistence_mechanisms() -> dict[str, object]:
             ("ez.shimcache", "run_shimcache_parser('<image_path>')"),
             ("ez.amcache", "run_amcache_parser('<image_path>')"),
             ("ez.prefetch", "run_prefetch_parser('<image_path>')"),
+            (_SRC_TASKS, "parse_scheduled_tasks('<image_path>')"),
         ]
     )
 

@@ -205,6 +205,12 @@ plan request):
   from the index does not prove the file never existed.
 - query_ese_database: read an ESE database file (WebCacheV01.dat,
   .edb files): list its tables, then read one table in pages.
+- parse_scheduled_tasks: every scheduled task (command line and
+  arguments, triggers, account, author, UTC registration and last-run
+  times). Use it whenever persistence or a task name comes up: the
+  exact command of a task is in its line of tasks.scheduled, not to be
+  inferred from timing. Tasks flagged [REVIEW: ...] are listed in
+  `to_review`.
 - parse_cryptnet_url_cache: files fetched through CryptAPI, including
   `certutil -urlcache -f` downloads (URL, time, size, SHA-256 of the
   cached copy). Use it when certutil, a LOLBin download or a missing
