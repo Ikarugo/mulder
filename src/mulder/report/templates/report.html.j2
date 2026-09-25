@@ -749,7 +749,7 @@ table.data-table code { font-family: var(--mono); font-size: 0.78em; color: var(
     <table class="data-table">
       <thead><tr><th>File</th><th>SHA-256</th><th>Size</th></tr></thead>
       <tbody>
-        {% for e in evidence_integrity %}
+        {% for e in evidence_integrity[:50] %}
         <tr>
           <td class="mono" style="font-size:0.75rem;">{{ e.file_path | basename }}</td>
           <td class="mono" style="font-size:0.72rem;user-select:all;">{{ e.sha256 }}</td>
@@ -758,6 +758,9 @@ table.data-table code { font-family: var(--mono); font-size: 0.78em; color: var(
         {% endfor %}
       </tbody>
     </table>
+    {% if evidence_integrity | length > 50 %}
+    <div style="padding:0.75rem 1.25rem;color:var(--text-muted)">The {{ evidence_integrity | length - 50 }} other hashes are in the <code>evidence_registry</code> table of the case database (and, for collections prepared with <code>mulder prepare-triage</code>, in their <code>TRIAGE_MANIFEST.json</code>).</div>
+    {% endif %}
   </div>
 </div>
 {% endif %}

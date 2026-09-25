@@ -56,6 +56,7 @@ _EVIDENCE_TOOL_MAP: dict[str, list[str]] = {
         "run_jumplist_parser",
         "run_shellbags_parser",
         "run_srum_parser",
+        "parse_cryptnet_url_cache",
         "run_evtx_parser",
         "run_hayabusa",
         "yara_scan_files",

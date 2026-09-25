@@ -48,6 +48,7 @@ _SRC_MODULES = _sn.SRC_MODULES
 _SRC_MODSCAN = _sn.SRC_MODSCAN
 _SRC_USERASSIST = _sn.SRC_USERASSIST
 _SRC_FILESCAN = _sn.SRC_FILESCAN
+_SRC_EZ_AMCACHE = _sn.SRC_EZ_AMCACHE
 
 _RAW_TEXT_SEARCH_CAP = 300
 _RAW_TEXT_CORRELATE_CAP = 200
@@ -58,6 +59,75 @@ def _truncated_window(w: Any, cap: int = _RAW_TEXT_SEARCH_CAP) -> dict[str, obje
     """Serialize a window with raw_text truncated for compact output."""
     d: dict[str, Any] = w.model_dump() if hasattr(w, "model_dump") else dict(w)
     truncate_raw_text(d, cap)
+    return d
+
+
+#: Characters shown around the first match of a search hit, and around up to
+#: ``_SNIPPET_EXTRA`` further matches.
+_SNIPPET_FIRST = 400
+_SNIPPET_MORE = 160
+_SNIPPET_EXTRA = 2
+_FTS_WORD_RE = re.compile(r"[A-Za-z0-9_\u0080-\U0010ffff]+")
+
+
+def _fts_terms_pattern(terms: list[str]) -> re.Pattern[str] | None:
+    """A case-insensitive regex matching the words of FTS queries in raw text."""
+    words = {
+        w
+        for term in terms
+        for w in _FTS_WORD_RE.findall(term)
+        if w.upper() not in {"AND", "OR", "NOT", "NEAR"}
+    }
+    if not words:
+        return None
+    alternation = "|".join(re.escape(w) for w in sorted(words, key=len, reverse=True))
+    return re.compile(alternation, re.IGNORECASE)
+
+
+def _snippet_window(w: Any, pattern: re.Pattern[str] | None) -> dict[str, object]:
+    """Serialize a search hit with excerpts centred on its matches.
+
+    A window holds up to a few thousand characters (many CSV rows, many
+    log lines). Showing its first characters, as search used to, hid the
+    matching row whenever it sat further down: on a real case the agent
+    searched Amcache for an executable, got the right window back, saw
+    only other programs in the preview and concluded the entry did not
+    exist. The excerpts here always contain the match; ``match_count``,
+    ``full_length`` and ``truncated`` say how much of the window is not
+    shown, and ``get_raw_output`` returns all of it.
+    """
+    d: dict[str, Any] = w.model_dump() if hasattr(w, "model_dump") else dict(w)
+    raw = str(d.get("raw_text", ""))
+    matches = list(pattern.finditer(raw)) if pattern is not None else []
+    d["full_length"] = len(raw)
+    d["match_count"] = len(matches)
+    if not matches:
+        truncate_raw_text(d, _RAW_TEXT_SEARCH_CAP)
+        d["truncated"] = len(raw) > _RAW_TEXT_SEARCH_CAP
+        return d
+
+    pieces: list[str] = []
+    covered_until = -1
+    for i, m in enumerate(matches):
+        if len(pieces) > _SNIPPET_EXTRA:
+            break
+        if m.start() < covered_until:
+            continue
+        width = _SNIPPET_FIRST if i == 0 else _SNIPPET_MORE
+        start = max(0, m.start() - width // 2)
+        end = min(len(raw), start + width)
+        start = max(0, end - width)
+        excerpt = raw[start:end]
+        prefix = f"[...{start} chars...] " if start > 0 else ""
+        pieces.append(prefix + excerpt)
+        covered_until = end
+    shown_end = covered_until
+    suffix = f" [...{len(raw) - shown_end} chars...]" if shown_end < len(raw) else ""
+    d["raw_text"] = " ".join(pieces) + suffix
+    d["match_offset"] = matches[0].start()
+    d["truncated"] = len(d["raw_text"]) < len(raw) or bool(suffix)
+    if d["truncated"]:
+        d["full_text_available"] = True
     return d
 
 
@@ -235,7 +305,7 @@ def _search_regex(
                 if len(matches) < max_results:
                     matches.append(
                         {
-                            "window": _truncated_window(w),
+                            "window": _snippet_window(w, pattern),
                             "source_name": src_name,
                         }
                     )
@@ -276,7 +346,10 @@ def _search_fts(
         exclude_source_names=exclude_sources,
         source_ids=source_ids,
     )
-    results = [{"window": _truncated_window(w), "source_name": sname} for w, sname in raw_matches]
+    pattern = _fts_terms_pattern(terms)
+    results = [
+        {"window": _snippet_window(w, pattern), "source_name": sname} for w, sname in raw_matches
+    ]
     return results, total_matches
 
 
@@ -320,8 +393,12 @@ def search(
     - Lateral movement: search(queries=['psexec', 'wmic', 'winrm'])
     - Time-bounded: search(query='4625', t_start='...', t_end='...')
 
-    Returns matching windows with source names, match counts, and
-    truncated raw text. Use get_raw_output(source_name) for full content.
+    Returns matching windows with source names and, for each, excerpts
+    of raw text centred on the matches, the number of matches in the
+    window (``match_count``) and its full length. When ``truncated`` is
+    true, part of the window is not shown: read it with
+    get_raw_output(source_name, after_id=window_id - 1, limit=1) before
+    concluding that something is absent.
 
     Args:
         query: Search term (substring match) or regex pattern.
@@ -406,14 +483,18 @@ def search(
         "has_more": total_matches > len(results),
         "remaining": remaining,
         "sources_matched": sources_matched,
-        "hint": "Use get_raw_output(source_name, offset, limit) to retrieve full evidence text.",
+        "hint": (
+            "Excerpts marked truncated are part of their window: read the whole window "
+            "with get_raw_output(source_name, after_id=window_id - 1, limit=1)."
+        ),
     }
     if remaining > 0:
         response["hint"] = (
             f"Showing {len(results)} of {total_matches} matches "
             f"({remaining} remaining). Increase max_results or narrow with "
             "source/time filters to see more. "
-            "Use get_raw_output(source_name, offset, limit) to retrieve full evidence text."
+            "Excerpts marked truncated are part of their window: read the whole window "
+            "with get_raw_output(source_name, after_id=window_id - 1, limit=1)."
         )
     return response
 
@@ -628,18 +709,24 @@ def parse_prefetch() -> dict[str, object]:
 @mcp.tool()
 @tool_access(Role.EXTRACT_ANALYST | Role.CROSS_EXECUTOR | Role.CROSS_ANALYST)
 def get_amcache() -> dict[str, object]:
-    """Return parsed AmCache / registry system hive data.
+    """Return the Amcache entries parsed by run_amcache_parser (source ``ez.amcache``).
 
-    Shows application execution history from the Windows registry.
-    This is a small artifact returned in full.  Read-only.
+    Amcache.hve records executables that ran or were installed, with full
+    path, SHA-1 (of the first 31 MB), size and timestamps. The response
+    is windowed: when ``truncated`` is set, find a specific program with
+    ``search(query=..., source='ez.amcache')`` or page through
+    ``get_raw_output('ez.amcache')`` before concluding it is absent.
+    Read-only.
     """
     ctx = get_ctx()
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
 
-    windows = ctx.db.get_windows_by_source("registry.system")
+    # This used to read registry.system: an agent asking for Amcache got the
+    # SYSTEM hive and, finding no SHA-1 there, concluded the entry was absent.
+    windows = ctx.db.get_windows_by_source(_SRC_EZ_AMCACHE)
     elapsed = (time.monotonic() - t0) * 1000
-    return windowed_response(tc_id, windows, "registry.system", "get_amcache", {}, elapsed)
+    return windowed_response(tc_id, windows, _SRC_EZ_AMCACHE, "get_amcache", {}, elapsed)
 
 
 @mcp.tool()
@@ -1002,8 +1089,9 @@ def decode_payload(
 ) -> dict[str, object]:
     """Safely decode an encoded payload found in evidence.
 
-    Supports base64, hex, UTF-16LE (PowerShell -EncodedCommand), and
-    Python pickle (inspection only, never executed).  Use this instead
+    Supports base64, hex, UTF-16LE (PowerShell -EncodedCommand), base64
+    wrapping zlib, raw DEFLATE (PowerShell ``DeflateStream`` droppers) or
+    gzip, and Python pickle (inspection only, never executed).  Use this instead
     of shell commands to decode suspicious strings.  Read-only and safe:
     no code is ever executed.
 
@@ -1147,6 +1235,11 @@ def decode_payload(
                 except Exception:
                     decoded = _safe_decode_bytes(raw_bytes)
                     layers.append({"encoding": "base64", "preview": decoded[:_HINT_CHAR_LIMIT]})
+            elif (inflated := _try_inflate(raw_bytes)) is not None:
+                method, plain = inflated
+                decoded = _safe_decode_bytes(plain)
+                layers.append({"encoding": "base64", "preview": f"(binary -> {method} detected)"})
+                layers.append({"encoding": method, "preview": decoded[:_PREVIEW_CHAR_LIMIT]})
             else:
                 decoded = _safe_decode_bytes(raw_bytes)
                 layers.append({"encoding": "base64", "preview": decoded[:_HINT_CHAR_LIMIT]})
@@ -1188,6 +1281,30 @@ def decode_payload(
         "status": "success",
         "results": results,
     }
+
+
+def _try_inflate(raw: bytes) -> tuple[str, bytes] | None:
+    """Decompress *raw* as zlib, raw DEFLATE or gzip; None if it is none of them.
+
+    PowerShell droppers commonly wrap their payload as
+    ``[IO.Compression.DeflateStream]`` over ``FromBase64String(...)``: raw
+    DEFLATE with no header. Only binary-looking input is tried, so plain
+    text is never mistaken for a stream.
+    """
+    if not raw or sum(32 <= b < 127 or b in (9, 10, 13) for b in raw[:256]) > 0.9 * min(
+        len(raw), 256
+    ):
+        return None
+    import zlib
+
+    for method, wbits in (("zlib", 15), ("deflate", -15), ("gzip", 31)):
+        try:
+            plain = zlib.decompress(raw, wbits)
+        except zlib.error:
+            continue
+        if plain:
+            return method, plain
+    return None
 
 
 def _detect_encoding(data: str) -> str:

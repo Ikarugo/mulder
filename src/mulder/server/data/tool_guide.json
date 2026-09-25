@@ -391,6 +391,18 @@
       "description": "Parse SRUDB.dat (per-application network and resource usage) with SrumECmd",
       "input": "Disk image or triage collection path",
       "related": ["parse_srum"]
+    },
+    {
+      "tool": "parse_cryptnet_url_cache",
+      "description": "Parse CryptnetUrlCache: URLs, times and hashes of files fetched through CryptAPI (certutil downloads), non-PKI entries flagged",
+      "input": "Disk image or triage collection path",
+      "related": ["run_usn_parser", "read_evidence_file"]
+    },
+    {
+      "tool": "extract_mft_record",
+      "description": "Read $MFT records by entry number or file name, with resident file content (small deleted or uncollected scripts)",
+      "input": "Disk image or triage collection path, entry or file_name",
+      "related": ["run_mft_parser", "decode_payload"]
     }
   ],
   "network": [

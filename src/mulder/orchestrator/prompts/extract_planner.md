@@ -51,7 +51,7 @@ When the evidence includes a DISK IMAGE, always plan:
     run_registry_parser, run_prefetch_parser, run_amcache_parser,
     run_shimcache_parser, run_mft_parser, run_usn_parser,
     run_lnk_parser, run_jumplist_parser, run_shellbags_parser,
-    run_srum_parser
+    run_srum_parser, parse_cryptnet_url_cache
   Linux: run_zircolite (Auditd/Sysmon Sigma), log parsers for
     syslog/auth/journal, run_chkrootkit
   macOS: run_plaso (unified log timeline), parse_plist
@@ -64,6 +64,7 @@ the Windows artifact parsers with image_path set to that directory:
   run_amcache_parser, run_shimcache_parser, run_mft_parser
 - run_usn_parser, run_lnk_parser, run_jumplist_parser,
   run_shellbags_parser, run_srum_parser (user and file activity)
+- parse_cryptnet_url_cache (files downloaded with certutil or CryptAPI)
 - run_evtx_parser, then run_hayabusa and run_chainsaw on the same path
 - query_registry_value for the timezone and system baseline (see
   ARTIFACT AWARENESS below)
@@ -135,6 +136,16 @@ question applies, on a disk image or a triage collection):
 - query_sqlite_file: SQLite databases present as files (browser
   history, Windows Timeline ActivitiesCache.db, chat apps). Call it
   with an empty query first to list tables and columns.
+- parse_cryptnet_url_cache: URLs, times, sizes and SHA-256 of files
+  fetched through CryptAPI, including `certutil -urlcache -f` downloads
+  whose tool or output was later deleted. Entries not served by a
+  certificate authority are flagged [NON-PKI DOWNLOAD].
+- extract_mft_record: the $MFT record of one file, by entry number or
+  name, with its resident content. NTFS keeps files under about 700
+  bytes (scripts, .bat droppers, configs) inside the record itself, so
+  a deleted or uncollected small script can often be read in full.
+  Plan it when the MFT or USN journal shows a small suspicious file
+  that is not in the collection.
 
 When execution artifacts (ShimCache, Prefetch, Amcache, UserAssist)
 show communication or networking tools were used:

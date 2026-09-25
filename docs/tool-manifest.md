@@ -618,6 +618,34 @@ Parse `Windows/System32/sru/SRUDB.dat` with SrumECmd, with the SOFTWARE hive for
 
 **Roles:** `EXTRACT_EXECUTOR`
 
+### parse_cryptnet_url_cache
+
+Parse every profile's `AppData\LocalLow\Microsoft\CryptnetUrlCache`: the URL, download time, Last-Modified header, ETag and size of each file fetched through CryptAPI, paired with the SHA-256 and type of the cached copy. `certutil -urlcache -f` downloads land here even when the tool or its output was deleted. Entries not served by a certificate authority are flagged `[NON-PKI DOWNLOAD]`.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run extraction even if sources already exist |
+
+**Returns:** `entries`, `non_pki_downloads[]` (up to 25, in full), `indexed_as` (cryptnet.urlcache)
+
+**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
+
+### extract_mft_record
+
+Read `$MFT` records by entry number or file name: names and parent entries, `$STANDARD_INFORMATION` times and every `$DATA` stream, alternate streams included. Resident content (files under about 700 bytes) is decoded as text or shown as hex and indexed as `mftrecord.<entry>`. Deleted and non-resident records are labelled as such.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| entry | int | no | `$MFT` entry number; -1 to look up `file_name` |
+| file_name | str | no | Case-insensitive exact file name |
+| max_matches | int | no | Maximum records for a name lookup (default 5) |
+
+**Returns:** `records[]`, `record_count`
+
+**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST` `CROSS_EXECUTOR`
+
 ### run_pasco
 
 Parse an Internet Explorer index.dat file for browser history.
@@ -1070,7 +1098,7 @@ Search all ingested evidence for keywords or regex patterns.
 | exclude_sources | list[str] \| None | no | Source prefixes to exclude |
 | evidence_path | str \| None | no | Evidence file path or basename; restrict to sources extracted from that image |
 
-**Returns:** `results[]` (each hit carries `source_path`), `total_matches`, `has_more`, `sources_matched[]`
+**Returns:** `results[]` (each hit carries `source_path`; its `window.raw_text` holds excerpts centred on the matches, with `match_count`, `match_offset`, `full_length` and `truncated`), `total_matches`, `has_more`, `sources_matched[]`
 
 **Roles:** `EXTRACT_ANALYST` `CROSS_EXECUTOR` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT`
 
@@ -1161,7 +1189,7 @@ Remove a bookmark by ID.
 
 ### decode_payload
 
-Safely decode an encoded payload found in evidence.
+Safely decode an encoded payload found in evidence. Base64 wrapping zlib, raw DEFLATE (PowerShell `DeflateStream` droppers) or gzip is inflated.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
@@ -1205,15 +1233,16 @@ List files and directories at a given path.
 
 ### read_evidence_file
 
-Read a text file from the evidence directory.
+Read a file from the evidence directory, decoding UTF-8, UTF-16 LE/BE (with or without BOM) and Windows-1252. Binary files return a hex preview and their ASCII/UTF-16 strings. Large files are read in pages.
 
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | file_path | str | no | Absolute path to the file |
 | max_bytes | int | no | Maximum bytes to read (default 1 MB) |
 | path | str | no | Alias for file_path |
+| offset | int | no | Byte offset to start from (default 0); use `next_offset` from the previous page |
 
-**Returns:** `content`, `file_size`, `truncated`, `is_binary`
+**Returns:** `content`, `file_size`, `offset`, `bytes_read`, `truncated`, `encoding`, `is_binary`, `next_offset` and a `note` when the file continues; for binary files `hex_preview`, `strings`, `strings_found`
 
 **Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST` `CROSS_EXECUTOR`
 
@@ -1574,11 +1603,11 @@ Return all parsed Windows Prefetch data.
 
 ### get_amcache
 
-Return parsed AmCache / registry system hive data.
+Return the Amcache entries parsed by `run_amcache_parser`.
 
 *No parameters.*
 
-**Returns:** windowed response from `registry.system`
+**Returns:** windowed response from `ez.amcache` (`truncated`, `windows_not_shown` and a hint when not everything is shown)
 
 **Roles:** `EXTRACT_ANALYST` `CROSS_EXECUTOR` `CROSS_ANALYST`
 

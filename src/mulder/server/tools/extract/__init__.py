@@ -3,9 +3,11 @@
 from mulder.server.tools.extract import (  # noqa: F401
     app_files,
     carving,
+    cryptnet,
     disk_pcap,
     evtx,
     masquerade,
+    mft_record,
     misc,
     optical,
     pcap,

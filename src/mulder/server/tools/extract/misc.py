@@ -159,6 +159,43 @@ register_cache_clear(_find_ez_tool.cache_clear)
 register_cache_clear(_dotnet_major.cache_clear)
 
 
+_EZ_FAILURE_HINTS: dict[str, str] = {
+    "dirty": (
+        "The database or hive is dirty (collected from a running system). It cannot be "
+        "repaired on Linux: on Windows, repair a copy with esentutl (/r then /p) for ESE "
+        "databases, or collect again; meanwhile rely on other sources and record the gap."
+    ),
+}
+
+
+def _tool_output_tail(stdout: str | None, stderr: str | None, lines: int = 15) -> str:
+    """The last non-empty lines a tool printed, for error messages."""
+    text = "\n".join(part for part in (stdout, stderr) if part)
+    kept = [line.rstrip() for line in text.splitlines() if line.strip()]
+    return "\n".join(kept[-lines:])[-2000:]
+
+
+def _get_kv(key: str) -> str | None:
+    from mulder.server.app import get_ctx, has_ctx
+
+    if not has_ctx():
+        return None
+    try:
+        value = get_ctx().db.get_kv(key)
+    except Exception:
+        return None
+    return str(value) if value else None
+
+
+def _set_kv(key: str, value: str) -> None:
+    from mulder.server.app import get_ctx, has_ctx
+
+    if not has_ctx():
+        return
+    with contextlib.suppress(Exception):
+        get_ctx().db.set_kv(key, value)
+
+
 def _run_ez_tool(
     dll_name: str,
     args: list[str],
@@ -201,11 +238,30 @@ def _run_ez_tool(
             error_type="binary_missing",
         )
 
+    failure_key = f"ez_failed:{tool_name}:{source_path}"
+    if not params.get("force"):
+        previous = _get_kv(failure_key)
+        if previous:
+            return error_response(
+                tc_id,
+                tool_name,
+                params,
+                f"{dll_name} already failed on this evidence: {previous}",
+                (time.monotonic() - t0) * 1000,
+                error_type="tool_failed",
+                suggestion=(
+                    "Running it again on the same input fails the same way. Record the gap, "
+                    "use other sources, or pass force=True after changing the input."
+                ),
+            )
+
     with tempfile.TemporaryDirectory(prefix="mulder_ez_") as tmpdir:
         cmd = [_DOTNET, dll, *args, "--csv", tmpdir]
 
         try:
-            subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout, check=False
+            )
         except subprocess.TimeoutExpired:
             return error_response(
                 tc_id, tool_name, params, f"{dll_name} timed out", (time.monotonic() - t0) * 1000
@@ -213,12 +269,23 @@ def _run_ez_tool(
 
         csv_files = list(Path(tmpdir).glob("*.csv"))
         if not csv_files:
+            output = _tool_output_tail(proc.stdout, proc.stderr)
+            message = f"{dll_name} produced no CSV output (exit code {proc.returncode})"
+            if output:
+                message += f". Tool output (last lines):\n{output}"
+            _set_kv(failure_key, message[:1000])
             return error_response(
                 tc_id,
                 tool_name,
                 params,
-                f"{dll_name} produced no CSV output",
+                message,
                 (time.monotonic() - t0) * 1000,
+                error_type="tool_failed",
+                suggestion=_EZ_FAILURE_HINTS.get(
+                    "dirty" if "dirty" in output.lower() else "",
+                    "Running it again on the same input fails the same way; "
+                    "read the tool output above.",
+                ),
             )
 
         combined_text = ""

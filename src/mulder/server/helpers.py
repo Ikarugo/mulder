@@ -241,11 +241,65 @@ _DEFAULT_WINDOW_CAP = 20
 _DEFAULT_TEXT_CAP = 300
 
 
+_PRINTABLE = frozenset(range(0x20, 0x7F)) | {0x09, 0x0A, 0x0D}
+
+
+def detect_text_encoding(sample: bytes) -> str:
+    """Name the text encoding of *sample*: utf-8, utf-16-le, utf-16-be, cp1252 or binary.
+
+    Windows writes many logs in UTF-16 (Defender MPDetection/MPLog,
+    PowerShell transcripts, setupapi, CryptnetUrlCache fields). Decoded as
+    UTF-8 they look binary, and a reader that stops there hides their
+    content: on a real case a certutil download line in the Defender log
+    went unread and the agent ruled the download out.
+    """
+    if not sample:
+        return "utf-8"
+    if sample.startswith(b"\xef\xbb\xbf"):
+        return "utf-8"
+    if sample.startswith(b"\xff\xfe"):
+        return "utf-16-le"
+    if sample.startswith(b"\xfe\xff"):
+        return "utf-16-be"
+    pairs = len(sample) // 2
+    if pairs >= 4:
+        even, odd = sample[0 : pairs * 2 : 2], sample[1 : pairs * 2 : 2]
+        if odd.count(0) >= 0.4 * pairs and sum(b in _PRINTABLE for b in even) >= 0.7 * pairs:
+            return "utf-16-le"
+        if even.count(0) >= 0.4 * pairs and sum(b in _PRINTABLE for b in odd) >= 0.7 * pairs:
+            return "utf-16-be"
+    try:
+        sample.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError as exc:
+        # A multi-byte character cut at the end of the sample is still UTF-8.
+        if exc.start >= len(sample) - 3:
+            return "utf-8"
+    controls = sum(b < 0x20 and b not in (0x09, 0x0A, 0x0D) for b in sample[:1024])
+    if controls > 0.02 * min(len(sample), 1024):
+        return "binary"
+    return "cp1252"
+
+
+_ASCII_STRING_RE = re.compile(rb"[\x20-\x7e]{6,}")
+_UTF16_STRING_RE = re.compile(rb"(?:[\x20-\x7e]\x00){6,}")
+
+
+def extract_strings(data: bytes, limit: int = 2000) -> list[str]:
+    """ASCII and UTF-16LE strings of at least 6 characters, in file order."""
+    found: list[tuple[int, str]] = [
+        (m.start(), m.group().decode("ascii")) for m in _ASCII_STRING_RE.finditer(data)
+    ]
+    found += [(m.start(), m.group().decode("utf-16-le")) for m in _UTF16_STRING_RE.finditer(data)]
+    found.sort()
+    return [text for _pos, text in found[:limit]]
+
+
 def truncate_raw_text(d: dict[str, Any], cap: int = _DEFAULT_TEXT_CAP) -> None:
     """Truncate ``raw_text`` in a window dict in-place if it exceeds *cap*."""
     raw = d.get("raw_text", "")
     if cap and len(raw) > cap:
-        d["raw_text"] = raw[:cap] + "..."
+        d["raw_text"] = raw[:cap] + f" [...{len(raw) - cap} more chars not shown...]"
         d["full_text_available"] = True
 
 
@@ -307,11 +361,17 @@ def windowed_response(
         "result_count": len(results),
         "total_windows": total,
     }
-    if total > cap:
+    text_cut = sum(1 for r in results if r.get("full_text_available"))
+    if total > cap or text_cut:
         resp["truncated"] = True
+        resp["windows_not_shown"] = max(0, total - cap)
+        resp["windows_with_text_cut"] = text_cut
         resp["hint"] = (
-            f"Showing {cap} of {total} windows. Use search(query, source='{source}') "
-            f"or get_raw_output('{source}') for the full data."
+            f"PARTIAL VIEW: {len(results)} of {total} windows shown"
+            + (f", {text_cut} of them cut to {text_cap} chars" if text_cut else "")
+            + ". Absence from this view proves nothing: use "
+            f"search(query, source='{source}') or get_raw_output('{source}') "
+            "for the full data."
         )
     return resp
 
@@ -560,6 +620,7 @@ TOOL_SOURCE_PREFIXES: dict[str, list[str]] = {
     "run_jumplist_parser": ["ez.jumplists"],
     "run_shellbags_parser": ["ez.shellbags"],
     "run_srum_parser": ["ez.srum"],
+    "parse_cryptnet_url_cache": ["cryptnet.urlcache"],
     "run_zircolite": ["zircolite."],
     "parse_autoruns": ["autoruns."],
 }
