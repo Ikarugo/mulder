@@ -13,6 +13,7 @@ import logging
 import shutil
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 from mulder.patterns import fls_file_entries
@@ -27,6 +28,7 @@ from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.tsk import (
     _collect_fls_chunks,
 )
+from mulder.triage import is_triage_root, iter_tree_files
 
 __all__ = ["index_app_files"]
 
@@ -199,6 +201,43 @@ def _extract_and_read_file(
     return proc.stdout[:_MAX_TEXT_BYTES].decode("utf-8", errors="replace")
 
 
+def _find_matching_tree_files(
+    root: str,
+    directory_pattern: str,
+    extensions: frozenset[str],
+) -> list[tuple[str, str, int]]:
+    """``_find_matching_files`` for a triage root, walking the directory.
+
+    Returns ``(absolute_path, relative_path, -1)`` tuples: the first element
+    stands in for the inode, and is read with ``_read_tree_file``.
+    """
+    glob_pattern = directory_pattern.lower().replace("\\", "/").rstrip("/") + "/*"
+    matches: list[tuple[str, str, int]] = []
+    for rel_path, abs_path in iter_tree_files(root):
+        rel_lower = rel_path.lower()
+        if not fnmatch.fnmatch(rel_lower, glob_pattern):
+            continue
+        dot_pos = rel_lower.rfind(".")
+        if dot_pos < 0 or rel_lower[dot_pos:] not in extensions:
+            continue
+        matches.append((str(abs_path), rel_path, -1))
+    return matches
+
+
+def _read_tree_file(path: Path, max_size_bytes: int | None = None) -> str | None:
+    """Read a collected text file; same filters as ``_extract_and_read_file``."""
+    try:
+        if max_size_bytes is not None and path.stat().st_size > max_size_bytes:
+            return None
+        with path.open("rb") as f:
+            data = f.read(_MAX_TEXT_BYTES + 1)
+    except OSError:
+        return None
+    if not data or _is_binary_content(data):
+        return None
+    return data[:_MAX_TEXT_BYTES].decode("utf-8", errors="replace")
+
+
 @mcp.tool()
 @tool_access(Role.EXTRACT_EXECUTOR)
 def index_app_files(
@@ -264,20 +303,23 @@ def index_app_files(
     else:
         ext_set = _DEFAULT_EXTENSIONS
 
-    chunk_groups = _collect_fls_chunks(image_path)
-    if not chunk_groups:
-        return error_response(
-            tc_id,
-            "index_app_files",
-            params,
-            "No TSK file listing available. Run run_fls on this image first.",
-            error_type="no_filelist",
-        )
-
+    triage = is_triage_root(image_path)
     all_matches: list[tuple[str, str, int]] = []
-    for chunks, offset in chunk_groups:
-        matches = _find_matching_files(chunks, directory_pattern, ext_set, offset)
-        all_matches.extend(matches)
+    if triage:
+        all_matches = _find_matching_tree_files(image_path, directory_pattern, ext_set)
+    else:
+        chunk_groups = _collect_fls_chunks(image_path)
+        if not chunk_groups:
+            return error_response(
+                tc_id,
+                "index_app_files",
+                params,
+                "No TSK file listing available. Run run_fls on this image first.",
+                error_type="no_filelist",
+            )
+        for chunks, offset in chunk_groups:
+            matches = _find_matching_files(chunks, directory_pattern, ext_set, offset)
+            all_matches.extend(matches)
 
     if not all_matches:
         elapsed = (time.monotonic() - t0) * 1000
@@ -307,7 +349,12 @@ def index_app_files(
     skipped_binary = 0
 
     for inode_str, rel_path, offset in capped:
-        content = _extract_and_read_file(image_path, inode_str, offset, max_file_size_kb * 1024)
+        if triage:
+            content = _read_tree_file(Path(inode_str), max_file_size_kb * 1024)
+        else:
+            content = _extract_and_read_file(
+                image_path, inode_str, offset, max_file_size_kb * 1024
+            )
         if content is None:
             skipped_binary += 1
             continue

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import re
+import shutil
 import subprocess
 import tempfile
 import time
@@ -29,6 +30,7 @@ from mulder.server.tools.extract.tsk import (
     _collect_fls_chunks,
     _tsk_extract_files,
 )
+from mulder.triage import descend_ci, is_triage_root, iter_tree_files
 
 __all__ = [
     "run_registry_parser",
@@ -90,14 +92,8 @@ def _discover_hives_from_mount(mount_path: Path) -> list[tuple[Path, str]]:
         FileNotFoundError: If the Windows registry config directory cannot
             be located within the mount.
     """
-    config_dir = None
-    for candidate in (
-        mount_path / "Windows" / "System32" / "config",
-        mount_path / "windows" / "system32" / "config",
-    ):
-        if candidate.is_dir():
-            config_dir = candidate
-            break
+    found = descend_ci(mount_path, ("Windows", "System32", "config"))
+    config_dir = found if found is not None and found.is_dir() else None
 
     if config_dir is None:
         raise FileNotFoundError("Registry config directory not found")
@@ -149,6 +145,9 @@ def _discover_user_hives_via_tsk(
         path for caller cleanup, or None when nothing was extracted.
     """
     _ = offset
+
+    if is_triage_root(image_path):
+        return _discover_user_hives_in_tree(image_path)
 
     chunk_groups = _collect_fls_chunks(image_path)
     if not chunk_groups:
@@ -226,6 +225,44 @@ def _discover_user_hives_via_tsk(
     return hives, str(extract_dir) if extract_dir else None
 
 
+def _user_hive_type(rel_lower: str) -> str | None:
+    """Return ``"ntuser"``/``"usrclass"`` for a per-user hive path, else None."""
+    if not any(p in rel_lower for p in ("documents and settings/", "users/")):
+        return None
+    if rel_lower.endswith("ntuser.dat"):
+        return "ntuser"
+    if rel_lower.endswith("usrclass.dat"):
+        return "usrclass"
+    return None
+
+
+def _discover_user_hives_in_tree(root: str) -> tuple[list[tuple[Path, str, str]], str | None]:
+    """``_discover_user_hives_via_tsk`` for a triage root: copy the hives, no TSK.
+
+    Same selection rules and output shape: each hive is copied into a
+    ``mulder_user_hives_*`` directory the caller deletes afterwards.
+    """
+    hives: list[tuple[Path, str, str]] = []
+    extract_dir: Path | None = None
+    for rel_path, src in iter_tree_files(root):
+        hive_type = _user_hive_type(rel_path.lower())
+        if hive_type is None:
+            continue
+        username = _extract_username(rel_path)
+        if not username:
+            continue
+        if extract_dir is None:
+            extract_dir = Path(tempfile.mkdtemp(prefix="mulder_user_hives_"))
+        out_path = extract_dir / f"{username}_{hive_type}_{rel_path.replace('/', '_')}"
+        try:
+            shutil.copyfile(src, out_path)
+        except OSError:
+            logger.warning("Failed to stage %s hive for user %s", hive_type, username)
+            continue
+        hives.append((out_path, hive_type, username))
+    return hives, str(extract_dir) if extract_dir else None
+
+
 def _discover_hives_via_tsk(
     image_path: str, offset: int | None = None
 ) -> tuple[list[tuple[Path, str]], str | None]:
@@ -250,22 +287,33 @@ def _discover_hives_via_tsk(
         ["config/SYSTEM", "config/SOFTWARE", "config/SAM", "config/SECURITY", "config/DEFAULT"],
     )
 
-    hives: list[tuple[Path, str]] = []
-    extract_dir: str | None = None
-    for _rel, fpath in extracted:
-        if extract_dir is None:
-            extract_dir = str(fpath.parent)
-        name_lower = fpath.name.lower()
-        if name_lower not in _HIVE_NAMES:
-            for h in _HIVE_NAMES:
-                if h in fpath.name.lower():
-                    name_lower = h
-                    break
-            else:
-                continue
-        hives.append((fpath, name_lower))
+    extract_dir: str | None = str(extracted[0][1].parent) if extracted else None
+    return _select_system_hives(extracted), extract_dir
 
-    return hives, extract_dir
+
+def _select_system_hives(extracted: list[tuple[str, Path]]) -> list[tuple[Path, str]]:
+    """Map extracted files to hive names by their original file name.
+
+    The extracted copies carry a flattened name (``Windows_System32_config_SAM``),
+    so the hive is identified from the last component of the source path,
+    which must be exactly a hive name in a ``config`` directory. Matching a
+    substring of the flattened name labelled every hive "system" (through
+    ``System32``) depending on set iteration order, and parsed transaction
+    logs (``SYSTEM.LOG1``) and ``systemprofile`` files as hives. When a name
+    occurs more than once (``Windows.old``), the live
+    ``Windows/System32/config`` copy wins, then the first one listed.
+    """
+    chosen: dict[str, tuple[Path, bool]] = {}
+    for rel, fpath in extracted:
+        parts = rel.replace("\\", "/").lower().split("/")
+        name = parts[-1]
+        if name not in _HIVE_NAMES or len(parts) < 2 or parts[-2] != "config":
+            continue
+        canonical = parts == ["windows", "system32", "config", name]
+        current = chosen.get(name)
+        if current is None or (canonical and not current[1]):
+            chosen[name] = (fpath, canonical)
+    return [(fpath, name) for name, (fpath, _canon) in chosen.items()]
 
 
 def _run_regripper_plugins(

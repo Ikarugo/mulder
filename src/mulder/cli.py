@@ -305,6 +305,12 @@ def report(case_id: str, db_dir: str) -> None:
     is_flag=True,
     help="Stream agent CLI diagnostics to the dashboard and orchestrator.log.",
 )
+@click.option(
+    "--allow-raw-collections",
+    is_flag=True,
+    help="Start even if the evidence holds Velociraptor collections that were not "
+    "normalized with 'mulder prepare-triage'.",
+)
 def investigate(
     evidence_path: str,
     case_id: str,
@@ -321,6 +327,7 @@ def investigate(
     proxy_config: str | None,
     no_thinking: bool,
     show_cli_stderr: bool,
+    allow_raw_collections: bool,
 ) -> None:
     """Run a full multi-pass forensic investigation.
 
@@ -346,6 +353,20 @@ def investigate(
     from mulder.orchestrator.models import ModelConfig
     from mulder.orchestrator.runner import Orchestrator
     from mulder.orchestrator.types import EffortLevel
+    from mulder.triage import find_unprepared_collections
+
+    if not allow_raw_collections:
+        raw = find_unprepared_collections(evidence_path)
+        if raw:
+            listing = "\n".join(f"  {p}" for p in raw)
+            raise click.ClickException(
+                "The evidence contains Velociraptor collections that Mulder cannot read "
+                f"as-is:\n{listing}\n"
+                "Normalize each one first, then investigate the output directory:\n"
+                "  mulder prepare-triage <collection> <out_dir>\n"
+                "  mulder investigate <out_dir> <case_id>\n"
+                "(--allow-raw-collections skips this check.)"
+            )
 
     cwd_path = Path(cwd).expanduser()
     try:
@@ -786,6 +807,82 @@ def export_navigator_cmd(case_id: str, output_dir: str | None, domain: str, db_d
     else:
         click.echo("  No MITRE technique IDs found; no layer generated.")
     click.echo("Done.")
+
+
+@cli.command("prepare-triage")
+@click.argument("source", type=click.Path(exists=True))
+@click.argument("out_dir", type=click.Path())
+@click.option("--hostname", default=None, help="Host name (detected when possible).")
+@click.option(
+    "--kind",
+    type=click.Choice(["velociraptor", "kape", "tree"]),
+    default=None,
+    help="Collection kind; detected when omitted.",
+)
+@click.option(
+    "--drive",
+    default="C",
+    show_default=True,
+    help="Drive letter of a plain volume copy (--kind tree).",
+)
+@click.option("--include-vss", is_flag=True, help="Keep files collected from shadow copies.")
+@click.option("--force", is_flag=True, help="Replace an existing output for the same host.")
+def prepare_triage_cmd(
+    source: str,
+    out_dir: str,
+    hostname: str | None,
+    kind: str | None,
+    drive: str,
+    include_vss: bool,
+    force: bool,
+) -> None:
+    """Normalize a triage collection so Mulder can investigate it.
+
+    SOURCE is a Velociraptor offline collection (zip or extracted
+    directory), a KAPE target destination, or a copy of a Windows volume
+    root. The result is written to OUT_DIR/<HOSTNAME>/ with one folder per
+    volume (C/, D/...), a TRIAGE_MANIFEST.json holding SHA-256 hashes and
+    artifact coverage, and the collector's own metadata under _collector/.
+
+    \b
+      mulder prepare-triage Collection-WS01-2026-09-25.zip /triage
+      mulder prepare-triage /cases/kape_out /triage --hostname WS01
+      mulder investigate /triage my-case
+    """
+    from mulder.triage.prepare import TriagePrepareError, prepare_triage
+
+    try:
+        result = prepare_triage(
+            source,
+            out_dir,
+            hostname=hostname,
+            kind=kind,
+            drive=drive,
+            include_vss=include_vss,
+            force=force,
+        )
+    except TriagePrepareError as exc:
+        raise click.ClickException(str(exc)) from exc
+
+    click.echo(
+        f"{result.kind} collection -> {result.host_dir} "
+        f"({result.files_written} files, {_human_bytes(result.bytes_written)})"
+    )
+    for volume, cov in result.coverage.items():
+        hives = cov.get("registry_hives", {})
+        present_hives = [h for h, ok in hives.items() if ok] if isinstance(hives, dict) else []
+        click.echo(f"  Volume {volume}:")
+        click.echo(f"    registry hives : {', '.join(present_hives) or 'none'}")
+        click.echo(f"    NTUSER.DAT     : {', '.join(cov.get('ntuser_dat') or []) or 'none'}")  # type: ignore[arg-type]
+        click.echo(f"    Prefetch       : {cov.get('prefetch_files')} files")
+        click.echo(f"    EVTX           : {cov.get('evtx_files')} files")
+        click.echo(f"    $MFT           : {'yes' if cov.get('mft') else 'no'}")
+        missing = cov.get("missing") or []
+        if missing:
+            click.echo(f"    missing        : {', '.join(missing)}")  # type: ignore[arg-type]
+    for warning in result.warnings:
+        click.echo(f"  warning: {warning}", err=True)
+    click.echo(f"Next: mulder investigate {Path(out_dir)} <case_id>")
 
 
 if __name__ == "__main__":

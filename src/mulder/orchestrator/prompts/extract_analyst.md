@@ -184,6 +184,13 @@ plan request):
   image files in suspicious contexts.
 - query_sqlite_from_image: query a database file from the disk image.
   Use when you find SQLite databases (browser history, app data).
+  It needs an fls inode, so it does not apply to a triage collection;
+  there, use run_hindsight for Chromium profiles.
+- On a triage collection (a directory of collected files rather than a
+  raw image), files have real paths: read scripts, PowerShell history
+  (ConsoleHost_history.txt) and configs with read_evidence_file. The
+  collection only holds what the collector targeted, so a missing
+  artifact is a collection gap, not evidence of deletion.
 - run_hindsight: analyze Chrome/Chromium browser artifacts. Use when
   you find browser activity of interest.
 - enrich_iocs: get geolocation and reputation for IP addresses. Use

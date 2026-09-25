@@ -26,6 +26,7 @@ from mulder.server.helpers import (
 from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.tsk import (
     _collect_fls_chunks,
+    _triage_redirect,
 )
 
 __all__ = ["analyze_disk_pcaps"]
@@ -337,6 +338,16 @@ def analyze_disk_pcaps(
         analysis summaries, any IDS alerts, and extracted credentials.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(
+        tc_id,
+        "analyze_disk_pcaps",
+        {"image_path": image_path},
+        image_path,
+        "PCAP files in a triage collection are catalogued as network captures; "
+        "run run_pcap_analysis on them directly.",
+    )
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, Any] = {
         "case_id": case_id,

@@ -33,9 +33,11 @@ from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.tsk import (
     _cleanup_tsk_extract_dir,
     _resolve_partition_offset,
+    _triage_redirect,
     _tsk_extract_files,
 )
 from mulder.server.tools.tsk import _detect_filesystem_type
+from mulder.triage import child_ci, descend_ci, is_triage_root
 
 __all__ = [
     "_DOTNET",
@@ -283,14 +285,8 @@ def run_prefetch_parser(image_path: str, force: bool = False) -> dict[str, objec
 
     try:
         with mount_disk_image(image_path) as mount_point:
-            prefetch_dir = None
-            for candidate in (
-                Path(mount_point) / "Windows" / "Prefetch",
-                Path(mount_point) / "windows" / "prefetch",
-            ):
-                if candidate.is_dir():
-                    prefetch_dir = str(candidate)
-                    break
+            found = descend_ci(Path(mount_point), ("Windows", "Prefetch"))
+            prefetch_dir = str(found) if found is not None and found.is_dir() else None
             if prefetch_dir is None:
                 return error_response(
                     tc_id, "run_prefetch_parser", params, "No Prefetch directory found"
@@ -368,14 +364,10 @@ def run_amcache_parser(image_path: str, force: bool = False) -> dict[str, object
 
     try:
         with mount_disk_image(image_path) as mount_point:
-            amcache_path = None
-            for candidate in (
-                Path(mount_point) / "Windows" / "appcompat" / "Programs" / "Amcache.hve",
-                Path(mount_point) / "windows" / "appcompat" / "programs" / "Amcache.hve",
-            ):
-                if candidate.exists():
-                    amcache_path = str(candidate)
-                    break
+            found = descend_ci(
+                Path(mount_point), ("Windows", "appcompat", "Programs", "Amcache.hve")
+            )
+            amcache_path = str(found) if found is not None and found.is_file() else None
             if amcache_path is None:
                 return error_response(tc_id, "run_amcache_parser", params, "Amcache.hve not found")
             return _run_ez_tool(
@@ -462,14 +454,8 @@ def run_shimcache_parser(image_path: str, force: bool = False) -> dict[str, obje
 
     try:
         with mount_disk_image(image_path) as mount_point:
-            system_hive = None
-            for candidate in (
-                Path(mount_point) / "Windows" / "System32" / "config" / "SYSTEM",
-                Path(mount_point) / "windows" / "system32" / "config" / "SYSTEM",
-            ):
-                if candidate.exists():
-                    system_hive = str(candidate)
-                    break
+            found = descend_ci(Path(mount_point), ("Windows", "System32", "config", "SYSTEM"))
+            system_hive = str(found) if found is not None and found.is_file() else None
             if system_hive is None:
                 return error_response(
                     tc_id, "run_shimcache_parser", params, "SYSTEM hive not found"
@@ -530,8 +516,9 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
                 0.0,
             )
 
-    offset = _resolve_partition_offset(image_path)
-    fs_type = _detect_filesystem_type(image_path, offset)
+    triage = is_triage_root(image_path)
+    offset = 0 if triage else _resolve_partition_offset(image_path)
+    fs_type = None if triage else _detect_filesystem_type(image_path, offset)
     if fs_type and fs_type != "ntfs":
         return tool_response(
             tc_id,
@@ -546,7 +533,7 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
             (time.monotonic() - t0) * 1000,
         )
 
-    if require_binary("icat"):
+    if not triage and require_binary("icat"):
         with tempfile.TemporaryDirectory(prefix="mulder_mft_") as tmpdir:
             mft_dest = Path(tmpdir) / "$MFT"
             cmd = ["icat"]
@@ -582,10 +569,10 @@ def run_mft_parser(image_path: str, force: bool = False) -> dict[str, object]:
         with mount_disk_image(image_path) as mount_point:
             mft_path = None
             for candidate in (
-                Path(mount_point) / "$MFT",
-                Path(mount_point) / "Windows" / "$MFT",
+                child_ci(Path(mount_point), "$MFT"),
+                descend_ci(Path(mount_point), ("Windows", "$MFT")),
             ):
-                if candidate.exists():
+                if candidate is not None and candidate.is_file():
                     mft_path = str(candidate)
                     break
             if mft_path is None:
@@ -839,6 +826,9 @@ def run_vshadow_info(image_path: str, offset: int = 0) -> dict[str, object]:
         offset: Volume offset in bytes (default 0).
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(tc_id, "run_vshadow_info", {"image_path": image_path}, image_path)
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params = {"image_path": image_path, "offset": offset}
 
@@ -1365,6 +1355,9 @@ def run_dislocker(
         password: BitLocker password (optional).
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(tc_id, "run_dislocker", {"image_path": image_path}, image_path)
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, object] = {
         "image_path": image_path,
@@ -1399,6 +1392,9 @@ def run_bdeinfo(image_path: str) -> dict[str, object]:
         image_path: Path to the BitLocker-encrypted partition/image.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(tc_id, "run_bdeinfo", {"image_path": image_path}, image_path)
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, object] = {"image_path": image_path}
 
@@ -1459,6 +1455,9 @@ def run_fvdeinfo(image_path: str) -> dict[str, object]:
         image_path: Path to the FileVault-encrypted volume image.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(tc_id, "run_fvdeinfo", {"image_path": image_path}, image_path)
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, object] = {"image_path": image_path}
 

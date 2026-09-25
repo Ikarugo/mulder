@@ -28,6 +28,7 @@ from mulder.server.tool_access import Role, tool_access
 from mulder.server.tools.extract.tsk import (
     _partition_table_text,
     _resolve_partition_offset,
+    _triage_redirect,
 )
 
 __all__ = ["detect_masquerading"]
@@ -277,6 +278,11 @@ def detect_masquerading(
         force: Re-run even if ``tsk.masquerade`` is already indexed.
     """
     tc_id = make_tool_call_id()
+    redirect = _triage_redirect(
+        tc_id, "detect_masquerading", {"image_path": image_path}, image_path
+    )
+    if redirect is not None:
+        return redirect
     t0 = time.monotonic()
     params: dict[str, object] = {
         "image_path": image_path,

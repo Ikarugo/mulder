@@ -31,10 +31,20 @@ OUTPUT REQUIREMENTS:
 - A "system" is any distinct computer, device, phone, server, VM, or
   network segment that produced evidence. Determine system names from
   directory structure, filenames, or organizational grouping.
-- Evidence types: memory dump, disk image, network capture (PCAP/PCAPNG),
-  event logs, phone dump (Android/iOS), compressed archive, log
-  directory, database files, documents, executables, images/media files
-  (potential steganography targets), or other.
+- Evidence types: memory dump, disk image, triage collection, network
+  capture (PCAP/PCAPNG), event logs, phone dump (Android/iOS), compressed
+  archive, log directory, database files, scripts, documents,
+  executables, images/media files (potential steganography targets), or
+  other.
+- A triage collection (artifact_type "triage_collection") is a directory
+  of files collected from one live Windows host, laid out as its volume
+  root. It is one system; use the "hostname" field of the scan entry as
+  the system name when present, otherwise the parent directory name.
+  Record it as "triage_collection" in the system's evidence list.
+- A "raw_triage_collection" is a Velociraptor collection that was not
+  normalized. Do NOT extract it with extract_archive; list it with
+  evidence ["raw_triage_collection"] and mention in the description that
+  it must be prepared with 'mulder prepare-triage' before analysis.
 
 FINAL OUTPUT (MANDATORY):
 Your FINAL message MUST be ONLY valid JSON. No text before or after it.

@@ -26,6 +26,7 @@ from mulder.server.helpers import (
     tool_response,
 )
 from mulder.server.tool_access import Role, tool_access
+from mulder.triage import is_triage_root, iter_tree_files
 
 __all__ = [
     "_cleanup_tsk_extract_dir",
@@ -39,6 +40,8 @@ __all__ = [
     "_tsk_extract_dirs",
     "_tsk_extract_files",
     "_tsk_lock",
+    "_triage_extract_files",
+    "_triage_redirect",
     "run_fls",
     "run_fsstat",
     "run_mactime",
@@ -402,6 +405,9 @@ def _tsk_extract_files(
     Returns:
         List of ``(relative_path, extracted_path)`` tuples.
     """
+    if is_triage_root(image_path):
+        return _triage_extract_files(image_path, path_patterns)
+
     chunk_groups = _collect_fls_chunks(image_path)
     if not chunk_groups:
         return []
@@ -451,6 +457,77 @@ def _tsk_extract_files(
                     continue
 
     return extracted
+
+
+def _triage_extract_files(root: str, path_patterns: list[str]) -> list[tuple[str, Path]]:
+    """``_tsk_extract_files`` for a triage root: copy matching files, no Sleuth Kit.
+
+    Matching is the same case-insensitive substring test applied to the
+    same relative path shape as ``fls -r -p``, and the output is the same:
+    files copied under their flattened path into a registered
+    ``mulder_tsk_extract_*`` directory that the caller removes with
+    ``_cleanup_tsk_extract_dir``. Copies (not links) keep the collection
+    untouched if a parser opens a hive for writing.
+
+    Args:
+        root: Triage root directory.
+        path_patterns: Substring patterns to match against file paths.
+
+    Returns:
+        List of ``(relative_path, extracted_path)`` tuples.
+    """
+    patterns = [p.lower().replace("\\", "/") for p in path_patterns]
+    extract_dir: Path | None = None
+    extracted: list[tuple[str, Path]] = []
+    for rel_path, src in iter_tree_files(root):
+        rel_lower = rel_path.lower()
+        if not any(pat in rel_lower for pat in patterns):
+            continue
+        if extract_dir is None:
+            extract_dir = Path(tempfile.mkdtemp(prefix="mulder_tsk_extract_"))
+            with _tsk_lock:
+                _tsk_extract_dirs.append(str(extract_dir))
+            get_ctx().db.set_kv("tsk_extract_dir", str(extract_dir))
+        out_path = extract_dir / rel_path.replace("/", "_")
+        try:
+            shutil.copyfile(src, out_path)
+        except OSError as exc:
+            logger.warning("Could not stage %s from triage root %s: %s", rel_path, root, exc)
+            continue
+        extracted.append((rel_path, out_path))
+    return extracted
+
+
+def _triage_redirect(
+    tc_id: str,
+    tool_name: str,
+    params: Mapping[str, object],
+    image_path: str,
+    suggestion: str = "",
+) -> dict[str, object] | None:
+    """An error response for image-only tools called on a triage collection.
+
+    Partition tables, file listings, carving and volume encryption only
+    exist on a raw image. A triage root is a directory of collected files,
+    so these tools do not apply; the response names the tools that do.
+    """
+    if not is_triage_root(image_path):
+        return None
+    return error_response(
+        tc_id,
+        tool_name,
+        params,
+        f"{image_path} is a triage collection (collected files, not a raw disk image); "
+        f"{tool_name} does not apply",
+        error_type="not_applicable_triage",
+        suggestion=suggestion
+        or (
+            "Use the Windows artifact parsers directly on this path (run_registry_parser, "
+            "run_prefetch_parser, run_amcache_parser, run_shimcache_parser, run_mft_parser, "
+            "run_evtx_parser, run_hayabusa); the $MFT parsed by run_mft_parser is the file "
+            "inventory and MAC timeline."
+        ),
+    )
 
 
 def _optical_redirect(
@@ -534,6 +611,10 @@ def run_mmls(image_path: str) -> dict[str, object]:
     t0 = time.monotonic()
     params = {"image_path": image_path}
 
+    redirect = _triage_redirect(tc_id, "run_mmls", params, image_path)
+    if redirect is not None:
+        return redirect
+
     if not require_binary("mmls"):
         return error_response(
             tc_id, "run_mmls", params, "mmls not found on PATH", error_type="binary_missing"
@@ -595,6 +676,10 @@ def run_fls(
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
     params = {"image_path": image_path, "partition_offset": partition_offset, "force": force}
+
+    redirect = _triage_redirect(tc_id, "run_fls", params, image_path)
+    if redirect is not None:
+        return redirect
     explicit_offset = partition_offset is not None
 
     if not force:
@@ -713,6 +798,10 @@ def run_mactime(image_path: str, time_range: str | None = None) -> dict[str, obj
     t0 = time.monotonic()
     params = {"image_path": image_path, "time_range": time_range}
 
+    redirect = _triage_redirect(tc_id, "run_mactime", params, image_path)
+    if redirect is not None:
+        return redirect
+
     for binary in ("fls", "mactime"):
         if not require_binary(binary):
             return error_response(tc_id, "run_mactime", params, f"{binary} not found on PATH")
@@ -771,6 +860,10 @@ def run_fsstat(image_path: str) -> dict[str, object]:
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
     params = {"image_path": image_path}
+
+    redirect = _triage_redirect(tc_id, "run_fsstat", params, image_path)
+    if redirect is not None:
+        return redirect
 
     if not require_binary("fsstat"):
         return error_response(tc_id, "run_fsstat", params, "fsstat not found on PATH")

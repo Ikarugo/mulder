@@ -54,6 +54,32 @@ When the evidence includes a DISK IMAGE, always plan:
     syslog/auth/journal, run_chkrootkit
   macOS: run_plaso (unified log timeline), parse_plist
 
+When the evidence includes a TRIAGE COLLECTION (files collected from a
+live Windows host by Velociraptor, KAPE or a similar tool, laid out as
+the volume root: the context lists it under "Triage collections"), plan
+the Windows artifact parsers with image_path set to that directory:
+- run_registry_parser (include_user_hives=True), run_prefetch_parser,
+  run_amcache_parser, run_shimcache_parser, run_mft_parser
+- run_evtx_parser, then run_hayabusa and run_chainsaw on the same path
+- query_registry_value for the timezone and system baseline (see
+  ARTIFACT AWARENESS below)
+- yara_scan_files on the directory
+- index_app_files on user directories of interest (image_path = the
+  collection directory)
+Do NOT plan run_fls, run_mmls, run_fsstat, run_mactime, run_bulk_extractor,
+the carvers, detect_masquerading or run_vshadow_info on a triage
+collection: it is not a raw image and those tools return
+"not_applicable_triage". The $MFT parsed by run_mft_parser replaces the
+fls file listing and MAC timeline. A collection only holds what the
+collector targeted: artifacts listed as MISSING cannot be analyzed, so do
+not plan tools for them.
+
+When the evidence lists SCRIPTS or PowerShell history
+(ConsoleHost_history.txt), plan read_evidence_file on each one of them
+that sits in a user-writable or unusual location (Users, Temp,
+ProgramData, AppData, Public, Tasks) and yara_scan_files on their
+folders. Attacker commands and droppers are frequently found there.
+
 When a disk image is OPTICAL MEDIA (a CD/DVD image: the catalog marks it
 "optical (udf)" or "optical (iso9660)", or the file is a burned CD-R/DVD),
 plan:

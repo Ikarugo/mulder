@@ -34,6 +34,8 @@ from mulder.server.app import (
 )
 from mulder.server.helpers import error_response, hash_output, make_tool_call_id
 from mulder.server.tool_access import ALL_ROLES, Role, tool_access
+from mulder.triage import RAW_COLLECTION_ARTIFACT_TYPE, TRIAGE_ARTIFACT_TYPE, iter_tree_files
+from mulder.triage.prepare import MANIFEST_NAME, artifact_coverage, missing_artifacts
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +161,7 @@ def _hash_and_register_evidence(manifest: list[dict[str, object]]) -> list[str]:
         return []
     ctx = get_ctx()
     failed_files: list[str] = []
-    for item in manifest:
-        fp = Path(str(item.get("path", "")))
-        if not fp.is_file():
-            continue
+    for fp in _evidence_files(manifest):
         try:
             h = _hashlib.sha256()
             size = 0
@@ -184,6 +183,42 @@ def _hash_and_register_evidence(manifest: list[dict[str, object]]) -> list[str]:
     return failed_files
 
 
+def _evidence_files(manifest: list[dict[str, object]]) -> list[Path]:
+    """Files to hash for chain of custody: each file entry, and every file of a triage root."""
+    files: list[Path] = []
+    for item in manifest:
+        fp = Path(str(item.get("path", "")))
+        if item.get("artifact_type") == TRIAGE_ARTIFACT_TYPE and fp.is_dir():
+            files.extend(p for _rel, p in iter_tree_files(fp) if p.is_file())
+        elif fp.is_file():
+            files.append(fp)
+    return files
+
+
+def _triage_entry_details(root: Path) -> dict[str, object]:
+    """Host name, artifact coverage and tool guidance for a triage root entry."""
+    details: dict[str, object] = {}
+    manifest_file = root.parent / MANIFEST_NAME
+    if manifest_file.is_file():
+        try:
+            data = json.loads(manifest_file.read_text(encoding="utf-8"))
+            details["hostname"] = data.get("hostname")
+            details["collector"] = (data.get("source") or {}).get("kind")
+        except (OSError, ValueError):
+            pass
+    coverage = artifact_coverage(root)
+    details["coverage"] = coverage
+    missing = missing_artifacts(coverage)
+    if missing:
+        details["missing_artifacts"] = missing
+    details["note"] = (
+        "Triage collection (collected files mirroring a Windows volume, not a raw image). "
+        "Pass this directory as image_path to the Windows artifact parsers; "
+        "run_fls/run_mmls/carving do not apply."
+    )
+    return details
+
+
 def _manifest_entry(item: ClassifiedEvidence) -> dict[str, object]:
     """One evidence manifest row; disk images are probed for an optical signature."""
     entry: dict[str, object] = {
@@ -197,6 +232,13 @@ def _manifest_entry(item: ClassifiedEvidence) -> dict[str, object]:
             entry["size_human"] = _human_size(size)
     except OSError:
         pass
+    if item.artifact_type == TRIAGE_ARTIFACT_TYPE:
+        entry.update(_triage_entry_details(item.path))
+    elif item.artifact_type == RAW_COLLECTION_ARTIFACT_TYPE:
+        entry["note"] = (
+            "Velociraptor collection that has not been normalized: its files cannot be "
+            "analyzed in place. Run 'mulder prepare-triage' on it and investigate the output."
+        )
     if item.artifact_type == "disk_image":
         media = probe_optical(str(item.path))
         if media is not None:
@@ -234,6 +276,8 @@ def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str
         atype = mi["artifact_type"]
         if "media" in mi:
             atype = f"{atype}, {mi['media']}"
+        if mi.get("hostname"):
+            atype = f"{atype}, host {mi['hostname']}"
         tree_lines.append(f"{indent}{name}  [{atype}] {size_label}")
 
     result = create_case(case_id, str(ev_path), replace=replace)
@@ -257,6 +301,20 @@ def _scan_evidence_inner(ev_path: Path, case_id: str, replace: bool) -> dict[str
     )
     if failed_files:
         message += f" WARNING: {len(failed_files)} file(s) failed to hash."
+    triage_count = type_counts.get(TRIAGE_ARTIFACT_TYPE, 0)
+    if triage_count > 0:
+        message += (
+            f" NOTE: {triage_count} triage collection(s) detected: directories of files "
+            "collected from a live Windows host. Each is one system; pass its path as "
+            "image_path to the Windows artifact parsers (see the entry's note)."
+        )
+    raw_count = type_counts.get(RAW_COLLECTION_ARTIFACT_TYPE, 0)
+    if raw_count > 0:
+        message += (
+            f" WARNING: {raw_count} Velociraptor collection(s) were not normalized and "
+            "cannot be analyzed; do not extract them. Report them in the catalog so the "
+            "investigator can run 'mulder prepare-triage'."
+        )
     if archive_count > 0:
         message += (
             f" NOTE: {archive_count} compressed archive(s) detected. "
