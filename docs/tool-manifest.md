@@ -553,6 +553,71 @@ Parse the $MFT from a disk image using MFTECmd (EZ Tools).
 
 **Roles:** `EXTRACT_EXECUTOR`
 
+### run_usn_parser
+
+Parse the NTFS change journal ($UsnJrnl:$J) with MFTECmd, using the volume's $MFT to resolve parent paths. On a disk image the stream is read with `icat -h` (sparse holes skipped); in a triage collection it is read in place.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run extraction even if sources already exist |
+
+**Returns:** `source_name` (ez.usnjrnl), `windows_indexed`
+
+**Roles:** `EXTRACT_EXECUTOR`
+
+### run_lnk_parser
+
+Parse .lnk shortcut files found in user profiles (Recent, Office recent, Desktop) with LECmd.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run extraction even if sources already exist |
+
+**Returns:** `source_name` (ez.lnkfiles), `windows_indexed`
+
+**Roles:** `EXTRACT_EXECUTOR`
+
+### run_jumplist_parser
+
+Parse Jump Lists (`*.automaticDestinations-ms`, `*.customDestinations-ms`) found in user profiles with JLECmd.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run extraction even if sources already exist |
+
+**Returns:** `source_name` (ez.jumplists), `windows_indexed`
+
+**Roles:** `EXTRACT_EXECUTOR`
+
+### run_shellbags_parser
+
+Parse Shellbags from every user's NTUSER.DAT and UsrClass.dat with SBECmd. From a triage collection the hives' transaction logs are included.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run extraction even if sources already exist |
+
+**Returns:** `source_name` (ez.shellbags), `windows_indexed`
+
+**Roles:** `EXTRACT_EXECUTOR`
+
+### run_srum_parser
+
+Parse `Windows/System32/sru/SRUDB.dat` with SrumECmd, with the SOFTWARE hive for interface names. A database collected from a running system is often dirty; the error then carries repair guidance.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run extraction even if sources already exist |
+
+**Returns:** `source_name` (ez.srum), `windows_indexed`
+
+**Roles:** `EXTRACT_EXECUTOR`
+
 ### run_pasco
 
 Parse an Internet Explorer index.dat file for browser history.
@@ -1663,6 +1728,21 @@ Extract and parse macOS plist files from a disk image.
 **Returns:** `source` (plist.parsed), `result_count`
 
 **Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST` `CROSS_EXECUTOR`
+
+### query_sqlite_file
+
+Run a read-only SELECT on a SQLite database that exists as a file in the evidence (triage collection, extracted folder). An empty query returns the tables and views with their columns and row counts. The database and its -wal/-journal files are copied before opening.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| file_path | str | yes | Absolute path of the database file |
+| query | str | no | One SELECT or WITH statement; empty to list the schema |
+| description | str | no | Label for the indexed source name |
+| max_rows | int | no | Rows to index, 1 to 1000 (default 1000) |
+
+**Returns:** `source` (sqlite.<label>), `result_count`, `truncated`; or `tables` for an empty query
+
+**Roles:** `EXTRACT_EXECUTOR`, `EXTRACT_ANALYST`
 
 ### query_sqlite_from_image
 

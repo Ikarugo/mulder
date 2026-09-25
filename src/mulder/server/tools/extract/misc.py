@@ -168,8 +168,13 @@ def _run_ez_tool(
     tool_name: str,
     params: Mapping[str, object],
     t0: float,
+    timeout: int = TOOL_TIMEOUT * 2,
 ) -> dict[str, object]:
-    """Run an EZ tool, parse CSV output, index it, and return response."""
+    """Run an EZ tool, parse CSV output, index it, and return response.
+
+    *timeout* (seconds) defaults to twice ``TOOL_TIMEOUT``; callers parsing
+    inputs that grow with the volume (``$MFT``, ``$J``) pass a size-based one.
+    """
     if not require_binary(_DOTNET):
         return error_response(
             tc_id,
@@ -200,9 +205,7 @@ def _run_ez_tool(
         cmd = [_DOTNET, dll, *args, "--csv", tmpdir]
 
         try:
-            subprocess.run(
-                cmd, capture_output=True, text=True, timeout=TOOL_TIMEOUT * 2, check=False
-            )
+            subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, check=False)
         except subprocess.TimeoutExpired:
             return error_response(
                 tc_id, tool_name, params, f"{dll_name} timed out", (time.monotonic() - t0) * 1000
