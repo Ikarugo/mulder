@@ -151,7 +151,45 @@ _FTS5_OPERATORS = frozenset({"AND", "OR", "NOT", "NEAR"})
 # error unless quoted, so the check is "is it a bareword", not a list of
 # special characters -- that list was an allowlist that missed `@`.
 _FTS5_BAREWORD = re.compile(r"[A-Za-z0-9_\u0080-\U0010ffff]+")
-_FTS5_TOKEN_RE = re.compile(r'"[^"]*"|\S+')
+_FTS5_TOKEN_RE = re.compile(r'"[^"]*"\*?|\S+')
+_FTS5_PHRASE = re.compile(r'"[^"]*"\*?')
+# The unicode61 tokenizer splits on punctuation only, so the ISO timestamp
+# "2024-11-06T02:52:01Z" is indexed as 2024 / 11 / 06t02 / 52 / 01z. The
+# phrases "2024-11-06" and "02:52:01" never match it: on a real case, every
+# search with a date in it returned nothing, silently. Dates and times are
+# therefore searched as prefix phrases ("2024-11-06"*).
+_FTS5_DATETIME = re.compile(
+    r"(?:\d{4}-\d{2}-\d{2}(?:[Tt ]\d{2}(?::\d{2}){0,2}(?:\.\d+)?)?"
+    r"|\d{2}:\d{2}(?::\d{2})?(?:\.\d+)?)"
+    r"(?P<zone>[Zz]|[+-]\d{2}:?\d{2})?"
+)
+
+
+# ISO 8601 glues the time to the date ("2024-11-06T02:52:01"), and the
+# tokenizer makes one token of "06T02": neither the day nor the hour could be
+# searched. The text given to the FTS index (not the stored window) has that
+# "T" replaced by a space. Same length, so nothing else moves.
+_ISO_DATE_T = re.compile(r"(\d{4}-\d{2}-\d{2})[Tt](?=\d)")
+
+
+def fts_text(raw_text: str | None) -> str | None:
+    """The text indexed for full-text search: *raw_text* with ISO dates split from times."""
+    if raw_text is None:
+        return None
+    return _ISO_DATE_T.sub(r"\1 ", raw_text)
+
+
+def _datetime_phrase(value: str) -> str | None:
+    """A date or time as an FTS5 prefix phrase, or None when *value* is not one.
+
+    The time zone is dropped (sources write the same instant as ``Z``, as an
+    offset, or with none) and the date is split from the time as in the index.
+    """
+    m = _FTS5_DATETIME.fullmatch(value.strip())
+    if m is None:
+        return None
+    bare = value.strip()[: m.start("zone")] if m.group("zone") else value.strip()
+    return '"' + _ISO_DATE_T.sub(r"\1 ", bare) + '"*'
 
 
 def _sanitize_fts5_query(query: str) -> str:
@@ -161,8 +199,10 @@ def _sanitize_fts5_query(query: str) -> str:
     already-quoted phrases.  Converts pipe characters to OR operators
     (common mistake by LLMs using regex-style syntax).  All other
     non-bareword tokens are wrapped in double quotes so FTS5 treats them
-    as literal phrases.  A punctuation-only token quotes to a phrase with
-    no tokens, which FTS5 accepts and matches nothing; only the empty
+    as literal phrases; a date or time becomes a prefix phrase, so
+    ``2024-11-06`` matches ``2024-11-06T02:00:00``.  A punctuation-only
+    token quotes to a phrase with no tokens, which FTS5 accepts and
+    matches nothing; only the empty
     string is still a syntax error, and callers short-circuit that.
     """
     # Convert pipe-separated queries to FTS5 OR syntax before tokenizing.
@@ -174,13 +214,17 @@ def _sanitize_fts5_query(query: str) -> str:
     parts = _FTS5_TOKEN_RE.findall(query)
     tokens: list[str] = []
     for token in parts:
-        if token in _FTS5_OPERATORS or (
-            len(token) >= 2 and token.startswith('"') and token.endswith('"')
-        ):
+        if token in _FTS5_OPERATORS:
             tokens.append(token)
+        elif _FTS5_PHRASE.fullmatch(token):
+            inner = token.rstrip("*")[1:-1]
+            if (when := _datetime_phrase(inner)) is not None:
+                tokens.append(when)
+            else:
+                tokens.append(f'"{inner}"' + ("*" if token.endswith("*") else ""))
         elif not _FTS5_BAREWORD.fullmatch(token):
-            safe = token.replace('"', '""')
-            tokens.append(f'"{safe}"')
+            when = _datetime_phrase(token)
+            tokens.append(when if when is not None else '"' + token.replace('"', '""') + '"')
         else:
             tokens.append(token)
     return " ".join(tokens)
@@ -227,12 +271,13 @@ def _make_engine(db_path: Path) -> Engine:
 
     @event.listens_for(engine, "connect")
     def _set_sqlite_pragmas(dbapi_conn: Any, connection_record: Any) -> None:
-        """Set WAL mode, foreign keys, and busy timeout on each new connection."""
+        """Set WAL mode, foreign keys and busy timeout, and register ``mulder_fts_text``."""
         cursor = dbapi_conn.cursor()
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
         cursor.execute("PRAGMA busy_timeout=30000")
         cursor.close()
+        dbapi_conn.create_function("mulder_fts_text", 1, fts_text, deterministic=True)
 
     return engine
 
@@ -326,6 +371,49 @@ def _migrate_add_kv_store(conn: Connection) -> None:
             ")"
         )
     )
+
+
+_FTS_TEXT_VERSION = "1"
+
+
+def _set_fts_text_version(conn: Connection) -> None:
+    conn.execute(
+        text(
+            "INSERT OR REPLACE INTO kv_store(key, value, updated_at) "
+            "VALUES ('fts_text_version', :v, :now)"
+        ),
+        {"v": _FTS_TEXT_VERSION, "now": datetime.now(timezone.utc).isoformat()},
+    )
+
+
+def _migrate_fts_text(conn: Connection) -> None:
+    """Re-index a case built before ``fts_text`` split ISO dates from times.
+
+    Without it, date and time searches on an older case would match neither
+    the old tokens (``06t02``) nor the new ones. Not the FTS5 ``'rebuild'``
+    command: it reads ``windows.raw_text`` as stored and would undo the split.
+    """
+    row = conn.execute(
+        text("SELECT value FROM kv_store WHERE key = 'fts_text_version'")
+    ).fetchone()
+    if row is not None and row[0] == _FTS_TEXT_VERSION:
+        return
+    glued = conn.execute(
+        text(
+            "SELECT 1 FROM windows "
+            "WHERE raw_text GLOB '*[0-9]-[0-9][0-9]-[0-9][0-9][Tt][0-9]*' LIMIT 1"
+        )
+    ).fetchone()
+    if glued is not None:
+        logger.info("Re-indexing full-text search so dates and times can be searched")
+        conn.execute(text("INSERT INTO windows_fts(windows_fts) VALUES('delete-all')"))
+        conn.execute(
+            text(
+                "INSERT INTO windows_fts(rowid, raw_text) "
+                "SELECT window_id, mulder_fts_text(raw_text) FROM windows"
+            )
+        )
+    _set_fts_text_version(conn)
 
 
 _SENTINEL = object()
@@ -458,6 +546,7 @@ class CaseDB:
                     extractor_versions=json.dumps({}),
                 )
             )
+            _set_fts_text_version(conn)
         return db
 
     @classmethod
@@ -478,6 +567,7 @@ class CaseDB:
             _migrate_add_bookmarks(conn)
             _migrate_add_progress(conn)
             _migrate_add_kv_store(conn)
+            _migrate_fts_text(conn)
         return db
 
     def close(self) -> None:
@@ -554,7 +644,7 @@ class CaseDB:
                 conn.execute(
                     text(
                         "INSERT INTO windows_fts(rowid, raw_text) "
-                        "SELECT window_id, raw_text FROM windows "
+                        "SELECT window_id, mulder_fts_text(raw_text) FROM windows "
                         "WHERE source_id = :sid AND window_id > :last_id"
                     ),
                     {"sid": source_id, "last_id": last_id},
