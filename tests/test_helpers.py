@@ -94,7 +94,7 @@ class TestSerializeWindows:
             raw_text="x" * 500,
         )
         result = serialize_windows([w], text_cap=100)
-        assert result[0]["raw_text"] == "x" * 100 + "..."
+        assert result[0]["raw_text"] == "x" * 100 + " [...400 more chars not shown...]"
         assert result[0]["full_text_available"] is True
 
     def test_short_text_not_truncated(self) -> None:

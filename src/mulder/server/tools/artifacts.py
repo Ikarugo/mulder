@@ -28,6 +28,8 @@ from mulder.patterns import fls_file_entries, parse_mmls_rows
 from mulder.server.app import get_cfg, get_ctx, mcp
 from mulder.server.extract_helpers import extract_and_index
 from mulder.server.helpers import (
+    detect_text_encoding,
+    extract_strings,
     hash_output,
     make_tool_call_id,
     readonly_sqlite_uri,
@@ -66,6 +68,7 @@ def _resolve_artifact_path(target: Path) -> Path:
 
 
 _TOOL_TIMEOUT = 120
+_BINARY_STRINGS_CAP = 20_000
 
 
 def _icat_extract(image_path: str, offset: int, inode: str, dest: Path) -> bool:
@@ -679,30 +682,50 @@ def list_directory(
     }
 
 
+def _utf8_complete_prefix(raw: bytes) -> int:
+    """Length of *raw* without a multi-byte UTF-8 character cut at its end."""
+    back = 1
+    while back <= min(3, len(raw)) and raw[-back] & 0xC0 == 0x80:
+        back += 1
+    if back > len(raw):
+        return len(raw)
+    lead = raw[-back]
+    needed = 4 if lead >= 0xF0 else 3 if lead >= 0xE0 else 2 if lead >= 0xC0 else 1
+    return len(raw) - back if needed > back else len(raw)
+
+
 @mcp.tool()
 @tool_access(Role.EXTRACT_EXECUTOR | Role.EXTRACT_ANALYST | Role.CROSS_EXECUTOR)
 def read_evidence_file(
     file_path: str = "",
     max_bytes: int = 1_048_576,
     path: str = "",
+    offset: int = 0,
 ) -> dict[str, object]:
-    """Read a text file from the evidence directory.
+    """Read a file from the evidence directory, decoding its text whatever the encoding.
 
     Use this instead of shell commands to read README files, config
-    files, log files, or any text file in the evidence. Files are read
-    as UTF-8 with replacement for non-decodable bytes. Binary files
-    return a hex preview. Capped at *max_bytes* (default 1 MB). Read-only.
+    files, logs, scripts or any text file in the evidence. UTF-8,
+    UTF-16 (little or big endian, with or without BOM, as written by
+    Windows Defender, PowerShell and many Windows logs) and Windows-1252
+    are detected and decoded. A binary file returns a hex preview plus
+    the ASCII and UTF-16 strings it contains (URLs in CryptnetUrlCache
+    metadata, paths in binary logs). Reads at most *max_bytes* starting
+    at *offset*: when ``truncated`` is true, call again with
+    ``offset=next_offset`` to read the rest. Never conclude that a file
+    lacks something until every part has been read. Read-only.
 
     Args:
         file_path: Absolute path to the file to read.
         max_bytes: Maximum bytes to read (default 1 MB).
         path: Alias for file_path.
+        offset: Byte offset to start reading at (default 0).
     """
     file_path = file_path or path
     ctx = get_ctx()
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
-    params = {"file_path": file_path, "max_bytes": max_bytes}
+    params = {"file_path": file_path, "max_bytes": max_bytes, "offset": offset}
 
     try:
         target = _resolve_artifact_path(Path(file_path))
@@ -743,14 +766,20 @@ def read_evidence_file(
         }
 
     try:
+        file_size = target.stat().st_size
+        offset = max(0, min(int(offset), file_size))
+        max_bytes = max(1, int(max_bytes))
         with open(target, "rb") as f:
+            head = f.read(4096)
+            encoding = detect_text_encoding(head)
+            if encoding.startswith("utf-16"):
+                # Stay on code-unit boundaries so each page decodes cleanly.
+                offset -= offset % 2
+                max_bytes = max(2, max_bytes - max_bytes % 2)
+            f.seek(offset)
             raw = f.read(max_bytes)
-        try:
-            content = raw.decode("utf-8")
-            is_binary = False
-        except UnicodeDecodeError:
-            content = raw.decode("utf-8", errors="replace")
-            is_binary = any(b < 0x20 and b not in (0x09, 0x0A, 0x0D) for b in raw[:512])
+        if encoding == "utf-8" and offset + len(raw) < file_size:
+            raw = raw[: _utf8_complete_prefix(raw) or len(raw)]
     except OSError as exc:
         logger.error("Failed to read evidence file %r: %s", file_path, exc)
         elapsed = (time.monotonic() - t0) * 1000
@@ -763,17 +792,40 @@ def read_evidence_file(
         )
         return {"tool_call_id": tc_id, "status": "error", "error_message": "Failed to read file"}
 
-    file_size = target.stat().st_size
-    truncated = file_size > max_bytes
-
-    result = {
-        "content": content
-        if not is_binary
-        else content[:2000] + "\n... (binary file, showing first 2000 chars with replacements)",
+    end = offset + len(raw)
+    truncated = offset > 0 or end < file_size
+    result: dict[str, object] = {
         "file_size": file_size,
+        "offset": offset,
+        "bytes_read": len(raw),
         "truncated": truncated,
-        "is_binary": is_binary,
+        "encoding": encoding,
+        "is_binary": encoding == "binary",
     }
+    if encoding == "binary":
+        strings = extract_strings(raw)
+        text = "\n".join(strings)
+        if len(text) > _BINARY_STRINGS_CAP:
+            text = text[:_BINARY_STRINGS_CAP] + "\n[... strings cut; read a smaller range ...]"
+        result["hex_preview"] = raw[:256].hex(" ")
+        result["strings"] = text
+        result["strings_found"] = len(strings)
+        result["content"] = (
+            f"(binary file: hex preview of the first {min(256, len(raw))} bytes and "
+            f"{len(strings)} ASCII/UTF-16 strings in 'strings')"
+        )
+    else:
+        text = raw.decode(encoding, errors="replace")
+        result["content"] = text[1:] if offset == 0 and text.startswith("\ufeff") else text
+    if end < file_size:
+        result["next_offset"] = end
+        result["note"] = (
+            f"PARTIAL: bytes {offset}-{end} of {file_size} shown. Call "
+            f"read_evidence_file(file_path, offset={end}) for the rest before concluding "
+            "that the file does not contain something."
+        )
+    elif offset > 0:
+        result["note"] = f"Bytes {offset}-{end} of {file_size} shown (end of file)."
 
     elapsed = (time.monotonic() - t0) * 1000
     ctx.audit.log_tool_call(

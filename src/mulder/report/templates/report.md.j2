@@ -67,8 +67,11 @@ SHA-256 hashes recorded at ingestion. Verify with `sha256sum <file>`.
 
 | File | SHA-256 | Size |
 |------|---------|------|
-{% for e in evidence_integrity %}| {{ e.file_path | basename }} | `{{ e.sha256 }}` | {{ e.size_bytes | filesizeformat }} |
+{% for e in evidence_integrity[:50] %}| {{ e.file_path | basename }} | `{{ e.sha256 }}` | {{ e.size_bytes | filesizeformat }} |
 {% endfor %}
+{% if evidence_integrity | length > 50 %}
+The {{ evidence_integrity | length - 50 }} other hashes are in the `evidence_registry` table of the case database (and, for collections prepared with `mulder prepare-triage`, in their `TRIAGE_MANIFEST.json`).
+{% endif %}
 {% endif %}
 
 ---

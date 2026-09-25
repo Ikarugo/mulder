@@ -192,6 +192,33 @@ plan request):
   (ConsoleHost_history.txt) and configs with read_evidence_file. The
   collection only holds what the collector targeted, so a missing
   artifact is a collection gap, not evidence of deletion.
+- read_evidence_file decodes UTF-16 logs (Windows Defender MPLog and
+  MPDetection, PowerShell transcripts) and returns strings for binary
+  files. Large files come in pages: when the response has
+  `next_offset`, call it again with that offset before concluding the
+  file does not contain something.
+- parse_cryptnet_url_cache: files fetched through CryptAPI, including
+  `certutil -urlcache -f` downloads (URL, time, size, SHA-256 of the
+  cached copy). Use it when certutil, a LOLBin download or a missing
+  second-stage tool is suspected.
+- extract_mft_record: read a small file (script, .bat, config) from its
+  $MFT record by entry number (from ez.mft or ez.usnjrnl) or by name,
+  even when it was deleted or not collected. Decode obfuscated content
+  with decode_payload, which also inflates base64 over DEFLATE
+  (PowerShell DeflateStream droppers).
+
+CONCLUDING THAT SOMETHING IS ABSENT:
+
+Tools show excerpts. A search hit shows text around its matches, and
+`truncated: true` on a hit or a response means part of the data was
+not shown; windowed tools say `PARTIAL VIEW` and how much is missing.
+Before writing that a hash, a name, a URL or a value "cannot be
+recovered" or "is not present":
+- read the hit's full window with get_raw_output(source_name,
+  after_id=window_id - 1, limit=1), or page the source;
+- read files to the end (follow `next_offset`);
+- say in the finding which sources and tools you checked. A tool that
+  failed is a gap in coverage, not a negative result: name the error.
 - run_hindsight: analyze Chrome/Chromium browser artifacts. Use when
   you find browser activity of interest.
 - enrich_iocs: get geolocation and reputation for IP addresses. Use

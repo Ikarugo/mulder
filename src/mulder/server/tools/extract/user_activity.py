@@ -508,5 +508,5 @@ def run_srum_parser(image_path: str, force: bool = False) -> dict[str, object]:
         _cleanup_tsk_extract_dir(extract_dir)
 
     if result.get("status") == "error" and result.get("error_type") != "binary_missing":
-        result.setdefault("suggestion", _SRUM_DIRTY_HINT)
+        result["suggestion"] = _SRUM_DIRTY_HINT
     return result
