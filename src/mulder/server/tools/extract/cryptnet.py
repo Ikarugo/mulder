@@ -80,21 +80,29 @@ def _filetime(value: int) -> str | None:
     return dt.isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def _utf16z(data: bytes, start: int) -> tuple[str, int]:
+    """The NUL-terminated UTF-16LE string at *start*, and the offset after its NUL."""
+    end = start
+    while end + 1 < len(data) and data[end : end + 2] != b"\x00\x00":
+        end += 2
+    return data[start:end].decode("utf-16-le", errors="replace"), min(end + 2, len(data))
+
+
 def parse_cryptnet_metadata(data: bytes) -> dict[str, object] | None:
-    """Decode one MetaData file; None if it is too short to hold a header and URL."""
-    if len(data) < _HEADER.size:
+    """Decode one MetaData file; None if it is too short to hold a header and URL.
+
+    The URL is read up to its NUL terminator, not by the size field at 0x0C:
+    on a real certutil download that field said 100 bytes for a 108-byte
+    URL, and slicing by it turned ``.../kape.zip`` into ``.../kape.``. The
+    ETag, when there is one, follows the URL's terminator.
+    """
+    if len(data) < _HEADER.size + 2:
         return None
     url_size, downloaded, last_modified, etag_size, file_size = _HEADER.unpack_from(data)
-    url_end = _HEADER.size + url_size
-    if url_size == 0 or url_end > len(data):
+    url, after_url = _utf16z(data, _HEADER.size)
+    if not url or url_size == 0:
         return None
-    url = data[_HEADER.size : url_end].decode("utf-16-le", errors="replace").rstrip("\x00")
-    etag = (
-        data[url_end : url_end + etag_size]
-        .decode("utf-16-le", errors="replace")
-        .rstrip("\x00")
-        .strip('"')
-    )
+    etag = _utf16z(data, after_url)[0].strip('"') if etag_size else ""
     return {
         "url": url,
         "last_download_time": _filetime(downloaded),

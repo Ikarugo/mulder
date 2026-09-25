@@ -295,6 +295,19 @@ class TestCryptnetUrlCache:
         }
         assert parse_cryptnet_metadata(b"short") is None
 
+    def test_url_is_read_to_its_terminator_not_by_the_size_field(self) -> None:
+        """Bytes of the SillyEli certutil entry: the size field says 100, the URL takes 108."""
+        from mulder.server.tools.extract.cryptnet import parse_cryptnet_metadata
+
+        url = "https://filebin.net/archive/0rkhisv2iq4slveo/kape.zip"
+        etag = '"ff5183968015c93jd847cf91cf071373-17"'
+        data = bytearray(_metadata(url, 139_551_589, etag))
+        struct.pack_into("<I", data, 0x0C, 100)
+        meta = parse_cryptnet_metadata(bytes(data))
+        assert meta is not None
+        assert meta["url"] == url
+        assert meta["etag"] == etag.strip('"')
+
     @pytest.mark.parametrize(
         ("url", "routine"),
         [
