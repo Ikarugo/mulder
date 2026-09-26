@@ -1588,6 +1588,7 @@ def get_tool_guide(category: str = "all") -> dict[str, object]:
         category: Filter by category. Options: "all", "case_management",
             "evidence_browsing", "memory", "disk", "windows", "network",
             "browser_forensics", "mobile", "macos", "malware_analysis",
+            "reverse_engineering",
             "encryption", "composite", "reporting", "post_extraction",
             "reference".
     """

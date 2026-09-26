@@ -535,6 +535,78 @@
       "related": ["detect_steganography"]
     }
   ],
+  "reverse_engineering": [
+    {
+      "tool": "reverse_analyze",
+      "description": "Load a PE/ELF/Mach-O sample into Ghidra and auto-analyse it once (static only, never executed); returns the program summary and the Ghidra project path",
+      "input": "Sample file path",
+      "related": ["reverse_imports", "reverse_strings", "reverse_list_functions", "run_capa"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_list_functions",
+      "description": "Page through the sample's functions (library code hidden by default), filter by name or origin, rank by callers or size",
+      "input": "Sample path, optional query/origin/sort",
+      "related": ["reverse_decompile", "reverse_xrefs"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_decompile",
+      "description": "Decompile one function to pseudo-C, paged; lists callees, callers and referenced strings; indexed once as reverse.decompile",
+      "input": "Sample path, function name or address",
+      "related": ["reverse_disassemble", "reverse_xrefs", "reverse_annotate"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_disassemble",
+      "description": "Disassemble a function or the code at an address, paged",
+      "input": "Sample path, function name or address",
+      "related": ["reverse_decompile", "reverse_read_bytes"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_xrefs",
+      "description": "Cross-references to or from a function, import, symbol or address (IAT and thunks resolved to real callers)",
+      "input": "Sample path, target, direction",
+      "related": ["reverse_decompile", "reverse_imports", "reverse_strings"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_strings",
+      "description": "Strings defined in the sample with the functions that use them",
+      "input": "Sample path, optional query",
+      "related": ["reverse_xrefs", "reverse_decompile", "run_floss"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_imports",
+      "description": "Imported functions with their callers",
+      "input": "Sample path, optional query",
+      "related": ["reverse_xrefs", "triage_binary"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_read_bytes",
+      "description": "Read up to 4096 raw bytes at a symbol or address (encrypted strings, keys, config blobs)",
+      "input": "Sample path, target, length",
+      "related": ["decode_payload", "reverse_decompile"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_annotate",
+      "description": "Rename a function or label and add a [mulder] comment and bookmark in the Ghidra project",
+      "input": "Sample path, target, new name and/or comment",
+      "related": ["reverse_annotations"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_annotations",
+      "description": "History of every rename and comment made on the sample's project",
+      "input": "Sample path",
+      "related": ["reverse_annotate"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    }
+  ],
   "encryption": [
     {
       "tool": "run_dislocker",

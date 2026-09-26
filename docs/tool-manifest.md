@@ -2168,3 +2168,129 @@ Return a reference guide of available forensic tools and their relationships.
 **Returns:** `categories[]`, `guide{}` or `tools[]`
 
 **Roles:** `CROSS_PLANNER`
+
+---
+
+## 21. Reverse Engineering (interactive)
+
+Static analysis of one sample with a disassembler/decompiler backend (Ghidra; see [reverse-engineering.md](reverse-engineering.md)). The sample is never executed, emulated or debugged, and no tool accepts a script or a command for the engine. These tools have **no pipeline role**: they are exposed by `mulder serve` for interactive use (Claude Code, Claude Desktop) and are not called by `mulder investigate`.
+
+Every tool takes `file_path` (absolute path to the sample) and `backend` (default `"ghidra"`). A `target` is a function, import or symbol name, or a hex address with or without `0x`; addresses in results are lowercase `0x` hex. Reading tools return the whole page (`source` is `None`) with `total` / `next_offset` for paging, `sample_sha256`, and a `note` that the content is attacker-controlled data. Before `reverse_analyze`, they return `error_type: "not_analyzed"`. Other error types: `binary_missing` (Ghidra, a JDK or pyghidra missing), `file_not_found`, `invalid_parameter`, `not_found`, `timeout` (the engine process was killed; the next call reopens the saved project), `backend_error`.
+
+The Ghidra project lives in `<db_dir>/reverse/<case>/<sha256[:16]>_<name>/ghidra/mulder.gpr` (`_standalone` instead of the case when no case is open), next to `ghidra-worker.log` and `annotations.jsonl`.
+
+### reverse_analyze
+
+Load a sample into the engine and auto-analyse it. The first call can take minutes; later calls reuse the saved project without analysing again.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| file_path | str | yes | Sample path |
+| backend | str | no | `"ghidra"` (default) |
+
+**Returns:** `format`, `language`, `processor`, `compiler`, `image_base`, `sha256`, `functions{total, library, thunk, by_origin}`, `imports`, `entry_points[]` (max 20), `analysis_seconds`, `analysis_completed`, `project_reused`, `project_dir`, `project_file`. Indexes the summary once as `reverse.program`. `status` is `partial` when auto-analysis hit its time limit.
+
+**Roles:** none (interactive)
+
+### reverse_list_functions
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| query | str | no | Substring of the function name |
+| origin | str | no | Comma-separated: `unnamed`, `symbol`, `analysis`, `user` |
+| include_library | bool | no | Include Function ID library matches (default false) |
+| include_thunks | bool | no | Include thunks (default false) |
+| sort | str | no | `address` (default), `size`, `callers`, `callees` |
+| offset / limit | int | no | Paging (limit max 200, default 50) |
+
+**Returns:** page of `{name, address, size, origin, library, thunk, signature, callers, callees}`, `library_hidden`
+
+**Roles:** none (interactive)
+
+### reverse_decompile
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| target | str | yes | Function name or address |
+| offset / limit | int | no | Lines (limit max 400, default 200) |
+
+**Returns:** `name`, `address`, `signature`, `total_lines`, `start_line`, `next_offset`, `code`, `callees[]`, `callers[]` (max 20, `callers_total`), `strings[]` (max 30). On the first page of a function, the whole pseudo-C is indexed once per (sample, function) as `reverse.decompile` with `source_path` `<sample>::<address>` (`indexed_source`).
+
+**Roles:** none (interactive)
+
+### reverse_disassemble
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| target | str | yes | Function name or address |
+| offset / limit | int | no | Instructions (limit max 400, default 100) |
+
+**Returns:** `lines[]` as `address  bytes  instruction`, `next_offset`, `total` for a function
+
+**Roles:** none (interactive)
+
+### reverse_xrefs
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| target | str | yes | Function, import, symbol or address |
+| direction | str | no | `to` (default) or `from` |
+| offset / limit | int | no | Paging (limit max 200) |
+
+**Returns:** page of `{from_address, from_function, to_address, to_name, ref_type}`. References to an import through its IAT slot or a thunk are resolved to the calling code.
+
+**Roles:** none (interactive)
+
+### reverse_strings
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| query | str | no | Substring to keep |
+| min_length | int | no | Minimum length (default 4) |
+| offset / limit | int | no | Paging (limit max 200) |
+
+**Returns:** page of `{address, value (max 300 chars), functions[] (max 10)}`; `reached_via[]` when the function was found through a pointer in a data structure; `value_truncated` gives the full length of a cut value.
+
+**Roles:** none (interactive)
+
+### reverse_imports
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| query | str | no | Substring of the import or library name |
+| offset / limit | int | no | Paging (limit max 200) |
+
+**Returns:** page of `{library, name, address (IAT slot), callers[] (max 10), callers_total}`
+
+**Roles:** none (interactive)
+
+### reverse_read_bytes
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| target | str | yes | Symbol or address |
+| length | int | no | Bytes (default 64, max 4096; never past the memory block) |
+
+**Returns:** `address`, `length`, `requested`, `block`, `hex`, `ascii_preview`
+
+**Roles:** none (interactive)
+
+### reverse_annotate
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| target | str | yes | Function, symbol or address |
+| new_name | str | no | Identifier, max 200 chars |
+| comment | str | no | Comment (stored with a `[mulder]` prefix) |
+
+At least one of `new_name` and `comment` is required. Renames use the user-defined source type, a Note bookmark in category `mulder` marks every change, the project is saved, and a line is appended to `annotations.jsonl`.
+
+**Returns:** `address`, `function`, `old_name`, `new_name`, `comment`, `project_file`
+
+**Roles:** none (interactive)
+
+### reverse_annotations
+
+**Returns:** `total`, `annotations[]` (oldest first; the last 200 when there are more), `file`. Reads `annotations.jsonl`, so no engine process is needed.
+
+**Roles:** none (interactive)
