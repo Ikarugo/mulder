@@ -102,19 +102,36 @@ def _sha256(sample: Path) -> str:
     return _sha_cache[key]
 
 
-def default_backend() -> str:
-    """Engine used when a call does not name one."""
-    return os.environ.get("MULDER_REVERSE_BACKEND") or "ghidra"
+def default_backend(sample: Path | None = None) -> str:
+    """Engine used when a call does not name one.
+
+    ``MULDER_REVERSE_BACKEND`` wins (``mulder reverse --backend``); otherwise
+    a .NET assembly goes to ILSpy when it is installed, everything else to
+    Ghidra.
+    """
+    configured = os.environ.get("MULDER_REVERSE_BACKEND")
+    if configured and configured != "auto":
+        return configured
+    if sample is not None:
+        from mulder.reverse.sample import detect_sample_kind
+
+        try:
+            dotnet = detect_sample_kind(sample) == "pe_dotnet"
+        except OSError:
+            dotnet = False
+        if dotnet and get_backend("ilspy").check() is None:
+            return "ilspy"
+    return "ghidra"
 
 
 def _prepare(file_path: str, backend: str) -> _Prepared:
     """Resolve the backend and the sample's project directory, or raise."""
     if not file_path:
         raise BackendError("file_path is required", "invalid_parameter")
-    engine = get_backend(backend or default_backend())
     sample = Path(file_path)
     if not sample.is_file():
         raise BackendError(f"File not found: {file_path}", "file_not_found")
+    engine = get_backend(backend or default_backend(sample))
     sha = _sha256(sample)
     project = project_dir_for(get_cfg().db_dir, _case_id(), engine.name, sample, sha)
     return _Prepared(engine, sample, sha, project)
@@ -206,7 +223,7 @@ def reverse_analyze(file_path: str, backend: str = "") -> dict[str, object]:
 
     Args:
         file_path: Absolute path to the sample.
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -222,7 +239,9 @@ def reverse_analyze(file_path: str, backend: str = "") -> dict[str, object]:
         return _fail(tc_id, "reverse_analyze", params, exc, t0)
 
     info["project_dir"] = str(prep.project)
-    info.setdefault("project_file", str(prep.project / "mulder.gpr"))
+    info["backend"] = prep.backend.name
+    if prep.backend.name == "ghidra":
+        info.setdefault("project_file", str(prep.project / "mulder.gpr"))
     info["sample_sha256"] = prep.sha256
     if info.get("analysis_completed") is False:
         info["tool_warning"] = (
@@ -286,7 +305,7 @@ def reverse_list_functions(
         sort: address, size, callers or callees.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -391,7 +410,7 @@ def reverse_decompile(
         target: Function name or hex address (with or without 0x).
         offset: First line to return.
         limit: Lines per page (max 400).
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -450,7 +469,7 @@ def reverse_disassemble(
         target: Function name or hex address (with or without 0x).
         offset: First instruction to return.
         limit: Instructions per page (max 400).
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -495,7 +514,7 @@ def reverse_xrefs(
         direction: "to" (references to target) or "from" (references made by it).
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -546,7 +565,7 @@ def reverse_strings(
         min_length: Minimum string length.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -595,7 +614,7 @@ def reverse_imports(
         query: Case-insensitive substring of the import or library name.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -634,7 +653,7 @@ def reverse_read_bytes(
         file_path: Absolute path to the sample.
         target: Symbol name or hex address.
         length: Number of bytes (max 4096).
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -681,7 +700,7 @@ def reverse_annotate(
         target: Function name, symbol or hex address.
         new_name: New name (identifier, max 200 chars); empty to keep the name.
         comment: Comment to add; empty for none.
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -710,7 +729,8 @@ def reverse_annotate(
         )
     except BackendError as exc:
         return _fail(tc_id, "reverse_annotate", params, exc, t0)
-    result["project_file"] = str(prep.project / "mulder.gpr")
+    if prep.backend.name == "ghidra":
+        result["project_file"] = str(prep.project / "mulder.gpr")
     return tool_response(
         tc_id, "reverse_annotate", params, result, None, (time.monotonic() - t0) * 1000
     )
@@ -730,7 +750,7 @@ def reverse_annotations(file_path: str, backend: str = "") -> dict[str, object]:
 
     Args:
         file_path: Absolute path to the sample.
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {"file_path": file_path, "backend": backend}
     return _read("reverse_annotations", params, file_path, backend, "annotations", {})
@@ -970,7 +990,7 @@ def reverse_call_path(file_path: str, target: str, backend: str = "") -> dict[st
     Args:
         file_path: Absolute path to the sample.
         target: Function name or hex address.
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {"file_path": file_path, "target": target, "backend": backend}
     return _read("reverse_call_path", params, file_path, backend, "call_path", {"target": target})
@@ -1030,7 +1050,7 @@ def reverse_map_sample(file_path: str, backend: str = "") -> dict[str, object]:
 
     Args:
         file_path: Absolute path to the sample.
-        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
+        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()

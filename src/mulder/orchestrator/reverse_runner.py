@@ -44,6 +44,31 @@ __all__ = ["ReverseOrchestrator", "SampleCaseError"]
 logger = logging.getLogger(__name__)
 
 SAMPLE_KIND_KEY = "reverse:sample_kind"
+ROUTE_KEY = "reverse:route"
+
+
+def choose_route(kind: str) -> tuple[str, str]:
+    """``(route, note)`` for a sample kind: which phases apply, and why.
+
+    ``disassembler``: every phase (native code through Ghidra, .NET through
+    ILSpy when it is installed); ``script``: triage decodes the layers,
+    then counter-analysis; ``triage_only``: triage and report.
+    """
+    from mulder.reverse import get_backend
+    from mulder.reverse.sample import describe_kind
+
+    if kind in NATIVE_KINDS:
+        return "disassembler", describe_kind(kind)
+    if kind == "pe_dotnet":
+        if get_backend("ilspy").check() is None:
+            return "disassembler", (
+                ".NET assembly: the reverse_* tools decompile it to C# with ILSpy "
+                "(methods are Namespace.Type::Method; addresses are file:line)."
+            )
+        return "triage_only", describe_kind(kind) + " ILSpy (ilspycmd) is not installed."
+    if kind == "script":
+        return "script", describe_kind(kind)
+    return "triage_only", describe_kind(kind)
 
 
 class SampleCaseError(RuntimeError):
@@ -57,6 +82,7 @@ class ReverseOrchestrator(Orchestrator):
         self.sample = Path(sample_path).expanduser().resolve()
         super().__init__(evidence_path=str(self.sample.parent), **kwargs)
         self.sample_kind = "unknown"
+        self.route = "triage_only"
         self.sample_sha256 = ""
         self._phase_usage: list[dict[str, Any]] = []
         self._prompt_vars: dict[str, str] = {}
@@ -68,12 +94,13 @@ class ReverseOrchestrator(Orchestrator):
     def prepare_case(self) -> None:
         """Create the case for the sample and record what kind of sample it is."""
         from mulder.reverse.backend import sample_sha256
-        from mulder.reverse.sample import describe_kind, detect_sample_kind
+        from mulder.reverse.sample import detect_sample_kind
         from mulder.reverse.state import CASE_KIND_KEY, REVERSE_KIND, SAMPLE_KEY
 
         if not self.sample.is_file():
             raise SampleCaseError(f"Sample not found: {self.sample}")
         self.sample_kind = detect_sample_kind(self.sample)
+        self.route, note = choose_route(self.sample_kind)
         self.sample_sha256 = sample_sha256(self.sample)
 
         import mulder.server.tools  # noqa: F401 - registers the tools
@@ -102,6 +129,7 @@ class ReverseOrchestrator(Orchestrator):
         db.set_kv(CASE_KIND_KEY, REVERSE_KIND)
         db.set_kv(SAMPLE_KEY, str(self.sample))
         db.set_kv(SAMPLE_KIND_KEY, self.sample_kind)
+        db.set_kv(ROUTE_KEY, self.route)
         registered = {str(row.get("file_path")) for row in db.get_evidence_registry()}
         if str(self.sample) not in registered:
             db.register_evidence_file(
@@ -112,7 +140,7 @@ class ReverseOrchestrator(Orchestrator):
             "sample_path": str(self.sample),
             "sample_sha256": self.sample_sha256,
             "sample_kind": self.sample_kind,
-            "sample_note": "  note: " + describe_kind(self.sample_kind),
+            "sample_note": "  note: " + note,
             "case_briefing": "",
         }
         self.dashboard.log_info(
@@ -133,11 +161,10 @@ class ReverseOrchestrator(Orchestrator):
         briefing = self._evidence.load_case_briefing()
         self._prompt_vars["case_briefing"] = f"\n{briefing}" if briefing else ""
 
-        native = self.sample_kind in NATIVE_KINDS
         await self._phase(RE_TRIAGE, result)
 
         loaded = packed = False
-        if native:
+        if self.route == "disassembler":
             await self._phase(RE_MAPPING, result)
             snap = self.snapshot()
             loaded = any(str(s).startswith("reverse.program") for s in snap["sources"])
@@ -150,8 +177,9 @@ class ReverseOrchestrator(Orchestrator):
             else:
                 await self._phase(RE_DEEP, result)
         else:
-            self._skip("re_mapping", f"{self.sample_kind} sample: no disassembler route", result)
-            self._skip("re_deep", f"{self.sample_kind} sample: no disassembler route", result)
+            why = f"{self.sample_kind} sample: no disassembler route"
+            self._skip("re_mapping", why, result)
+            self._skip("re_deep", why, result)
 
         if not packed:
             await self._phase(RE_COUNTER, result)
@@ -242,6 +270,7 @@ class ReverseOrchestrator(Orchestrator):
         findings = ctx.db.get_findings()
         snap: dict[str, Any] = {
             "sample_kind": self.sample_kind,
+            "route": self.route,
             "tool_counts": dict(ctx.audit.summary().tool_call_counts),
             "sources": sorted({s.source_name for s in ctx.db.get_sources() if s.line_count}),
             "findings_count": len(findings),

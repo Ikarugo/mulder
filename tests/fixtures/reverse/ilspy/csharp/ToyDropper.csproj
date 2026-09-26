@@ -1,0 +1,10 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>ToyDropper</AssemblyName>
+    <OutputType>Exe</OutputType>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System.Net.WebClient" />
+    <Reference Include="Microsoft.Win32.Registry" />
+  </ItemGroup>
+</Project>

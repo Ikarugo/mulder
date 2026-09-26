@@ -147,6 +147,10 @@ def _ensure_builtin() -> None:
         from mulder.reverse.ghidra_backend import GhidraBackend
 
         register_backend("ghidra", GhidraBackend)
+    if "ilspy" not in _registry:
+        from mulder.reverse.ilspy_backend import IlspyBackend
+
+        register_backend("ilspy", IlspyBackend)
 
 
 def sample_sha256(path: Path) -> str:

@@ -53,10 +53,14 @@ def validate_re_triage(snap: dict[str, Any]) -> GateResult:
     if not determined:
         gaps.append("File type not determined: run triage_binary on the sample.")
 
+    default_route = (
+        "disassembler" if kind in NATIVE_KINDS else "script" if kind == "script" else "triage_only"
+    )
+    route = str(snap.get("route") or default_route)
     required = ["triage_binary"]
-    if kind in NATIVE_KINDS:
+    if route == "disassembler":
         required += ["run_capa", "reverse_analyze"]
-    elif kind == "script":
+    elif route == "script":
         required = ["reverse_read_script"]
     for tool in required:
         ok = _called(snap, tool)

@@ -28,13 +28,16 @@ def _md_cell(text: object) -> str:
 
 
 def project_file_for_case(db_dir: Path, case_id: str, sample: Path) -> Path | None:
-    """The Ghidra project of the case's sample, if one was created."""
+    """What the analyst opens: the Ghidra project, or ILSpy's C# project directory."""
     try:
         sha = sample_sha256(sample)
     except OSError:
         return None
     project = project_dir_for(db_dir, case_id, "ghidra", sample, sha) / PROJECT_FILE
-    return project if project.is_file() else None
+    if project.is_file():
+        return project
+    csharp = project_dir_for(db_dir, case_id, "ilspy", sample, sha) / "csharp"
+    return csharp if csharp.is_dir() else None
 
 
 def build_reverse_section(
@@ -71,10 +74,34 @@ def build_reverse_section(
         ]
 
     project = project_file_for_case(db_dir, case_id, sample)
-    lines += ["### Ghidra project", ""]
-    if project is None:
-        lines += ["No Ghidra project was created for this sample.", ""]
+    if project is not None and project.is_dir():
+        lines += [
+            "### Decompiled C# project (ILSpy)",
+            "",
+            f"The assembly was decompiled to `{project}`: open it in an editor or in ILSpy "
+            "to check the analysis. An assembly cannot be annotated in place, so renames "
+            "and comments are listed below and kept in "
+            f"`{project.parent / 'annotations.jsonl'}`.",
+            "",
+        ]
+        ann = read_annotations(project.parent)
+        rows = ann["annotations"][-_ANNOTATIONS_SHOWN:]
+        if rows:
+            lines += ["| Method | Proposed name | Comment |", "|---|---|---|"]
+            lines += [
+                f"| `{_md_cell(r.get('function'))}` | {_md_cell(r.get('new_name'))} | "
+                f"{_md_cell(r.get('comment'))} |"
+                for r in rows
+            ]
+            lines.append("")
+        project = None
+        shown_project = True
     else:
+        shown_project = False
+        lines += ["### Ghidra project", ""]
+    if project is None and not shown_project:
+        lines += ["No Ghidra project was created for this sample.", ""]
+    elif project is not None:
         lines += [
             f"Open `{project}` in Ghidra (File > Open Project) to check the analysis. "
             "Every function or label the agent renamed or commented carries a Note bookmark "
@@ -109,7 +136,15 @@ def build_reverse_section(
         lines.append("")
 
     caps = capa_capabilities(get, str(sample))
-    if caps is not None:
+    if caps is None:
+        lines += [
+            "### capa capabilities",
+            "",
+            "capa did not run on this sample: no automatic capability list was cross-checked "
+            "against the code.",
+            "",
+        ]
+    else:
         cov = capability_coverage(caps, state["verdicts"])
         lines += [
             "### capa capabilities checked against the code",

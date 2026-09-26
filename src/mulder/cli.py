@@ -725,10 +725,10 @@ def _human_bytes(count: int) -> str:
 @click.argument("case_id")
 @click.option(
     "--backend",
-    default="ghidra",
-    type=click.Choice(["ghidra"]),
+    default="auto",
+    type=click.Choice(["auto", "ghidra", "ilspy"]),
     show_default=True,
-    help="Disassembler/decompiler engine.",
+    help="Decompiler: auto picks ILSpy for .NET assemblies and Ghidra otherwise.",
 )
 @click.option("--model", default=None, help="Fallback model for all roles.")
 @click.option("--planner-model", default=None, help="Model for planner agents.")
@@ -832,10 +832,20 @@ def reverse_cmd(
     from mulder.orchestrator.reverse_runner import ReverseOrchestrator, SampleCaseError
     from mulder.orchestrator.types import EffortLevel
     from mulder.reverse import get_backend
+    from mulder.reverse.sample import detect_sample_kind
 
-    reason = get_backend(backend).check()
-    if reason:
-        raise click.ClickException(f"The {backend} backend is not usable: {reason}")
+    kind = detect_sample_kind(Path(sample))
+    needed = backend
+    if backend == "auto":
+        needed = (
+            "ilspy" if kind == "pe_dotnet" else "ghidra" if kind in ("pe", "elf", "macho") else ""
+        )
+    if needed:
+        reason = get_backend(needed).check()
+        if reason and (backend != "auto" or needed == "ghidra"):
+            raise click.ClickException(f"The {needed} backend is not usable: {reason}")
+        if reason:
+            click.echo(f"Warning: {reason} The .NET sample gets triage only.", err=True)
 
     cwd_path = Path(cwd).expanduser()
     try:
@@ -876,7 +886,7 @@ def reverse_cmd(
         cwd=str(cwd_path),
         model_config=model_config,
         effort=cast("EffortLevel", effort),
-        env={"MULDER_REVERSE_BACKEND": backend},
+        env={} if backend == "auto" else {"MULDER_REVERSE_BACKEND": backend},
         parallel_extractions=1,
         proxy_config=proxy_config,
         case_id=case_id,
