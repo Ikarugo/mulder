@@ -720,6 +720,187 @@ def _human_bytes(count: int) -> str:
     return f"{count / 1024**2:.0f} MB"
 
 
+@cli.command("reverse")
+@click.argument("sample", type=click.Path(exists=True, dir_okay=False))
+@click.argument("case_id")
+@click.option(
+    "--backend",
+    default="ghidra",
+    type=click.Choice(["ghidra"]),
+    show_default=True,
+    help="Disassembler/decompiler engine.",
+)
+@click.option("--model", default=None, help="Fallback model for all roles.")
+@click.option("--planner-model", default=None, help="Model for planner agents.")
+@click.option("--executor-model", default=None, help="Model for executor agents.")
+@click.option("--analyst-model", default=None, help="Model for analyst agents.")
+@click.option(
+    "--config",
+    "config_path",
+    default=None,
+    type=click.Path(),
+    help="YAML config file for models and settings.",
+)
+@click.option(
+    "--effort",
+    default="high",
+    type=click.Choice(["max", "xhigh", "high", "medium", "low"]),
+    show_default=True,
+    help="Effort level of the agent sessions (the API's effort parameter).",
+)
+@click.option(
+    "--no-thinking",
+    is_flag=True,
+    help="Disable extended thinking for all queries; overrides --effort.",
+)
+@click.option(
+    "--db-dir",
+    default=DEFAULT_DB_DIR,
+    envvar=DB_DIR_ENV_VAR,
+    show_default=True,
+    help="Case database directory (env: MULDER_DB_DIR).",
+)
+@click.option(
+    "--cwd",
+    default=DEFAULT_WORKSPACE_DIR,
+    envvar="MULDER_CWD",
+    show_default=True,
+    help="Working directory for agent sessions (env: MULDER_CWD).",
+)
+@click.option(
+    "--max-compactions",
+    default=DEFAULT_MAX_COMPACTIONS,
+    envvar="MULDER_MAX_COMPACTIONS",
+    type=click.IntRange(min=0),
+    show_default=True,
+    help="Continuation sessions allowed after context exhaustion; 0 disables.",
+)
+@click.option(
+    "--proxy-config",
+    default=None,
+    type=click.Path(exists=True),
+    help="LiteLLM config YAML for custom model routing (e.g. a local model).",
+)
+@click.option(
+    "--show-cli-stderr",
+    is_flag=True,
+    help="Stream agent CLI diagnostics to the dashboard and orchestrator.log.",
+)
+def reverse_cmd(
+    sample: str,
+    case_id: str,
+    backend: str,
+    model: str | None,
+    planner_model: str | None,
+    executor_model: str | None,
+    analyst_model: str | None,
+    config_path: str | None,
+    effort: str,
+    no_thinking: bool,
+    db_dir: str,
+    cwd: str,
+    max_compactions: int,
+    proxy_config: str | None,
+    show_cli_stderr: bool,
+) -> None:
+    """Statically analyse one malware sample and report its capabilities.
+
+    Runs triage, mapping, deep analysis, counter-analysis and report phases
+    with the planner/executor/analyst pipeline. The sample is never
+    executed. Produces a capability report whose every claim cites the code
+    that shows it, the IOCs, an ATT&CK layer, a candidate YARA rule (to be
+    validated by a human) and, for native executables, an annotated Ghidra
+    project to open in the Ghidra GUI.
+
+    SAMPLE is the file to analyse. CASE_ID names the case (one sample per
+    case).
+
+    \b
+      mulder reverse /samples/dropper.exe dropper-01 \\
+        --planner-model claude-opus-5-5 --analyst-model claude-opus-5-5 \\
+        --executor-model claude-haiku-4-5
+
+    Run it in an isolated analysis VM. For confidential samples, point the
+    models at a local LLM through --proxy-config (see
+    docs/reverse-engineering.md).
+    """
+    import asyncio
+    from typing import cast
+
+    from mulder.orchestrator.errors import AuthenticationError, ModelNotAvailableError
+    from mulder.orchestrator.models import ModelConfig
+    from mulder.orchestrator.reverse_runner import ReverseOrchestrator, SampleCaseError
+    from mulder.orchestrator.types import EffortLevel
+    from mulder.reverse import get_backend
+
+    reason = get_backend(backend).check()
+    if reason:
+        raise click.ClickException(f"The {backend} backend is not usable: {reason}")
+
+    cwd_path = Path(cwd).expanduser()
+    try:
+        cwd_path.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise click.ClickException(f"Cannot create working directory {cwd_path}: {exc}") from exc
+    mcp_config_file = cwd_path / ".mcp.json"
+    if not mcp_config_file.exists():
+        default_config = DEFAULT_MCP_CONFIG.read_text(encoding="utf-8")
+        mcp_config_file.write_text(default_config, encoding="utf-8")
+
+    log_dir = resolve_db_dir(db_dir)
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / "orchestrator.log"
+    file_handler = logging.FileHandler(str(log_file), mode="a")
+    file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s"))
+    root_logger = logging.getLogger()
+    root_logger.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+
+    model_config = ModelConfig.from_args(
+        model=model,
+        planner_model=planner_model,
+        executor_model=executor_model,
+        analyst_model=analyst_model,
+        config_path=config_path,
+    )
+    click.echo(f"Mulder v{__version__} \u2014 static analysis of {sample}", err=True)
+    click.echo(
+        f"Models: planner {model_config.planner}, executor {model_config.executor}, "
+        f"analyst {model_config.analyst}; backend {backend}; effort {effort}",
+        err=True,
+    )
+    click.echo(f"Logging to {log_file}", err=True)
+
+    orchestrator = ReverseOrchestrator(
+        sample_path=sample,
+        cwd=str(cwd_path),
+        model_config=model_config,
+        effort=cast("EffortLevel", effort),
+        env={"MULDER_REVERSE_BACKEND": backend},
+        parallel_extractions=1,
+        proxy_config=proxy_config,
+        case_id=case_id,
+        db_dir=log_dir,
+        no_thinking=no_thinking,
+        show_cli_stderr=show_cli_stderr,
+        max_compactions=max_compactions,
+    )
+    try:
+        result = asyncio.run(orchestrator.run())
+    except SampleCaseError as exc:
+        orchestrator.dashboard.stop()
+        raise click.ClickException(str(exc)) from None
+    except (AuthenticationError, ModelNotAvailableError) as exc:
+        orchestrator.dashboard.stop()
+        click.echo(f"\nError: {exc}", err=True)
+        raise SystemExit(2) from None
+
+    orchestrator.dashboard.print_summary(result)
+    click.echo(f"Report: {log_dir / (case_id + '.report.md')}", err=True)
+    if not result.success:
+        raise SystemExit(1)
+
+
 @cli.command("export-iocs")
 @click.argument("case_id")
 @click.option(

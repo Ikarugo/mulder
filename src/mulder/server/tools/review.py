@@ -23,6 +23,7 @@ from mulder.patterns import (
     classify_ip,
     source_is_cited,
 )
+from mulder.reverse.state import is_reverse_case
 from mulder.server.app import get_ctx, mcp
 from mulder.server.helpers import hash_output, make_tool_call_id
 from mulder.server.tool_access import ANALYSTS, Role, tool_access
@@ -324,7 +325,9 @@ def check_finalize_readiness() -> dict[str, object]:
     sources = ctx.db.get_sources()
     audit_summary = ctx.audit.summary()
 
-    gate_results = _evaluate_finalize_gates(findings, case_metadata, sources, audit_summary)
+    gate_results = _evaluate_finalize_gates(
+        findings, case_metadata, sources, audit_summary, reverse=is_reverse_case(ctx.db.get_kv)
+    )
     all_passed = all(g["passed"] for g in gate_results)
 
     if all_passed:
@@ -450,7 +453,9 @@ def get_investigation_summary() -> dict[str, object]:
     case_metadata = ctx.db.get_case_metadata()
     audit_summary = ctx.audit.summary()
 
-    gate_results = _evaluate_finalize_gates(findings, case_metadata, sources, audit_summary)
+    gate_results = _evaluate_finalize_gates(
+        findings, case_metadata, sources, audit_summary, reverse=is_reverse_case(ctx.db.get_kv)
+    )
     all_passed = all(g["passed"] for g in gate_results)
     blockers: list[str] = [f"{g['name']}: {g['detail']}" for g in gate_results if not g["passed"]]
 

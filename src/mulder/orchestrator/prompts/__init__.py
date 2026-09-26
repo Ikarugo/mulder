@@ -42,3 +42,23 @@ CROSS_SYSTEM_ANALYST_PROMPT: str = _load("cross_system_analyst.md")
 NARRATIVE_PLANNER_PROMPT: str = _load("narrative_planner.md")
 NARRATIVE_EXECUTOR_PROMPT: str = _load("narrative_executor.md")
 NARRATIVE_ANALYST_PROMPT: str = _load("narrative_analyst.md")
+
+# Reverse-engineering pipeline (``mulder reverse``). Every role gets the
+# shared static-analysis and adversarial-sample rules.
+REVERSE_COMMON: str = _load("reverse_common.md")
+
+
+def _reverse(name: str) -> str:
+    return _load(name) + "\n\n" + REVERSE_COMMON
+
+
+REVERSE_EXECUTOR_PROMPT: str = _reverse("reverse_executor.md")
+REVERSE_TRIAGE_PLANNER_PROMPT: str = _reverse("reverse_triage_planner.md")
+REVERSE_TRIAGE_ANALYST_PROMPT: str = _reverse("reverse_triage_analyst.md")
+REVERSE_MAPPING_PLANNER_PROMPT: str = _reverse("reverse_mapping_planner.md")
+REVERSE_MAPPING_ANALYST_PROMPT: str = _reverse("reverse_mapping_analyst.md")
+REVERSE_DEEP_PLANNER_PROMPT: str = _reverse("reverse_deep_planner.md")
+REVERSE_DEEP_ANALYST_PROMPT: str = _reverse("reverse_deep_analyst.md")
+REVERSE_COUNTER_PLANNER_PROMPT: str = _reverse("reverse_counter_planner.md")
+REVERSE_COUNTER_ANALYST_PROMPT: str = _reverse("reverse_counter_analyst.md")
+REVERSE_REPORT_PROMPT: str = _reverse("reverse_report.md")

@@ -24,6 +24,7 @@ from uuid import uuid4
 from mulder.models import AuditSummary, CaseMetadataRow, Finding, SourceRow
 from mulder.patterns import SEVERITY_ORDER, source_is_cited
 from mulder.report.renderer import ReportRenderer
+from mulder.reverse.state import is_reverse_case
 from mulder.server.app import get_ctx, get_job_store, mcp
 from mulder.server.helpers import error_response, hash_output, make_tool_call_id
 from mulder.server.tool_access import ANALYSTS, Role, tool_access
@@ -100,6 +101,7 @@ def _evaluate_finalize_gates(
     case_metadata: CaseMetadataRow,
     sources: list[SourceRow],
     audit_summary: AuditSummary,
+    reverse: bool = False,
 ) -> list[dict[str, object]]:
     """Evaluate all finalize_report hard gates and return per-gate results.
 
@@ -107,20 +109,28 @@ def _evaluate_finalize_gates(
     describing the gate status.  Called by both ``finalize_report``
     (which blocks on the first failure) and ``check_finalize_readiness``
     (which reports all gates).
+
+    *reverse* marks a static malware analysis (``mulder reverse``): its
+    findings describe code, not events, so they carry no timestamps, a
+    small sample can honestly have a single capability, and the sources
+    are the few outputs of one sample. The reverse pipeline enforces its
+    own gates (every capa capability decided, findings citing code).
     """
     gates: list[dict[str, object]] = []
     non_negative = [f for f in findings if not f.title.startswith(_NEGATIVE_PREFIX)]
+    min_findings = 1 if reverse else _MIN_NON_NEGATIVE_FINDINGS
+    min_cited = 1 if reverse else _MIN_CITED_SOURCES
 
     # Gate 1: Minimum non-negative finding count
     count = len(non_negative)
-    passed = count >= _MIN_NON_NEGATIVE_FINDINGS
+    passed = count >= min_findings
     detail: str
     if passed:
-        detail = f"{count} non-negative findings submitted (minimum {_MIN_NON_NEGATIVE_FINDINGS})"
+        detail = f"{count} non-negative findings submitted (minimum {min_findings})"
     else:
         detail = (
             f"Only {count} non-negative findings submitted, "
-            f"need at least {_MIN_NON_NEGATIVE_FINDINGS}. "
+            f"need at least {min_findings}. "
             f"Submit more findings with submit_finding before finalizing."
         )
     gates.append({"name": "minimum_findings", "passed": passed, "detail": detail})
@@ -130,9 +140,11 @@ def _evaluate_finalize_gates(
     # timestamps (e.g., "BitLocker keys stored insecurely" is a state,
     # not a timed event). Exempt them to avoid incentivizing fabricated dates.
     ts_required = [f for f in non_negative if f.severity not in _TS_EXEMPT_SEVERITIES]
-    missing_ts = [f for f in ts_required if not f.event_time_start]
+    missing_ts = [] if reverse else [f for f in ts_required if not f.event_time_start]
     passed = len(missing_ts) == 0
-    if passed:
+    if reverse:
+        detail = "Static malware analysis: findings describe code, not timed events"
+    elif passed:
         detail = "All non-negative findings have event_time_start"
     else:
         titles = [f.title for f in missing_ts[:5]]
@@ -188,7 +200,7 @@ def _evaluate_finalize_gates(
     if total > 0:
         cited_count = sum(1 for n in evidence_names if source_is_cited(n, finding_source_names))
         coverage_pct = round(cited_count / total * 100, 1)
-        passed = cited_count >= min(_MIN_CITED_SOURCES, total)
+        passed = cited_count >= min(min_cited, total)
         advisory = passed and coverage_pct < _CITATION_ADVISORY_PCT
         figure = (
             f"{coverage_pct}% of evidence sources cited ({cited_count}/{total} distinct names)"
@@ -196,7 +208,7 @@ def _evaluate_finalize_gates(
         if not passed:
             detail = (
                 f"Only {cited_count} distinct evidence source(s) cited; need at least "
-                f"{_MIN_CITED_SOURCES}. {figure}. Review uncited sources with "
+                f"{min_cited}. {figure}. Review uncited sources with "
                 f"audit_evidence_coverage and cite what the findings actually rest on."
             )
         elif advisory:
@@ -673,7 +685,10 @@ def finalize_report() -> dict[str, object]:
     audit_summary = ctx.audit.summary()
     sources_list = ctx.db.get_sources()
 
-    gate_results = _evaluate_finalize_gates(findings, case_metadata, sources_list, audit_summary)
+    reverse = is_reverse_case(ctx.db.get_kv)
+    gate_results = _evaluate_finalize_gates(
+        findings, case_metadata, sources_list, audit_summary, reverse=reverse
+    )
     for gate in gate_results:
         if not gate["passed"]:
             return {
@@ -742,6 +757,11 @@ def finalize_report() -> dict[str, object]:
         html_path = None
     else:
         html_warning = None
+
+    if reverse:
+        from mulder.reverse.report import add_reverse_section
+
+        report_text, html_text = add_reverse_section(report_text, html_text)
 
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(report_text, encoding="utf-8")

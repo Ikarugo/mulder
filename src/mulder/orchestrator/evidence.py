@@ -348,6 +348,19 @@ class ServerBridge:
         self._case_id = case_id
         self._db_dir = db_dir
 
+    def ensure_config(self) -> None:
+        """Initialise the server configuration without opening a case.
+
+        For callers that create the case themselves (``mulder reverse``).
+        """
+        import mulder.server.app as server_app
+
+        db_dir = resolve_db_dir(self._db_dir)
+        if server_app._cfg is None or server_app._cfg.db_dir != db_dir:
+            from mulder.server.app import ServerConfig
+
+            server_app._cfg = ServerConfig(db_dir=db_dir)
+
     def ensure_context(self) -> None:
         """Initialize a fresh server context for direct tool invocations.
 

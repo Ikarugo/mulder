@@ -123,6 +123,30 @@ def _sanitize_for_prompt(text: str, max_len: int = 200) -> str:
     return cleaned
 
 
+_TOOL_CALL_ID_RE: re.Pattern[str] = re.compile(r"tc_[0-9a-f]{8}")
+
+
+def _sanitize_result(r: dict[str, Any]) -> dict[str, Any]:
+    """One executor result as the analyst sees it.
+
+    The executor's text is model output that may echo evidence content, so
+    only short, sanitised fields pass. A ``tool_call_id`` passes only in
+    its exact format, so the analyst can cite the call in a finding (the
+    reverse pipeline's executor reports them).
+    """
+    out: dict[str, Any] = {
+        "tool": _sanitize_for_prompt(r.get("tool", ""), 100),
+        "status": r.get("status", ""),
+        "source": _sanitize_for_prompt(r.get("source", ""), 150),
+    }
+    tc = str(r.get("tool_call_id") or "")
+    if _TOOL_CALL_ID_RE.fullmatch(tc):
+        out["tool_call_id"] = tc
+    if r.get("target"):
+        out["target"] = _sanitize_for_prompt(str(r["target"]), 100)
+    return out
+
+
 class RoleRunner:
     """Runs planner, executor, and analyst roles within split-mode phases.
 
@@ -379,14 +403,7 @@ class RoleRunner:
         """
         model = self._model_config.resolve(phase.name, "analyst")
 
-        sanitized_results = [
-            {
-                "tool": _sanitize_for_prompt(r.get("tool", ""), 100),
-                "status": r.get("status", ""),
-                "source": _sanitize_for_prompt(r.get("source", ""), 150),
-            }
-            for r in exec_results.results
-        ]
+        sanitized_results = [_sanitize_result(r) for r in exec_results.results]
 
         context: dict[str, str] = {
             "execution_results": json.dumps(sanitized_results),

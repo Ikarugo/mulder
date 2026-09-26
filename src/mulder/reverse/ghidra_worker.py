@@ -934,10 +934,10 @@ class GhidraSession:
         }
         if found:
             chain: list[dict[str, str]] = []
-            k: int | None = goal
-            while k is not None:
-                parent, edge = seen[k]
-                f = by_key[k]
+            step: int | None = goal
+            while step is not None:
+                parent, edge = seen[step]
+                f = by_key[step]
                 chain.append(
                     {
                         "name": str(f.getName()),
@@ -945,7 +945,7 @@ class GhidraSession:
                         "edge": edge,
                     }
                 )
-                k = parent
+                step = parent
             result["path"] = list(reversed(chain))
             result["note"] = (
                 "edge=call is a direct call; edge=address_taken means the caller takes the "

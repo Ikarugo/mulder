@@ -21,6 +21,7 @@ RE_* roles only: no forensic investigation phase sees them.
 
 from __future__ import annotations
 
+import os
 import re
 import threading
 import time
@@ -101,11 +102,16 @@ def _sha256(sample: Path) -> str:
     return _sha_cache[key]
 
 
+def default_backend() -> str:
+    """Engine used when a call does not name one."""
+    return os.environ.get("MULDER_REVERSE_BACKEND") or "ghidra"
+
+
 def _prepare(file_path: str, backend: str) -> _Prepared:
     """Resolve the backend and the sample's project directory, or raise."""
     if not file_path:
         raise BackendError("file_path is required", "invalid_parameter")
-    engine = get_backend(backend)
+    engine = get_backend(backend or default_backend())
     sample = Path(file_path)
     if not sample.is_file():
         raise BackendError(f"File not found: {file_path}", "file_not_found")
@@ -186,7 +192,7 @@ def _program_summary(info: dict[str, Any]) -> str:
 
 @mcp.tool()
 @tool_access(Role.RE_EXECUTOR)
-def reverse_analyze(file_path: str, backend: str = "ghidra") -> dict[str, object]:
+def reverse_analyze(file_path: str, backend: str = "") -> dict[str, object]:
     """Load a PE/ELF/Mach-O sample into the disassembler and auto-analyse it.
 
     Call this first for any sample you want to reverse; the other reverse_*
@@ -200,7 +206,7 @@ def reverse_analyze(file_path: str, backend: str = "ghidra") -> dict[str, object
 
     Args:
         file_path: Absolute path to the sample.
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -258,7 +264,7 @@ def reverse_list_functions(
     sort: str = "address",
     offset: int = 0,
     limit: int = 50,
-    backend: str = "ghidra",
+    backend: str = "",
 ) -> dict[str, object]:
     """List the functions of an analysed sample, one page at a time.
 
@@ -280,7 +286,7 @@ def reverse_list_functions(
         sort: address, size, callers or callees.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -366,7 +372,7 @@ def reverse_decompile(
     target: str,
     offset: int = 0,
     limit: int = 200,
-    backend: str = "ghidra",
+    backend: str = "",
 ) -> dict[str, object]:
     """Decompile one function of an analysed sample to C-like pseudo-code.
 
@@ -385,7 +391,7 @@ def reverse_decompile(
         target: Function name or hex address (with or without 0x).
         offset: First line to return.
         limit: Lines per page (max 400).
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -428,7 +434,7 @@ def reverse_disassemble(
     target: str,
     offset: int = 0,
     limit: int = 100,
-    backend: str = "ghidra",
+    backend: str = "",
 ) -> dict[str, object]:
     """Disassemble a function, or the code from an address, one page at a time.
 
@@ -444,7 +450,7 @@ def reverse_disassemble(
         target: Function name or hex address (with or without 0x).
         offset: First instruction to return.
         limit: Instructions per page (max 400).
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -471,7 +477,7 @@ def reverse_xrefs(
     direction: str = "to",
     offset: int = 0,
     limit: int = 50,
-    backend: str = "ghidra",
+    backend: str = "",
 ) -> dict[str, object]:
     """List cross-references to or from a function, import, symbol or address.
 
@@ -489,7 +495,7 @@ def reverse_xrefs(
         direction: "to" (references to target) or "from" (references made by it).
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -522,7 +528,7 @@ def reverse_strings(
     min_length: int = 4,
     offset: int = 0,
     limit: int = 50,
-    backend: str = "ghidra",
+    backend: str = "",
 ) -> dict[str, object]:
     """List the strings the analyser defined in a sample, with the functions using them.
 
@@ -540,7 +546,7 @@ def reverse_strings(
         min_length: Minimum string length.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -572,7 +578,7 @@ def reverse_imports(
     query: str = "",
     offset: int = 0,
     limit: int = 50,
-    backend: str = "ghidra",
+    backend: str = "",
 ) -> dict[str, object]:
     """List the functions a sample imports, with the functions that call them.
 
@@ -589,7 +595,7 @@ def reverse_imports(
         query: Case-insensitive substring of the import or library name.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -614,7 +620,7 @@ def reverse_read_bytes(
     file_path: str,
     target: str,
     length: int = 64,
-    backend: str = "ghidra",
+    backend: str = "",
 ) -> dict[str, object]:
     """Read raw bytes from a sample's memory image at a symbol or address.
 
@@ -628,7 +634,7 @@ def reverse_read_bytes(
         file_path: Absolute path to the sample.
         target: Symbol name or hex address.
         length: Number of bytes (max 4096).
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -658,7 +664,7 @@ def reverse_annotate(
     target: str,
     new_name: str = "",
     comment: str = "",
-    backend: str = "ghidra",
+    backend: str = "",
 ) -> dict[str, object]:
     """Rename a function or label and/or add a comment in the sample's project.
 
@@ -675,7 +681,7 @@ def reverse_annotate(
         target: Function name, symbol or hex address.
         new_name: New name (identifier, max 200 chars); empty to keep the name.
         comment: Comment to add; empty for none.
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -712,7 +718,7 @@ def reverse_annotate(
 
 @mcp.tool()
 @tool_access(Role.RE_ANALYST | Role.RE_REPORT)
-def reverse_annotations(file_path: str, backend: str = "ghidra") -> dict[str, object]:
+def reverse_annotations(file_path: str, backend: str = "") -> dict[str, object]:
     """List every rename and comment made on a sample's project so far.
 
     Call before writing up an analysis, to cite what was renamed, or to
@@ -724,7 +730,7 @@ def reverse_annotations(file_path: str, backend: str = "ghidra") -> dict[str, ob
 
     Args:
         file_path: Absolute path to the sample.
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     params: dict[str, object] = {"file_path": file_path, "backend": backend}
     return _read("reverse_annotations", params, file_path, backend, "annotations", {})
@@ -948,7 +954,7 @@ def reverse_decode_layer(
 
 @mcp.tool()
 @tool_access(Role.RE_ANALYST)
-def reverse_call_path(file_path: str, target: str, backend: str = "ghidra") -> dict[str, object]:
+def reverse_call_path(file_path: str, target: str, backend: str = "") -> dict[str, object]:
     """Find the shortest static path from an entry point to a function.
 
     Call to check whether a capability is actually reachable: code capa
@@ -964,7 +970,7 @@ def reverse_call_path(file_path: str, target: str, backend: str = "ghidra") -> d
     Args:
         file_path: Absolute path to the sample.
         target: Function name or hex address.
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     params: dict[str, object] = {"file_path": file_path, "target": target, "backend": backend}
     return _read("reverse_call_path", params, file_path, backend, "call_path", {"target": target})
@@ -1010,7 +1016,7 @@ def _suspicious_category(name: str) -> str | None:
 
 @mcp.tool()
 @tool_access(Role.RE_EXECUTOR)
-def reverse_map_sample(file_path: str, backend: str = "ghidra") -> dict[str, object]:
+def reverse_map_sample(file_path: str, backend: str = "") -> dict[str, object]:
     """Build a map of an analysed sample: suspicious imports, IOC-like strings, hot functions.
 
     Call after reverse_analyze (and run_capa when available) to give the
@@ -1024,7 +1030,7 @@ def reverse_map_sample(file_path: str, backend: str = "ghidra") -> dict[str, obj
 
     Args:
         file_path: Absolute path to the sample.
-        backend: Reverse-engineering engine ("ghidra").
+        backend: Engine ("ghidra"); empty for the default (MULDER_REVERSE_BACKEND or ghidra).
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
