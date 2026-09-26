@@ -147,6 +147,10 @@ def _ensure_builtin() -> None:
         from mulder.reverse.ghidra_backend import GhidraBackend
 
         register_backend("ghidra", GhidraBackend)
+    if "radare2" not in _registry:
+        from mulder.reverse.radare2_backend import Radare2Backend
+
+        register_backend("radare2", Radare2Backend)
     if "ilspy" not in _registry:
         from mulder.reverse.ilspy_backend import IlspyBackend
 

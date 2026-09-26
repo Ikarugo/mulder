@@ -132,7 +132,7 @@ class _Session:
                 code = self.proc.wait(timeout=5)
                 tail = _log_tail(self.log_path)
                 raise BackendError(
-                    f"The Ghidra worker stopped (exit code {code}). "
+                    f"The engine worker stopped (exit code {code}). "
                     f"Last log lines ({self.log_path}):\n{tail}",
                     "backend_error",
                 )
@@ -147,7 +147,7 @@ class _Session:
             stream.flush()
         except (BrokenPipeError, OSError) as exc:
             raise BackendError(
-                f"The Ghidra worker is gone ({exc}). Last log lines:\n{_log_tail(self.log_path)}",
+                f"The engine worker is gone ({exc}). Last log lines:\n{_log_tail(self.log_path)}",
                 "backend_error",
             ) from exc
 
@@ -188,6 +188,11 @@ class GhidraBackend:
     """:class:`~mulder.reverse.backend.ReverseBackend` backed by headless Ghidra."""
 
     name = "ghidra"
+    #: File or directory whose presence means the analysed project is on disk.
+    project_marker = PROJECT_FILE
+    #: What engine the log messages name.
+    engine_label = "Ghidra"
+    worker_log = WORKER_LOG
 
     def __init__(
         self,
@@ -262,7 +267,9 @@ class GhidraBackend:
 
     def has_project(self, project_dir: Path) -> bool:
         """True when a finished analysis for this project is on disk."""
-        return (project_dir / SESSION_FILE).is_file() and (project_dir / PROJECT_FILE).is_file()
+        return (project_dir / SESSION_FILE).is_file() and (
+            project_dir / self.project_marker
+        ).exists()
 
     def _evict_for_new(self) -> None:
         """Close idle least-recently-used sessions until one slot is free."""
@@ -305,7 +312,7 @@ class GhidraBackend:
         self._evict_for_new()
         project_dir.mkdir(parents=True, exist_ok=True)
         analysis_timeout = max(30, int(timeout_s) - _STARTUP_MARGIN_S)
-        log_path = project_dir / WORKER_LOG
+        log_path = project_dir / self.worker_log
         log: IO[str] = log_path.open("a", encoding="utf-8")
         log.write(f"\n=== worker start {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())}\n")
         log.flush()
@@ -334,7 +341,7 @@ class GhidraBackend:
         except TimeoutError:
             sess.kill()
             raise BackendTimeout(
-                f"Ghidra did not finish loading and analysing {sample.name} within "
+                f"{self.engine_label} did not finish loading and analysing {sample.name} within "
                 f"{int(timeout_s)} s; the worker was stopped. Last log lines:\n"
                 f"{_log_tail(log_path)}"
             ) from None
@@ -373,8 +380,8 @@ class GhidraBackend:
             if not sess.alive():
                 self._drop(sess.project_dir)
                 raise BackendError(
-                    "The Ghidra worker for this sample has stopped; call reverse_analyze "
-                    f"again. Last log lines:\n{_log_tail(sess.log_path)}",
+                    f"The {self.engine_label} worker for this sample has stopped; call "
+                    f"reverse_analyze again. Last log lines:\n{_log_tail(sess.log_path)}",
                     "backend_error",
                 )
             rid = sess.next_id
@@ -388,8 +395,9 @@ class GhidraBackend:
                         del self._sessions[sess.project_dir]
                 sess.kill()
                 raise BackendTimeout(
-                    f"Ghidra did not answer '{op}' within {int(timeout_s)} s; its session "
-                    "was stopped (the analysed project is kept and reopens on the next call)."
+                    f"{self.engine_label} did not answer '{op}' within {int(timeout_s)} s; "
+                    "its session was stopped (the analysed project is kept and reopens on "
+                    "the next call)."
                 ) from None
             except BackendError:
                 self._drop(sess.project_dir)

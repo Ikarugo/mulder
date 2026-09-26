@@ -58,6 +58,7 @@ __all__ = [
     "reverse_decode_layer",
     "reverse_decompile",
     "reverse_disassemble",
+    "reverse_export_annotations",
     "reverse_imports",
     "reverse_list_functions",
     "reverse_map_sample",
@@ -223,7 +224,7 @@ def reverse_analyze(file_path: str, backend: str = "") -> dict[str, object]:
 
     Args:
         file_path: Absolute path to the sample.
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -305,7 +306,7 @@ def reverse_list_functions(
         sort: address, size, callers or callees.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -410,7 +411,7 @@ def reverse_decompile(
         target: Function name or hex address (with or without 0x).
         offset: First line to return.
         limit: Lines per page (max 400).
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -469,7 +470,7 @@ def reverse_disassemble(
         target: Function name or hex address (with or without 0x).
         offset: First instruction to return.
         limit: Instructions per page (max 400).
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -514,7 +515,7 @@ def reverse_xrefs(
         direction: "to" (references to target) or "from" (references made by it).
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -565,7 +566,7 @@ def reverse_strings(
         min_length: Minimum string length.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -614,7 +615,7 @@ def reverse_imports(
         query: Case-insensitive substring of the import or library name.
         offset: First row to return.
         limit: Rows per page (max 200).
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -653,7 +654,7 @@ def reverse_read_bytes(
         file_path: Absolute path to the sample.
         target: Symbol name or hex address.
         length: Number of bytes (max 4096).
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {
         "file_path": file_path,
@@ -700,7 +701,7 @@ def reverse_annotate(
         target: Function name, symbol or hex address.
         new_name: New name (identifier, max 200 chars); empty to keep the name.
         comment: Comment to add; empty for none.
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -750,7 +751,7 @@ def reverse_annotations(file_path: str, backend: str = "") -> dict[str, object]:
 
     Args:
         file_path: Absolute path to the sample.
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {"file_path": file_path, "backend": backend}
     return _read("reverse_annotations", params, file_path, backend, "annotations", {})
@@ -990,7 +991,7 @@ def reverse_call_path(file_path: str, target: str, backend: str = "") -> dict[st
     Args:
         file_path: Absolute path to the sample.
         target: Function name or hex address.
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     params: dict[str, object] = {"file_path": file_path, "target": target, "backend": backend}
     return _read("reverse_call_path", params, file_path, backend, "call_path", {"target": target})
@@ -1050,7 +1051,7 @@ def reverse_map_sample(file_path: str, backend: str = "") -> dict[str, object]:
 
     Args:
         file_path: Absolute path to the sample.
-        backend: "ghidra" or "ilspy" (.NET); empty to choose from the sample.
+        backend: "ghidra", "radare2" or "ilspy" (.NET); empty to choose from the sample.
     """
     tc_id = make_tool_call_id()
     t0 = time.monotonic()
@@ -1168,4 +1169,48 @@ def reverse_map_sample(file_path: str, backend: str = "") -> dict[str, object]:
         source = None
     return tool_response(
         tc_id, "reverse_map_sample", params, summary, source, (time.monotonic() - t0) * 1000
+    )
+
+
+@mcp.tool()
+@tool_access(Role.RE_ANALYST | Role.RE_REPORT)
+def reverse_export_annotations(file_path: str, backend: str = "") -> dict[str, object]:
+    """Write a Ghidra script that replays this sample's annotations.
+
+    Call to carry renames and comments made with radare2 (or in another
+    Ghidra project) into the analyst's own Ghidra: they open the sample and
+    run the script from the Script Manager.
+
+    Returns the script path and how many annotations it replays
+    (annotations without an address, such as ILSpy's, are left out).
+
+    Args:
+        file_path: Absolute path to the sample.
+        backend: Engine whose annotations to export; empty to choose from the sample.
+    """
+    from mulder.reverse.export import write_ghidra_replay_script
+
+    tc_id = make_tool_call_id()
+    t0 = time.monotonic()
+    params: dict[str, object] = {"file_path": file_path, "backend": backend}
+    try:
+        prep = _prepare(file_path, backend)
+    except BackendError as exc:
+        return _fail(tc_id, "reverse_export_annotations", params, exc, t0)
+    if not prep.project.is_dir():
+        return _fail(
+            tc_id,
+            "reverse_export_annotations",
+            params,
+            BackendError("No project for this sample yet: call reverse_analyze.", "not_analyzed"),
+            t0,
+        )
+    path, count = write_ghidra_replay_script(prep.project, str(prep.sample))
+    result: dict[str, object] = {
+        "script": str(path),
+        "annotations": count,
+        "how_to": "Open the sample in Ghidra, then Window > Script Manager > run this script.",
+    }
+    return tool_response(
+        tc_id, "reverse_export_annotations", params, result, None, (time.monotonic() - t0) * 1000
     )

@@ -27,17 +27,96 @@ def _md_cell(text: object) -> str:
     return str(text if text is not None else "").replace("|", "\\|").replace("\n", " ")[:300]
 
 
-def project_file_for_case(db_dir: Path, case_id: str, sample: Path) -> Path | None:
-    """What the analyst opens: the Ghidra project, or ILSpy's C# project directory."""
+def analysis_project(db_dir: Path, case_id: str, sample: Path) -> tuple[str, Path | None]:
+    """``(engine, what the analyst opens)``: Ghidra project, radare2 project or C# tree."""
     try:
         sha = sample_sha256(sample)
     except OSError:
-        return None
-    project = project_dir_for(db_dir, case_id, "ghidra", sample, sha) / PROJECT_FILE
-    if project.is_file():
-        return project
-    csharp = project_dir_for(db_dir, case_id, "ilspy", sample, sha) / "csharp"
-    return csharp if csharp.is_dir() else None
+        return "", None
+    candidates = (
+        ("ghidra", project_dir_for(db_dir, case_id, "ghidra", sample, sha) / PROJECT_FILE),
+        ("radare2", project_dir_for(db_dir, case_id, "radare2", sample, sha) / "mulder"),
+        ("ilspy", project_dir_for(db_dir, case_id, "ilspy", sample, sha) / "csharp"),
+    )
+    for kind, path in candidates:
+        if path.exists():
+            return kind, path
+    return "", None
+
+
+def project_file_for_case(db_dir: Path, case_id: str, sample: Path) -> Path | None:
+    """What the analyst opens (see :func:`analysis_project`)."""
+    return analysis_project(db_dir, case_id, sample)[1]
+
+
+def _annotation_table(project_dir: Path, by_address: bool) -> list[str]:
+    ann = read_annotations(project_dir)
+    rows = ann["annotations"][-_ANNOTATIONS_SHOWN:]
+    if not rows:
+        return []
+    if by_address:
+        out = [
+            f"Annotations ({ann['total']}):",
+            "",
+            "| Address | Old name | New name | Comment |",
+            "|---|---|---|---|",
+        ]
+        out += [
+            f"| `{_md_cell(r.get('address'))}` | {_md_cell(r.get('old_name'))} | "
+            f"{_md_cell(r.get('new_name'))} | {_md_cell(r.get('comment'))} |"
+            for r in rows
+        ]
+    else:
+        out = ["| Method | Proposed name | Comment |", "|---|---|---|"]
+        out += [
+            f"| `{_md_cell(r.get('function'))}` | {_md_cell(r.get('new_name'))} | "
+            f"{_md_cell(r.get('comment'))} |"
+            for r in rows
+        ]
+    if ann["total"] > len(rows):
+        out.append(f"\nFull history: `{ann['file']}`.")
+    out.append("")
+    return out
+
+
+def _project_lines(kind: str, project: Path | None, sample: str) -> list[str]:
+    if project is None:
+        return ["### Analysis project", "", "No disassembler project was created.", ""]
+    if kind == "ghidra":
+        return [
+            "### Ghidra project",
+            "",
+            f"Open `{project}` in Ghidra (File > Open Project) to check the analysis. "
+            "Every function or label the agent renamed or commented carries a Note bookmark "
+            'in category "mulder" (Window > Bookmarks), and its comments start with '
+            "`[mulder]`.",
+            "",
+            *_annotation_table(project.parent, by_address=True),
+        ]
+    if kind == "radare2":
+        from mulder.reverse.export import write_ghidra_replay_script
+
+        script, count = write_ghidra_replay_script(project.parent, sample)
+        return [
+            "### radare2 project",
+            "",
+            f"The radare2 project is in `{project}` (r2 -e dir.projects={project.parent} "
+            "then `Po mulder`). To carry the analysis into Ghidra, open the sample in "
+            f"Ghidra and run `{script}` from the Script Manager: it replays the {count} "
+            "annotation(s) below (renames, `[mulder]` comments, Note bookmarks).",
+            "",
+            *_annotation_table(project.parent, by_address=True),
+        ]
+    return [
+        "### Decompiled C# project (ILSpy)",
+        "",
+        f"The assembly was decompiled to `{project}`: open it in an editor or in ILSpy "
+        "to check the analysis. An assembly cannot be annotated in place, so renames "
+        "and comments are listed below and kept in "
+        f"`{project.parent / 'annotations.jsonl'}`.",
+        "",
+        *_annotation_table(project.parent, by_address=False),
+    ]
 
 
 def build_reverse_section(
@@ -73,59 +152,8 @@ def build_reverse_section(
             "",
         ]
 
-    project = project_file_for_case(db_dir, case_id, sample)
-    if project is not None and project.is_dir():
-        lines += [
-            "### Decompiled C# project (ILSpy)",
-            "",
-            f"The assembly was decompiled to `{project}`: open it in an editor or in ILSpy "
-            "to check the analysis. An assembly cannot be annotated in place, so renames "
-            "and comments are listed below and kept in "
-            f"`{project.parent / 'annotations.jsonl'}`.",
-            "",
-        ]
-        ann = read_annotations(project.parent)
-        rows = ann["annotations"][-_ANNOTATIONS_SHOWN:]
-        if rows:
-            lines += ["| Method | Proposed name | Comment |", "|---|---|---|"]
-            lines += [
-                f"| `{_md_cell(r.get('function'))}` | {_md_cell(r.get('new_name'))} | "
-                f"{_md_cell(r.get('comment'))} |"
-                for r in rows
-            ]
-            lines.append("")
-        project = None
-        shown_project = True
-    else:
-        shown_project = False
-        lines += ["### Ghidra project", ""]
-    if project is None and not shown_project:
-        lines += ["No Ghidra project was created for this sample.", ""]
-    elif project is not None:
-        lines += [
-            f"Open `{project}` in Ghidra (File > Open Project) to check the analysis. "
-            "Every function or label the agent renamed or commented carries a Note bookmark "
-            'in category "mulder" (Window > Bookmarks), and its comments start with '
-            "`[mulder]`.",
-            "",
-        ]
-        ann = read_annotations(project.parent)
-        rows = ann["annotations"][-_ANNOTATIONS_SHOWN:]
-        if rows:
-            lines += [
-                f"Annotations ({ann['total']}):",
-                "",
-                "| Address | Old name | New name | Comment |",
-                "|---|---|---|---|",
-            ]
-            lines += [
-                f"| `{_md_cell(r.get('address'))}` | {_md_cell(r.get('old_name'))} | "
-                f"{_md_cell(r.get('new_name'))} | {_md_cell(r.get('comment'))} |"
-                for r in rows
-            ]
-            if ann["total"] > len(rows):
-                lines.append(f"\nFull history: `{ann['file']}`.")
-            lines.append("")
+    kind, project = analysis_project(db_dir, case_id, sample)
+    lines += _project_lines(kind, project, str(sample))
 
     if state["priorities"]:
         lines += ["### Functions studied", "", "| # | Function | Why |", "|---|---|---|"]

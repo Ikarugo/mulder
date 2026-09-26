@@ -726,9 +726,10 @@ def _human_bytes(count: int) -> str:
 @click.option(
     "--backend",
     default="auto",
-    type=click.Choice(["auto", "ghidra", "ilspy"]),
+    type=click.Choice(["auto", "ghidra", "radare2", "ilspy"]),
     show_default=True,
-    help="Decompiler: auto picks ILSpy for .NET assemblies and Ghidra otherwise.",
+    help="Engine: auto picks ILSpy for .NET assemblies and Ghidra otherwise; radare2 "
+    "needs the r2ghidra plugin to decompile.",
 )
 @click.option("--model", default=None, help="Fallback model for all roles.")
 @click.option("--planner-model", default=None, help="Model for planner agents.")

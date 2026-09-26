@@ -264,7 +264,7 @@ def test_report_section(case: Path, tmp_path: Path) -> None:
     assert "1/2 decided" in text and "**not verified**" in text
     assert "xor \\| with 0x5A" in text
     assert "TO BE VALIDATED BY A HUMAN ANALYST" in text
-    assert "No Ghidra project was created" in text
+    assert "No disassembler project was created" in text
 
     md, html = add_reverse_section("# Report\n", "<html><body><p>x</p></body></html>")
     assert md.startswith("# Report") and "Candidate YARA rule" in md
