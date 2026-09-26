@@ -7,3 +7,4 @@
 | [Tool Manifest](tool-manifest.md) | API reference for all MCP tools with parameters, types, and role access |
 | [Usage Guide](usage-guide.md) | Try-it-out instructions: pulling the image, configuring providers, running investigations |
 | [Glossary](glossary.md) | Project terminology, forensic artifact definitions, and architecture concepts |
+| [Reverse Engineering](reverse-engineering.md) | Static malware analysis with `mulder reverse` and the `reverse_*` tools: Ghidra, radare2, ILSpy, scripts, limits |

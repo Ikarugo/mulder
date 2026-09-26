@@ -4,7 +4,7 @@ Every tool is exposed as `mcp__mulder__{name}`. All tools return a dict containi
 
 `status` is `success`, `partial` or `error`. `partial` means the tool produced results but did not complete: an external program exited non-zero after writing output, some input files could not be read (`extraction_failures`), or some plugins or modes failed; `tool_warning` says what is missing. An external program that fails without usable output returns `error` with its exit code and last output lines, and nothing is indexed. Slow tools remember a failure and refuse an identical run unless `force=True`. An "already indexed" skip ignores sources that hold no data.
 
-**Role Key:** `CATALOG` `EXTRACT_PLANNER` `EXTRACT_EXECUTOR` `EXTRACT_ANALYST` `CROSS_PLANNER` `CROSS_EXECUTOR` `CROSS_ANALYST` `NARRATIVE_PLANNER` `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT`
+**Role Key:** `CATALOG` `EXTRACT_PLANNER` `EXTRACT_EXECUTOR` `EXTRACT_ANALYST` `CROSS_PLANNER` `CROSS_EXECUTOR` `CROSS_ANALYST` `NARRATIVE_PLANNER` `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT`. Static malware analysis (`mulder reverse`, section 21): `RE_PLANNER` `RE_EXECUTOR` `RE_ANALYST` `RE_REPORT`; `ALL_ROLES` covers the forensic roles only.
 
 ---
 
@@ -34,7 +34,7 @@ Switch the active case to an already-existing case.
 
 **Returns:** `case_id`, `source_count`
 
-**Roles:** `ALL_ROLES`
+**Roles:** `ALL_ROLES` `RE_PLANNER` `RE_EXECUTOR` `RE_ANALYST` `RE_REPORT`
 
 ### list_cases
 
@@ -932,7 +932,7 @@ Failed or incomplete rabin2 analysis cannot produce a `benign_indicators` verdic
 without other suspicious indicators, the verdict is `inconclusive`. Derived
 triage findings are indexed alongside the raw analysis for subsequent searches.
 
-**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
+**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST` `RE_EXECUTOR`
 
 ### run_capa
 
@@ -951,7 +951,7 @@ Each capability's `attack[]` entries use `technique_id` for the full ATT&CK ID
 (including a subtechnique suffix such as `T1059.006`) and `subtechnique` for its
 name. The previous always-null `subtechnique_id` field has been removed.
 
-**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST`
+**Roles:** `EXTRACT_EXECUTOR` `EXTRACT_ANALYST` `RE_EXECUTOR`
 
 ### run_floss
 
@@ -966,7 +966,7 @@ Extract obfuscated strings from a binary using FLOSS.
 
 **Returns:** `decoded_strings[]`, `stack_strings[]`, `tight_strings[]`, `total_decoded`
 
-**Roles:** `EXTRACT_EXECUTOR`
+**Roles:** `EXTRACT_EXECUTOR` `RE_EXECUTOR`
 
 ### run_detect_it_easy
 
@@ -980,7 +980,7 @@ Identify packers, compilers, and protectors using Detect-It-Easy.
 
 **Returns:** `detections[]`, `compilers[]`, `packers[]`, `protectors[]`, `is_packed`
 
-**Roles:** `EXTRACT_EXECUTOR`
+**Roles:** `EXTRACT_EXECUTOR` `RE_EXECUTOR`
 
 ### run_radare2
 
@@ -1071,7 +1071,7 @@ Scan a mounted filesystem or extracted directory for malware using YARA rules.
 
 **Returns:** `source` (yara.files), `result_count`, `hit_metadata{}`
 
-**Roles:** `EXTRACT_EXECUTOR`
+**Roles:** `EXTRACT_EXECUTOR` `RE_EXECUTOR`
 
 ### yara_scan_memory
 
@@ -1133,7 +1133,7 @@ Search all ingested evidence for keywords or regex patterns.
 
 **Returns:** `results[]` (each hit carries `source_path`; its `window.raw_text` holds excerpts centred on the matches, with `match_count`, `match_offset`, `full_length` and `truncated`), `total_matches`, `has_more`, `sources_matched[]`
 
-**Roles:** `EXTRACT_ANALYST` `CROSS_EXECUTOR` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT`
+**Roles:** `EXTRACT_ANALYST` `CROSS_EXECUTOR` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT` `RE_PLANNER` `RE_ANALYST` `RE_REPORT`
 
 ### get_raw_output
 
@@ -1148,7 +1148,7 @@ Retrieve full raw text from a specific evidence source with cursor pagination.
 
 **Returns:** `raw_text`, `source_paths[]`, `total_windows`, `next_after_id`, `has_more`
 
-**Roles:** `EXTRACT_ANALYST` `CROSS_EXECUTOR` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT`
+**Roles:** `EXTRACT_ANALYST` `CROSS_EXECUTOR` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT` `RE_PLANNER` `RE_ANALYST` `RE_REPORT`
 
 ### get_timeline
 
@@ -1172,7 +1172,7 @@ List all evidence sources currently indexed in the active case.
 
 **Returns:** `results[]` (source_name, source_path, extractor, line_count, hash)
 
-**Roles:** `CATALOG` `EXTRACT_PLANNER` `CROSS_PLANNER` `NARRATIVE_PLANNER` `EXTRACT_ANALYST` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `REPORT`
+**Roles:** `CATALOG` `EXTRACT_PLANNER` `CROSS_PLANNER` `NARRATIVE_PLANNER` `EXTRACT_ANALYST` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `REPORT` `RE_PLANNER` `RE_ANALYST` `RE_REPORT`
 
 ### get_source_stats
 
@@ -1182,7 +1182,7 @@ Return per-source statistics including citation coverage.
 
 **Returns:** `total_sources`, `cited_sources`, `uncited_sources`, `sources[]`
 
-**Roles:** `CATALOG` `EXTRACT_ANALYST` `CROSS_PLANNER` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `REPORT`
+**Roles:** `CATALOG` `EXTRACT_ANALYST` `CROSS_PLANNER` `CROSS_ANALYST` `NARRATIVE_EXECUTOR` `REPORT` `RE_PLANNER` `RE_ANALYST` `RE_REPORT`
 
 ### bookmark_window
 
@@ -1233,7 +1233,7 @@ Safely decode an encoded payload found in evidence. Base64 wrapping zlib, raw DE
 
 **Returns:** `results{}` (detected_encoding, layers[], decoded, decoded_length)
 
-**Roles:** all executors and analysts (read-only, nothing is executed)
+**Roles:** all executors and analysts, `RE_EXECUTOR` `RE_ANALYST` (read-only, nothing is executed)
 
 ### get_carved_iocs
 
@@ -1893,7 +1893,7 @@ Record a forensic finding with validated evidence references.
 
 **Returns:** `finding_id`, `status`, `confidence`
 
-**Roles:** `EXTRACT_ANALYST` `CROSS_ANALYST` `NARRATIVE_ANALYST`
+**Roles:** `EXTRACT_ANALYST` `CROSS_ANALYST` `NARRATIVE_ANALYST` `RE_ANALYST`
 
 ### update_finding
 
@@ -1914,7 +1914,7 @@ Update or correct an existing finding.
 
 **Returns:** `finding_id`, `updated_fields[]`
 
-**Roles:** `EXTRACT_ANALYST` `CROSS_ANALYST` `NARRATIVE_ANALYST` `NARRATIVE_EXECUTOR` `REPORT`
+**Roles:** `EXTRACT_ANALYST` `CROSS_ANALYST` `NARRATIVE_ANALYST` `NARRATIVE_EXECUTOR` `REPORT` `RE_ANALYST` `RE_REPORT`
 
 ### delete_finding
 
@@ -1926,7 +1926,7 @@ Delete a finding that was submitted in error.
 
 **Returns:** `finding_id`, `status`
 
-**Roles:** `CROSS_ANALYST` `NARRATIVE_ANALYST`
+**Roles:** `CROSS_ANALYST` `NARRATIVE_ANALYST` `RE_ANALYST`
 
 ### get_findings
 
@@ -1939,7 +1939,7 @@ Retrieve paginated findings submitted in this case.
 
 **Returns:** `results[]` (finding objects), `total_findings`
 
-**Roles:** `EXTRACT_ANALYST` `CROSS_ANALYST` `NARRATIVE_ANALYST` `CROSS_PLANNER` `NARRATIVE_PLANNER` `NARRATIVE_EXECUTOR` `REPORT`
+**Roles:** `EXTRACT_ANALYST` `CROSS_ANALYST` `NARRATIVE_ANALYST` `CROSS_PLANNER` `NARRATIVE_PLANNER` `NARRATIVE_EXECUTOR` `REPORT` `RE_PLANNER` `RE_ANALYST` `RE_REPORT`
 
 ### deduplicate_findings
 
@@ -1953,7 +1953,7 @@ Identify and consolidate duplicate findings across systems. Merges are lossless:
 
 **Returns:** `groups[]` (with `merged_ids`, `merged_titles`), `absorbed`, `merged_count`, `would_merge_count`, `kept_count`, `summary`
 
-**Roles:** `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT`
+**Roles:** `NARRATIVE_EXECUTOR` `NARRATIVE_ANALYST` `REPORT` `RE_ANALYST`
 
 ### submit_narrative
 
@@ -1965,7 +1965,7 @@ Submit the long-form investigation narrative report.
 
 **Returns:** `status`, `length`
 
-**Roles:** `REPORT`
+**Roles:** `REPORT` `RE_REPORT`
 
 ### finalize_report
 
@@ -1975,7 +1975,7 @@ Generate the final investigation report from all submitted findings.
 
 **Returns:** `report_path`, `html_report_path`, `finding_count`, `confirmed_count`, `inference_count`
 
-**Roles:** `REPORT`
+**Roles:** `REPORT` `RE_REPORT`
 
 ---
 
@@ -1989,7 +1989,7 @@ Return a compact progress dashboard for the current investigation.
 
 **Returns:** `sources_indexed`, `findings_submitted`, `findings_by_severity{}`, `remaining_work[]`, `ready_to_finalize`
 
-**Roles:** `EXTRACT_ANALYST` `CROSS_PLANNER` `CROSS_ANALYST` `NARRATIVE_PLANNER` `NARRATIVE_ANALYST` `REPORT`
+**Roles:** `EXTRACT_ANALYST` `CROSS_PLANNER` `CROSS_ANALYST` `NARRATIVE_PLANNER` `NARRATIVE_ANALYST` `REPORT` `RE_PLANNER` `RE_ANALYST` `RE_REPORT`
 
 ### check_finalize_readiness
 
@@ -1999,7 +1999,7 @@ Check whether the investigation meets all finalize_report requirements.
 
 **Returns:** `ready_to_finalize`, `gates[]` (name, passed, detail)
 
-**Roles:** `NARRATIVE_PLANNER` `NARRATIVE_ANALYST` `REPORT`
+**Roles:** `NARRATIVE_PLANNER` `NARRATIVE_ANALYST` `REPORT` `RE_ANALYST` `RE_REPORT`
 
 ### audit_evidence_coverage
 
@@ -2009,7 +2009,7 @@ Identify indexed evidence sources not cited by any submitted finding.
 
 **Returns:** `total_sources`, `cited_count`, `uncited_count`, `coverage_pct`, `uncited_sources{}`
 
-**Roles:** `NARRATIVE_PLANNER` `NARRATIVE_ANALYST`
+**Roles:** `NARRATIVE_PLANNER` `NARRATIVE_ANALYST` `RE_ANALYST` `RE_REPORT`
 
 ### audit_tool_coverage
 
@@ -2019,7 +2019,7 @@ Report applicable forensic tools that were never invoked during the investigatio
 
 **Returns:** `evidence_items`, `total_gaps`, `coverage[]` (path, artifact_type, tools_run[], tools_not_run[])
 
-**Roles:** `NARRATIVE_PLANNER` `NARRATIVE_ANALYST`
+**Roles:** `NARRATIVE_PLANNER` `NARRATIVE_ANALYST` `RE_ANALYST` `RE_REPORT`
 
 ### track_progress
 
@@ -2044,7 +2044,7 @@ Extract and deduplicate IOCs from findings and bulk_extractor data.
 
 **Returns:** `ip_addresses{}`, `domains[]`, `email_addresses[]`, `file_paths[]`, `user_accounts[]`, `total_unique_iocs`
 
-**Roles:** `CROSS_ANALYST` `NARRATIVE_ANALYST` `REPORT`
+**Roles:** `CROSS_ANALYST` `NARRATIVE_ANALYST` `REPORT` `RE_REPORT`
 
 ---
 
@@ -2060,7 +2060,7 @@ Submit long-running extraction tools for background execution.
 
 **Returns:** `batch_id`, `tasks_submitted[]`, `tasks_skipped[]`
 
-**Roles:** `CATALOG` `EXTRACT_EXECUTOR`
+**Roles:** `CATALOG` `EXTRACT_EXECUTOR` `RE_EXECUTOR`
 
 ### check_extraction_status
 
@@ -2072,7 +2072,7 @@ Poll the progress of a background extraction batch.
 
 **Returns:** `completed`, `running`, `pending`, `failed`, `all_done`
 
-**Roles:** `CATALOG` `EXTRACT_EXECUTOR`
+**Roles:** `CATALOG` `EXTRACT_EXECUTOR` `RE_EXECUTOR`
 
 ### get_completed_results
 
@@ -2085,7 +2085,7 @@ Retrieve extraction summaries from completed background jobs.
 
 **Returns:** `results[]` (tool, status, source_name, windows_indexed, tool_call_id)
 
-**Roles:** `CATALOG` `EXTRACT_EXECUTOR`
+**Roles:** `CATALOG` `EXTRACT_EXECUTOR` `RE_EXECUTOR`
 
 ### wait
 
@@ -2099,7 +2099,7 @@ Wait for extraction batches or individual jobs to complete.
 
 **Returns:** `status`, `waited_seconds`, `batch_status{}` or `job_status`
 
-**Roles:** `CATALOG` `EXTRACT_EXECUTOR`
+**Roles:** `CATALOG` `EXTRACT_EXECUTOR` `RE_EXECUTOR`
 
 ### wait_all
 
@@ -2112,7 +2112,7 @@ Wait for multiple extraction batches to complete simultaneously.
 
 **Returns:** `all_done`, `waited_seconds`, `batch_results{}`
 
-**Roles:** `CATALOG` `EXTRACT_EXECUTOR`
+**Roles:** `CATALOG` `EXTRACT_EXECUTOR` `RE_EXECUTOR`
 
 ### run_parallel
 
@@ -2124,7 +2124,7 @@ Run multiple tool calls in parallel and return all results.
 
 **Returns:** `batch_id`, `parallel_results[]` (tool, result), `total_tasks`
 
-**Roles:** `EXTRACT_EXECUTOR` `CROSS_EXECUTOR` `NARRATIVE_EXECUTOR`
+**Roles:** `EXTRACT_EXECUTOR` `CROSS_EXECUTOR` `NARRATIVE_EXECUTOR` `RE_EXECUTOR`
 
 ---
 
@@ -2155,7 +2155,7 @@ Search the MITRE ATT&CK knowledge base for techniques.
 
 **Returns:** `match_count`, `techniques[]` (id, name, description, tactics, detection, url)
 
-**Roles:** `CROSS_ANALYST`
+**Roles:** `CROSS_ANALYST` `RE_ANALYST`
 
 ### get_tool_guide
 
@@ -2171,13 +2171,15 @@ Return a reference guide of available forensic tools and their relationships.
 
 ---
 
-## 21. Reverse Engineering (interactive)
+## 21. Reverse Engineering
 
-Static analysis of one sample with a disassembler/decompiler backend (Ghidra; see [reverse-engineering.md](reverse-engineering.md)). The sample is never executed, emulated or debugged, and no tool accepts a script or a command for the engine. These tools have **no pipeline role**: they are exposed by `mulder serve` for interactive use (Claude Code, Claude Desktop) and are not called by `mulder investigate`.
+Static analysis of one sample (see [reverse-engineering.md](reverse-engineering.md)). The sample is never executed, emulated or debugged, and no tool accepts a script or a command for the engine. These tools are exposed by `mulder serve` for interactive use (Claude Code, Claude Desktop) and to the `mulder reverse` pipeline through the `RE_*` roles only: no forensic phase of `mulder investigate` sees them.
 
-Every tool takes `file_path` (absolute path to the sample) and `backend` (default `"ghidra"`). A `target` is a function, import or symbol name, or a hex address with or without `0x`; addresses in results are lowercase `0x` hex. Reading tools return the whole page (`source` is `None`) with `total` / `next_offset` for paging, `sample_sha256`, and a `note` that the content is attacker-controlled data. Before `reverse_analyze`, they return `error_type: "not_analyzed"`. Other error types: `binary_missing` (Ghidra, a JDK or pyghidra missing), `file_not_found`, `invalid_parameter`, `not_found`, `timeout` (the engine process was killed; the next call reopens the saved project), `backend_error`.
+Engines (`backend`): `ghidra` (native code, headless Ghidra in a child process), `radare2` (r2pipe; decompilation needs the r2ghidra plugin) and `ilspy` (.NET assemblies decompiled to C# by ilspycmd). An empty `backend` uses `MULDER_REVERSE_BACKEND` when set, otherwise ILSpy for a .NET assembly (when installed) and Ghidra for everything else. Every engine returns the same JSON shapes; ILSpy addresses are `file.cs:line` and its cross-references and call paths are computed from the C# text (`approximate`).
 
-The Ghidra project lives in `<db_dir>/reverse/<case>/<sha256[:16]>_<name>/ghidra/mulder.gpr` (`_standalone` instead of the case when no case is open), next to `ghidra-worker.log` and `annotations.jsonl`.
+Every tool takes `file_path` (absolute path to the sample). A `target` is a function, import or symbol name, or a hex address with or without `0x`; addresses in results are lowercase `0x` hex. Reading tools return the whole page (`source` is `None`) with `total` / `next_offset` for paging, `sample_sha256`, and a `note` that the content is attacker-controlled data. Before `reverse_analyze`, they return `error_type: "not_analyzed"`. Other error types: `binary_missing` (engine, JDK, pyghidra, r2pipe, r2ghidra or ilspycmd missing), `file_not_found`, `invalid_parameter`, `not_found`, `timeout` (the engine process was killed; the next call reopens the saved project), `backend_error`.
+
+Projects live in `<db_dir>/reverse/<case>/<sha256[:16]>_<name>/<backend>/` (`_standalone` instead of the case when no case is open): `mulder.gpr` for Ghidra, the `mulder` project directory for radare2, `csharp/` and `il/` for ILSpy, next to the worker log and `annotations.jsonl`.
 
 ### reverse_analyze
 
@@ -2186,11 +2188,11 @@ Load a sample into the engine and auto-analyse it. The first call can take minut
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | file_path | str | yes | Sample path |
-| backend | str | no | `"ghidra"` (default) |
+| backend | str | no | `"ghidra"`, `"radare2"`, `"ilspy"`; empty to choose from the sample |
 
 **Returns:** `format`, `language`, `processor`, `compiler`, `image_base`, `sha256`, `functions{total, library, thunk, by_origin}`, `imports`, `entry_points[]` (max 20), `analysis_seconds`, `analysis_completed`, `project_reused`, `project_dir`, `project_file`. Indexes the summary once as `reverse.program`. `status` is `partial` when auto-analysis hit its time limit.
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` (and interactive use)
 
 ### reverse_list_functions
 
@@ -2205,7 +2207,7 @@ Load a sample into the engine and auto-analyse it. The first call can take minut
 
 **Returns:** page of `{name, address, size, origin, library, thunk, signature, callers, callees}`, `library_hidden`
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
 
 ### reverse_decompile
 
@@ -2216,7 +2218,7 @@ Load a sample into the engine and auto-analyse it. The first call can take minut
 
 **Returns:** `name`, `address`, `signature`, `total_lines`, `start_line`, `next_offset`, `code`, `callees[]`, `callers[]` (max 20, `callers_total`), `strings[]` (max 30). On the first page of a function, the whole pseudo-C is indexed once per (sample, function) as `reverse.decompile` with `source_path` `<sample>::<address>` (`indexed_source`).
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
 
 ### reverse_disassemble
 
@@ -2227,7 +2229,7 @@ Load a sample into the engine and auto-analyse it. The first call can take minut
 
 **Returns:** `lines[]` as `address  bytes  instruction`, `next_offset`, `total` for a function
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
 
 ### reverse_xrefs
 
@@ -2239,7 +2241,7 @@ Load a sample into the engine and auto-analyse it. The first call can take minut
 
 **Returns:** page of `{from_address, from_function, to_address, to_name, ref_type}`. References to an import through its IAT slot or a thunk are resolved to the calling code.
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
 
 ### reverse_strings
 
@@ -2251,7 +2253,7 @@ Load a sample into the engine and auto-analyse it. The first call can take minut
 
 **Returns:** page of `{address, value (max 300 chars), functions[] (max 10)}`; `reached_via[]` when the function was found through a pointer in a data structure; `value_truncated` gives the full length of a cut value.
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
 
 ### reverse_imports
 
@@ -2262,7 +2264,7 @@ Load a sample into the engine and auto-analyse it. The first call can take minut
 
 **Returns:** page of `{library, name, address (IAT slot), callers[] (max 10), callers_total}`
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
 
 ### reverse_read_bytes
 
@@ -2273,7 +2275,7 @@ Load a sample into the engine and auto-analyse it. The first call can take minut
 
 **Returns:** `address`, `length`, `requested`, `block`, `hex`, `ascii_preview`
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
 
 ### reverse_annotate
 
@@ -2287,13 +2289,13 @@ At least one of `new_name` and `comment` is required. Renames use the user-defin
 
 **Returns:** `address`, `function`, `old_name`, `new_name`, `comment`, `project_file`
 
-**Roles:** none (interactive)
+**Roles:** `RE_ANALYST` (and interactive use)
 
 ### reverse_annotations
 
 **Returns:** `total`, `annotations[]` (oldest first; the last 200 when there are more), `file`. Reads `annotations.jsonl`, so no engine process is needed.
 
-**Roles:** none (interactive)
+**Roles:** `RE_ANALYST` `RE_REPORT` (and interactive use)
 
 ### reverse_read_script
 
@@ -2307,7 +2309,7 @@ Read a script (PowerShell, JavaScript, VBScript, batch, HTA) or a decoded layer 
 
 **Returns:** `encoding`, `language`, `total_lines`, `next_offset`, numbered `lines[]`, `indicators[]` on this page (`id`, `kind`: `powershell_encoded_command`, `char_codes`, `hex`, `base64`; `line`, `column`, `length`, `preview`), `indicators_total`. The whole script is indexed once as `reverse.script`.
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
 
 ### reverse_decode_layer
 
@@ -2324,4 +2326,70 @@ zlib, raw DEFLATE and gzip are undone automatically (capped at 20 MB inflated), 
 
 **Returns:** `layer_id`, `path` (`.txt` or `.bin`), `sha256`, `size`, `kind`, `parent`, `parent_sha256`, `indicator`, `steps[]`, `preview`, `next_step`; `looks_like` for a PE. Layers and their lineage are recorded in `layers.json` under `<db_dir>/reverse/<case>/<sha256[:16]>_<name>/scripts/`; the same blob decoded the same way is not recorded twice (`already_recorded`). Text layers are indexed once as `reverse.script_layer` (binary layers: their strings).
 
-**Roles:** none (interactive)
+**Roles:** `RE_EXECUTOR` `RE_ANALYST` (and interactive use)
+
+### reverse_call_path
+
+Shortest static path from an entry point (exported entry points, `main`, `WinMain`, `DllMain`; `Main` for .NET) to a function. Direct calls and taken addresses (callbacks, thread start routines) are edges.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| target | str | yes | Function name or address |
+
+**Returns:** `reachable`, `path[]` (`name`, `address`, `edge`: `entry`, `call`, `address_taken`), `entry_points[]`, `functions_visited`, `note`. No path is not proof of dead code (indirect calls through computed pointers are invisible).
+
+**Roles:** `RE_ANALYST` (and interactive use)
+
+### reverse_map_sample
+
+Leads for choosing which functions to study: every import with its callers (suspicious ones flagged by category), IOC-like strings (URLs, IPs, paths, registry keys, commands, blobs) with the functions using them, the most-called and largest non-library functions, and the functions holding capa matches (when `run_capa` ran in the case).
+
+**Returns:** counts and the top leads; the full map is indexed as `reverse.map` (in a case). `packing_hint` when imports and functions are very few.
+
+**Roles:** `RE_EXECUTOR` (and interactive use)
+
+### reverse_export_annotations
+
+Writes `mulder_annotations_ghidra.py` beside the project: a Ghidra script (Jython or PyGhidra) that replays `annotations.jsonl` (renames, `[mulder]` comments, Note bookmarks in category `mulder`) in the analyst's own Ghidra project. Annotations without an address (ILSpy's `file:line`) are left out.
+
+**Returns:** `script`, `annotations` (count), `how_to`
+
+**Roles:** `RE_ANALYST` `RE_REPORT` (and interactive use)
+
+### reverse_status
+
+What a `mulder reverse` case has established: prioritised functions (or the packed verdict), capa capabilities with their verdicts and those still open, findings with whether they cite decompiled or disassembled code, high-severity findings not yet challenged, the candidate YARA rule.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| file_path | str | no | Sample; defaults to the case's sample |
+
+**Roles:** `RE_PLANNER` `RE_ANALYST` `RE_REPORT`
+
+### reverse_prioritize
+
+Records the functions to study in depth (`functions`: `[{target, reason, evidence_refs, rank}]`, merged by target, at most 60), or `packed=True` with `packed_reason` and `evidence_refs` (the pipeline then stops after the report). Every reference must be a `tool_call_id` of this case.
+
+**Roles:** `RE_ANALYST`
+
+### reverse_capability_verdict
+
+Confirms or refutes one capability capa reported: `capability` (exact rule name), `verdict` (`confirmed`, `refuted`), `basis` (`code`, `unreachable`, `library_code`, `dead_code`, `benign_use`, `other`), `note`, `evidence_refs`, optional `finding_id`.
+
+**Returns:** the verdict and the capabilities still `open`.
+
+**Roles:** `RE_ANALYST`
+
+### reverse_challenge
+
+Records the counter-analysis of one finding: `outcome` (`upheld`, `downgraded`, `withdrawn`), `reasoning`, `evidence_refs`.
+
+**Returns:** the challenge and the high-severity findings still unchallenged.
+
+**Roles:** `RE_ANALYST`
+
+### reverse_submit_yara
+
+Stores the candidate YARA rule (`rule`, `evidence_refs`), checked for syntax when yara-python is installed (`yara_syntax_error` otherwise). The report shows it marked for validation by a human analyst.
+
+**Roles:** `RE_ANALYST` `RE_REPORT`

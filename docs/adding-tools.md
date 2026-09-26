@@ -103,6 +103,10 @@ The `Role` enum in [`src/mulder/server/tool_access.py`](../src/mulder/server/too
 | `NARRATIVE_EXECUTOR` | Alternative Narrative | Executes additional evidence gathering |
 | `NARRATIVE_ANALYST` | Alternative Narrative | Challenges findings, checks coverage |
 | `REPORT` | Report | Generates final report |
+| `RE_PLANNER` | `mulder reverse` (all phases) | Plans static-analysis tool runs |
+| `RE_EXECUTOR` | `mulder reverse` | Runs triage and disassembler tools |
+| `RE_ANALYST` | `mulder reverse` | Reads code, annotates, submits findings and verdicts |
+| `RE_REPORT` | `mulder reverse` report | Writes the static-analysis report |
 
 ### Semantic Shorthands
 
@@ -113,7 +117,8 @@ Combine roles with `|` or use the pre-defined shorthands:
 | `PLANNERS` | `EXTRACT_PLANNER \| CROSS_PLANNER \| NARRATIVE_PLANNER` |
 | `EXECUTORS` | `EXTRACT_EXECUTOR \| CROSS_EXECUTOR \| NARRATIVE_EXECUTOR` |
 | `ANALYSTS` | `EXTRACT_ANALYST \| CROSS_ANALYST \| NARRATIVE_ANALYST` |
-| `ALL_ROLES` | `CATALOG \| PLANNERS \| EXECUTORS \| ANALYSTS \| REPORT` |
+| `ALL_ROLES` | `CATALOG \| PLANNERS \| EXECUTORS \| ANALYSTS \| REPORT` (forensic roles only) |
+| `REVERSE_ROLES` | `RE_PLANNER \| RE_EXECUTOR \| RE_ANALYST \| RE_REPORT` |
 
 ### Guidelines
 

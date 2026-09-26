@@ -125,6 +125,16 @@ Drop a `MULDER.md` file in your evidence directory to provide case context:
 
 The briefing is injected into every investigation phase, guiding tool selection, analysis focus, and report framing. See the [Usage Guide](https://github.com/calebevans/mulder/blob/main/docs/usage-guide.md#case-briefing) for details.
 
+### Static Malware Analysis
+
+`mulder reverse` reverse-engineers one sample statically (never executed) and reports its capabilities, each backed by the decompiled code that shows it, with IOCs, an ATT&CK layer, a candidate YARA rule for human validation and an annotated Ghidra project to check the work:
+
+```bash
+mulder reverse /samples/dropper.exe dropper-01
+```
+
+Ghidra is the default engine; radare2 (with r2ghidra) and ILSpy (.NET) are supported. See [Reverse Engineering](docs/reverse-engineering.md).
+
 ## Forensic Tools
 
 Mulder integrates 35+ open-source forensic tools exposed as 140+ typed MCP operations:
@@ -161,6 +171,7 @@ Each investigation produces:
 | [Usage Guide](https://github.com/calebevans/mulder/blob/main/docs/usage-guide.md) | Installation, providers, CLI reference, Docker configuration |
 | [Architecture](https://github.com/calebevans/mulder/blob/main/docs/architecture.md) | System design, pipeline phases, quality gates, data flow |
 | [Tool Manifest](https://github.com/calebevans/mulder/blob/main/docs/tool-manifest.md) | API reference for all MCP tools |
+| [Reverse Engineering](docs/reverse-engineering.md) | Static malware analysis with `mulder reverse`: installation, VM, local models, Ghidra project, limits |
 | [Adding Tools](https://github.com/calebevans/mulder/blob/main/docs/adding-tools.md) | Contributor guide for adding new forensic tools |
 | [Glossary](https://github.com/calebevans/mulder/blob/main/docs/glossary.md) | Terminology and definitions |
 

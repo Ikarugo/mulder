@@ -230,9 +230,15 @@ When a gate fails, the orchestrator retries the phase with:
 - Up to 2 retries per phase (configurable)
 - Consecutive failure tracking prevents indefinite silent auto-passes
 
+### Static Malware Analysis Pipeline
+
+`mulder reverse SAMPLE CASE_ID` runs a second pipeline on the same machinery (`ReverseOrchestrator` in `orchestrator/reverse_runner.py`, a subclass of `Orchestrator`): triage, mapping, deep analysis, counter-analysis and report on one sample, with its own phases (`reverse_phases.py`), prompts (`prompts/reverse_*.md`) and gates (`reverse_gates.py`). The route depends on the sample kind detected from its magic bytes (native code goes through every phase, scripts skip the disassembler phases, a packed sample stops after mapping). Its roles (`RE_PLANNER`, `RE_EXECUTOR`, `RE_ANALYST`, `RE_REPORT`) are outside `ALL_ROLES`, so neither pipeline sees the other's tools.
+
+The disassembler runs in a child process per sample (`reverse/ghidra_worker.py`, `reverse/radare2_worker.py`) speaking line-delimited JSON; a crash, out-of-memory error or hang kills only that process. The gates read a snapshot of the case built without an LLM: tool call counts from the audit log, indexed sources, findings and which tools they cite, and the reverse state recorded by the pipeline tools (`reverse_prioritize`, `reverse_capability_verdict`, `reverse_challenge`, `reverse_submit_yara`) in the case's key/value table. See [reverse-engineering.md](reverse-engineering.md).
+
 ## Tool Access Control
 
-Tools self-declare which pipeline roles may invoke them via the `@tool_access` decorator (`src/mulder/server/tool_access.py`). At import time, `phases.py` calls `get_tools_for_role(Role.EXTRACT_EXECUTOR)` (and similar) to build allowlists dynamically, eliminating manual tool list maintenance.
+Tools self-declare which pipeline roles may invoke them via the `@tool_access` decorator (`src/mulder/server/tool_access.py`). At import time, `phases.py` calls `get_tools_for_role(Role.EXTRACT_EXECUTOR)` (and similar) to build allowlists dynamically, eliminating manual tool list maintenance. Each agent session is also given the complement of its allowlist over every registered tool (`all_registered_tools()`) as disallowed tools, so a tool with no role, or with only the roles of the other pipeline, never appears in its context.
 
 ### The `@tool_access` Decorator
 

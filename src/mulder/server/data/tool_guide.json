@@ -541,84 +541,140 @@
       "description": "Load a PE/ELF/Mach-O sample into Ghidra and auto-analyse it once (static only, never executed); returns the program summary and the Ghidra project path",
       "input": "Sample file path",
       "related": ["reverse_imports", "reverse_strings", "reverse_list_functions", "run_capa"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_list_functions",
       "description": "Page through the sample's functions (library code hidden by default), filter by name or origin, rank by callers or size",
       "input": "Sample path, optional query/origin/sort",
       "related": ["reverse_decompile", "reverse_xrefs"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_decompile",
       "description": "Decompile one function to pseudo-C, paged; lists callees, callers and referenced strings; indexed once as reverse.decompile",
       "input": "Sample path, function name or address",
       "related": ["reverse_disassemble", "reverse_xrefs", "reverse_annotate"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_disassemble",
       "description": "Disassemble a function or the code at an address, paged",
       "input": "Sample path, function name or address",
       "related": ["reverse_decompile", "reverse_read_bytes"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_xrefs",
       "description": "Cross-references to or from a function, import, symbol or address (IAT and thunks resolved to real callers)",
       "input": "Sample path, target, direction",
       "related": ["reverse_decompile", "reverse_imports", "reverse_strings"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_strings",
       "description": "Strings defined in the sample with the functions that use them",
       "input": "Sample path, optional query",
       "related": ["reverse_xrefs", "reverse_decompile", "run_floss"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_imports",
       "description": "Imported functions with their callers",
       "input": "Sample path, optional query",
       "related": ["reverse_xrefs", "triage_binary"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_read_bytes",
       "description": "Read up to 4096 raw bytes at a symbol or address (encrypted strings, keys, config blobs)",
       "input": "Sample path, target, length",
       "related": ["decode_payload", "reverse_decompile"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_annotate",
       "description": "Rename a function or label and add a [mulder] comment and bookmark in the Ghidra project",
       "input": "Sample path, target, new name and/or comment",
       "related": ["reverse_annotations"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_annotations",
       "description": "History of every rename and comment made on the sample's project",
       "input": "Sample path",
       "related": ["reverse_annotate"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_read_script",
       "description": "Read a PowerShell/JS/VBS/BAT/HTA script or decoded layer as text, paged, any encoding (UTF-16 included), with numbered encoded-blob indicators; never executed",
       "input": "Script path",
       "related": ["reverse_decode_layer", "decode_payload"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     },
     {
       "tool": "reverse_decode_layer",
       "description": "Statically decode one indicator (base64, -EncodedCommand, hex, char codes, XOR, DEFLATE/gzip) and save it as a derived layer with its lineage",
       "input": "Script path, indicator id, optional encoding/xor_key",
       "related": ["reverse_read_script", "reverse_analyze"],
-      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
+    },
+    {
+      "tool": "reverse_call_path",
+      "description": "Shortest static path from an entry point to a function (calls and taken addresses): is a capability reachable?",
+      "input": "Sample path, function",
+      "related": ["reverse_xrefs", "reverse_decompile"],
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
+    },
+    {
+      "tool": "reverse_map_sample",
+      "description": "Leads to prioritise: suspicious imports with callers, IOC-like strings with their functions, hot functions, capa match locations; indexed as reverse.map",
+      "input": "Sample path",
+      "related": ["reverse_analyze", "run_capa", "reverse_prioritize"],
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
+    },
+    {
+      "tool": "reverse_export_annotations",
+      "description": "Write a Ghidra script that replays the recorded renames, comments and bookmarks in the analyst's own Ghidra project",
+      "input": "Sample path",
+      "related": ["reverse_annotate", "reverse_annotations"],
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
+    },
+    {
+      "tool": "reverse_status",
+      "description": "What a mulder reverse case has established: priorities or packed verdict, capa verdicts still open, findings without code citations, unchallenged high findings, YARA candidate",
+      "input": "Optional sample path",
+      "related": ["reverse_prioritize", "reverse_capability_verdict", "reverse_challenge"],
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
+    },
+    {
+      "tool": "reverse_prioritize",
+      "description": "Record the functions to study in depth (with reasons and tool_call_ids), or that the sample is packed",
+      "input": "Functions or packed verdict",
+      "related": ["reverse_status", "reverse_map_sample"],
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
+    },
+    {
+      "tool": "reverse_capability_verdict",
+      "description": "Confirm or refute, from the code, one capability capa reported",
+      "input": "Capability, verdict, basis, note, evidence_refs",
+      "related": ["run_capa", "reverse_decompile"],
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
+    },
+    {
+      "tool": "reverse_challenge",
+      "description": "Record the counter-analysis outcome of a finding (upheld, downgraded, withdrawn)",
+      "input": "Finding ID, outcome, reasoning, evidence_refs",
+      "related": ["reverse_call_path", "update_finding"],
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
+    },
+    {
+      "tool": "reverse_submit_yara",
+      "description": "Store the candidate YARA rule, to be validated by a human analyst",
+      "input": "Rule text, evidence_refs",
+      "related": ["reverse_read_bytes", "reverse_decompile"],
+      "availability": "mulder serve (interactive) and the mulder reverse pipeline; never called by mulder investigate"
     }
   ],
   "encryption": [
