@@ -605,6 +605,20 @@
       "input": "Sample path",
       "related": ["reverse_annotate"],
       "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_read_script",
+      "description": "Read a PowerShell/JS/VBS/BAT/HTA script or decoded layer as text, paged, any encoding (UTF-16 included), with numbered encoded-blob indicators; never executed",
+      "input": "Script path",
+      "related": ["reverse_decode_layer", "decode_payload"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
+    },
+    {
+      "tool": "reverse_decode_layer",
+      "description": "Statically decode one indicator (base64, -EncodedCommand, hex, char codes, XOR, DEFLATE/gzip) and save it as a derived layer with its lineage",
+      "input": "Script path, indicator id, optional encoding/xor_key",
+      "related": ["reverse_read_script", "reverse_analyze"],
+      "availability": "Interactive use through mulder serve; not called by the investigation pipeline"
     }
   ],
   "encryption": [

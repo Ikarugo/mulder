@@ -2294,3 +2294,34 @@ At least one of `new_name` and `comment` is required. Renames use the user-defin
 **Returns:** `total`, `annotations[]` (oldest first; the last 200 when there are more), `file`. Reads `annotations.jsonl`, so no engine process is needed.
 
 **Roles:** none (interactive)
+
+### reverse_read_script
+
+Read a script (PowerShell, JavaScript, VBScript, batch, HTA) or a decoded layer as text. The script is never run. Any encoding is decoded (UTF-8, UTF-16 LE/BE, cp1252); binary files and files over 20 MB are refused.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| file_path | str | yes | Script or layer path |
+| offset / limit | int | no | Lines (limit max 400; a page also stops near 60,000 chars) |
+| max_line_chars | int | no | Longest line shown in full (default 2000, max 20000) |
+
+**Returns:** `encoding`, `language`, `total_lines`, `next_offset`, numbered `lines[]`, `indicators[]` on this page (`id`, `kind`: `powershell_encoded_command`, `char_codes`, `hex`, `base64`; `line`, `column`, `length`, `preview`), `indicators_total`. The whole script is indexed once as `reverse.script`.
+
+**Roles:** none (interactive)
+
+### reverse_decode_layer
+
+Decode one indicator of a script statically and save the result as a derived layer. No interpreter is ever started.
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| file_path | str | yes | Script or layer holding the blob |
+| indicator | int | yes | Indicator id from `reverse_read_script` |
+| encoding | str | no | `auto` (default), `base64`, `utf16le_base64`, `hex`, `char_codes`, `none` |
+| xor_key | str | no | Hex key XORed after the first decoding (e.g. `5a`) |
+
+zlib, raw DEFLATE and gzip are undone automatically (capped at 20 MB inflated), then UTF-16 LE when the result is UTF-16 text.
+
+**Returns:** `layer_id`, `path` (`.txt` or `.bin`), `sha256`, `size`, `kind`, `parent`, `parent_sha256`, `indicator`, `steps[]`, `preview`, `next_step`; `looks_like` for a PE. Layers and their lineage are recorded in `layers.json` under `<db_dir>/reverse/<case>/<sha256[:16]>_<name>/scripts/`; the same blob decoded the same way is not recorded twice (`already_recorded`). Text layers are indexed once as `reverse.script_layer` (binary layers: their strings).
+
+**Roles:** none (interactive)

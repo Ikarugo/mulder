@@ -66,6 +66,8 @@ def test_tools_are_registered_without_a_pipeline_role() -> None:
         "reverse_read_bytes",
         "reverse_annotate",
         "reverse_annotations",
+        "reverse_read_script",
+        "reverse_decode_layer",
     }
     assert not [t for t in get_tools_for_role(ALL_ROLES) if "reverse_" in t]
 
