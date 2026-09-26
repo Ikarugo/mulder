@@ -86,7 +86,7 @@ class GhidraSession:
         self.sample = sample
         self.project_dir = project_dir
         self.project_dir.mkdir(parents=True, exist_ok=True)
-        self.project = pyghidra.open_project(str(project_dir), PROJECT_NAME, create=True)
+        self.project = self._open_project(pyghidra, project_dir)
         self.program_name = sample.name
         root = self.project.getProjectData().getRootFolder()
         self.reused = root.getFile(self.program_name) is not None
@@ -115,6 +115,26 @@ class GhidraSession:
         self._ptr_slots: dict[int, list[int]] | None = None
 
     # -- lifecycle --------------------------------------------------------
+
+    _LOCK_WAIT_S = 60.0
+
+    @classmethod
+    def _open_project(cls, pyghidra: Any, project_dir: Path) -> Any:
+        """Open the project, waiting while another worker still holds its lock.
+
+        Each agent session runs its own MCP server and so its own worker; the
+        previous session's worker can still be closing the project when the
+        next one starts.
+        """
+        deadline = time.monotonic() + cls._LOCK_WAIT_S
+        while True:
+            try:
+                return pyghidra.open_project(str(project_dir), PROJECT_NAME, create=True)
+            except Exception as exc:
+                if "lock" not in str(exc).lower() or time.monotonic() > deadline:
+                    raise
+                print(f"project locked, waiting: {exc}", file=sys.stderr, flush=True)
+                time.sleep(1.0)
 
     def _state_path(self) -> Path:
         return self.project_dir / ANALYSIS_STATE_FILE
@@ -844,6 +864,103 @@ class GhidraSession:
             "saved": True,
         }
 
+    _CALL_PATH_NODE_CAP = 50_000
+
+    def _successors(self, func: Any) -> list[tuple[Any, str]]:
+        """Functions *func* calls, or whose address its code takes."""
+        mon = self._pyghidra.task_monitor()
+        fm = self._fm()
+        out: dict[int, tuple[Any, str]] = {}
+        for callee in func.getCalledFunctions(mon):
+            if callee.isThunk():
+                real = callee.getThunkedFunction(True)
+                callee = real if real is not None else callee
+            out.setdefault(int(callee.getEntryPoint().getOffset()), (callee, "call"))
+        listing = self.program.getListing()
+        for ins in listing.getInstructions(func.getBody(), True):
+            for ref in ins.getReferencesFrom():
+                to = ref.getToAddress()
+                if not to.isMemoryAddress():
+                    continue
+                target = fm.getFunctionAt(to)
+                if target is not None and not target.equals(func):
+                    out.setdefault(int(to.getOffset()), (target, "address_taken"))
+        return list(out.values())
+
+    def op_call_path(self, p: dict[str, Any]) -> dict[str, Any]:
+        """Shortest static path from an entry point to *target*, if any."""
+        target = self._resolve_function(p.get("target"))
+        fm = self._fm()
+        roots: list[Any] = []
+        it = self.program.getSymbolTable().getExternalEntryPointIterator()
+        while it.hasNext():
+            f = fm.getFunctionAt(it.next())
+            if f is not None:
+                roots.append(f)
+        for name in ("main", "wmain", "WinMain", "wWinMain", "DllMain"):
+            roots.extend(self._functions_named(name))
+        roots = [r for r in roots if not r.isExternal()]
+        seen: dict[int, tuple[int | None, str]] = {}
+        queue: list[Any] = []
+        for r in roots:
+            key = int(r.getEntryPoint().getOffset())
+            if key not in seen:
+                seen[key] = (None, "entry")
+                queue.append(r)
+        goal = int(target.getEntryPoint().getOffset())
+        by_key: dict[int, Any] = {int(r.getEntryPoint().getOffset()): r for r in roots}
+        found = goal in seen
+        head = 0
+        while not found and head < len(queue) and len(seen) < self._CALL_PATH_NODE_CAP:
+            cur = queue[head]
+            head += 1
+            cur_key = int(cur.getEntryPoint().getOffset())
+            for nxt, edge in self._successors(cur):
+                k = int(nxt.getEntryPoint().getOffset())
+                if k in seen or nxt.isExternal():
+                    continue
+                seen[k] = (cur_key, edge)
+                by_key[k] = nxt
+                if k == goal:
+                    found = True
+                    break
+                queue.append(nxt)
+        result: dict[str, Any] = {
+            "target": str(target.getName()),
+            "address": self._fmt(target.getEntryPoint()),
+            "reachable": found,
+            "entry_points": [str(r.getName()) for r in roots[:20]],
+            "functions_visited": len(seen),
+        }
+        if found:
+            chain: list[dict[str, str]] = []
+            k: int | None = goal
+            while k is not None:
+                parent, edge = seen[k]
+                f = by_key[k]
+                chain.append(
+                    {
+                        "name": str(f.getName()),
+                        "address": self._fmt(f.getEntryPoint()),
+                        "edge": edge,
+                    }
+                )
+                k = parent
+            result["path"] = list(reversed(chain))
+            result["note"] = (
+                "edge=call is a direct call; edge=address_taken means the caller takes the "
+                "function's address (callback, thread start, table) and may call it indirectly."
+            )
+        else:
+            result["note"] = (
+                "No static path from an entry point. The function may be dead code, library "
+                "code, or reached through a pointer computed at run time (vtable, resolved "
+                "API, callback); check reverse_xrefs(direction='to') for DATA references."
+            )
+            if len(seen) >= self._CALL_PATH_NODE_CAP:
+                result["note"] += " The search stopped at its node limit."
+        return result
+
 
 _OPS = {
     "info": GhidraSession.op_info,
@@ -855,6 +972,7 @@ _OPS = {
     "imports": GhidraSession.op_imports,
     "read_bytes": GhidraSession.op_read_bytes,
     "annotate": GhidraSession.op_annotate,
+    "call_path": GhidraSession.op_call_path,
 }
 
 

@@ -157,7 +157,10 @@ def _matching_sources(source_name: str | None, evidence_path: str | None) -> lis
     | Role.EXTRACT_ANALYST
     | Role.CROSS_ANALYST
     | Role.NARRATIVE_EXECUTOR
-    | Role.REPORT,
+    | Role.REPORT
+    | Role.RE_PLANNER
+    | Role.RE_ANALYST
+    | Role.RE_REPORT,
     unthrottled=True,
 )
 @audited_tool("list_sources")
@@ -195,7 +198,10 @@ def list_sources() -> dict[str, object]:
     | Role.CROSS_PLANNER
     | Role.CROSS_ANALYST
     | Role.NARRATIVE_EXECUTOR
-    | Role.REPORT,
+    | Role.REPORT
+    | Role.RE_PLANNER
+    | Role.RE_ANALYST
+    | Role.RE_REPORT,
     unthrottled=True,
 )
 @audited_tool("get_source_stats")
@@ -361,6 +367,9 @@ def _search_fts(
     | Role.NARRATIVE_EXECUTOR
     | Role.NARRATIVE_ANALYST
     | Role.REPORT
+    | Role.RE_PLANNER
+    | Role.RE_ANALYST
+    | Role.RE_REPORT
 )
 def search(
     query: str = "",
@@ -994,6 +1003,9 @@ def scan_files_in_memory() -> dict[str, object]:
     | Role.NARRATIVE_EXECUTOR
     | Role.NARRATIVE_ANALYST
     | Role.REPORT
+    | Role.RE_PLANNER
+    | Role.RE_ANALYST
+    | Role.RE_REPORT
 )
 @audited_tool("get_raw_output")
 def get_raw_output(
@@ -1080,7 +1092,7 @@ _B64_EXTRACT_RE = re.compile(r"[A-Za-z0-9+/=]{20,}")
 
 
 @mcp.tool()
-@tool_access(EXECUTORS | ANALYSTS)
+@tool_access(EXECUTORS | ANALYSTS | Role.RE_EXECUTOR | Role.RE_ANALYST)
 def decode_payload(
     data: str = "",
     encoding: str = "auto",

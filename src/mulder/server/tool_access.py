@@ -29,12 +29,20 @@ class Role(Flag):
     NARRATIVE_EXECUTOR = auto()
     NARRATIVE_ANALYST = auto()
     REPORT = auto()
+    # Static malware analysis pipeline (``mulder reverse``). Its phases share
+    # one planner, executor and analyst role; they are not part of ALL_ROLES,
+    # so no forensic phase ever sees a reverse-engineering tool.
+    RE_PLANNER = auto()
+    RE_EXECUTOR = auto()
+    RE_ANALYST = auto()
+    RE_REPORT = auto()
 
 
 PLANNERS = Role.EXTRACT_PLANNER | Role.CROSS_PLANNER | Role.NARRATIVE_PLANNER
 EXECUTORS = Role.EXTRACT_EXECUTOR | Role.CROSS_EXECUTOR | Role.NARRATIVE_EXECUTOR
 ANALYSTS = Role.EXTRACT_ANALYST | Role.CROSS_ANALYST | Role.NARRATIVE_ANALYST
 ALL_ROLES = Role.CATALOG | PLANNERS | EXECUTORS | ANALYSTS | Role.REPORT
+REVERSE_ROLES = Role.RE_PLANNER | Role.RE_EXECUTOR | Role.RE_ANALYST | Role.RE_REPORT
 
 _registry: dict[str, Role] = {}
 
@@ -76,3 +84,13 @@ def tool_access(*roles: Role, unthrottled: bool = False) -> Callable[[F], F]:
 def get_tools_for_role(role: Role) -> list[str]:
     """Return sorted MCP tool names accessible by a given role."""
     return sorted(f"mcp__mulder__{name}" for name, allowed in _registry.items() if role & allowed)
+
+
+def all_registered_tools() -> list[str]:
+    """Every tool declared with ``@tool_access``, whatever its roles (or none).
+
+    A session's disallowed list is the complement of its allowlist over
+    this set, so tools meant only for interactive use (no role) or for
+    another pipeline stay out of the session.
+    """
+    return sorted(f"mcp__mulder__{name}" for name in _registry)

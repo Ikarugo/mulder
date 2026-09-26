@@ -14,13 +14,14 @@ Everything a sample contains (strings, symbol names, decompiled code) is
 attacker-controlled data. It is returned as data and must never be read as
 instructions.
 
-The tools carry no pipeline role yet: they are available through
-``mulder serve`` (Claude Code, Claude Desktop) and to no investigation
-phase, so the forensic pipeline is unchanged.
+They are available through ``mulder serve`` (Claude Code, Claude Desktop)
+and to the reverse-engineering pipeline (``mulder reverse``) through its
+RE_* roles only: no forensic investigation phase sees them.
 """
 
 from __future__ import annotations
 
+import re
 import threading
 import time
 from pathlib import Path
@@ -46,17 +47,19 @@ from mulder.server.helpers import (
     sources_already_indexed,
     tool_response,
 )
-from mulder.server.tool_access import tool_access
+from mulder.server.tool_access import Role, tool_access
 
 __all__ = [
     "reverse_analyze",
     "reverse_annotate",
     "reverse_annotations",
+    "reverse_call_path",
     "reverse_decode_layer",
     "reverse_decompile",
     "reverse_disassemble",
     "reverse_imports",
     "reverse_list_functions",
+    "reverse_map_sample",
     "reverse_read_bytes",
     "reverse_read_script",
     "reverse_strings",
@@ -182,7 +185,7 @@ def _program_summary(info: dict[str, Any]) -> str:
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR)
 def reverse_analyze(file_path: str, backend: str = "ghidra") -> dict[str, object]:
     """Load a PE/ELF/Mach-O sample into the disassembler and auto-analyse it.
 
@@ -245,7 +248,7 @@ def reverse_analyze(file_path: str, backend: str = "ghidra") -> dict[str, object
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_list_functions(
     file_path: str,
     query: str = "",
@@ -357,7 +360,7 @@ def _index_function(prep: _Prepared, first: dict[str, Any]) -> str | None:
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_decompile(
     file_path: str,
     target: str,
@@ -419,7 +422,7 @@ def reverse_decompile(
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_disassemble(
     file_path: str,
     target: str,
@@ -461,7 +464,7 @@ def reverse_disassemble(
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_xrefs(
     file_path: str,
     target: str,
@@ -512,7 +515,7 @@ def reverse_xrefs(
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_strings(
     file_path: str,
     query: str = "",
@@ -563,7 +566,7 @@ def reverse_strings(
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_imports(
     file_path: str,
     query: str = "",
@@ -606,7 +609,7 @@ def reverse_imports(
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_read_bytes(
     file_path: str,
     target: str,
@@ -649,7 +652,7 @@ def reverse_read_bytes(
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_ANALYST)
 def reverse_annotate(
     file_path: str,
     target: str,
@@ -708,7 +711,7 @@ def reverse_annotate(
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_ANALYST | Role.RE_REPORT)
 def reverse_annotations(file_path: str, backend: str = "ghidra") -> dict[str, object]:
     """List every rename and comment made on a sample's project so far.
 
@@ -752,7 +755,7 @@ def _index_script_once(source_name: str, path: Path, text: str, header: str) -> 
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_read_script(
     file_path: str,
     offset: int = 0,
@@ -848,7 +851,7 @@ def reverse_read_script(
 
 
 @mcp.tool()
-@tool_access()
+@tool_access(Role.RE_EXECUTOR | Role.RE_ANALYST)
 def reverse_decode_layer(
     file_path: str,
     indicator: int,
@@ -935,4 +938,208 @@ def reverse_decode_layer(
         result["indexed_source"] = indexed
     return tool_response(
         tc_id, "reverse_decode_layer", params, result, None, (time.monotonic() - t0) * 1000
+    )
+
+
+# ---------------------------------------------------------------------------
+# Reachability and the sample map (pipeline helpers)
+# ---------------------------------------------------------------------------
+
+
+@mcp.tool()
+@tool_access(Role.RE_ANALYST)
+def reverse_call_path(file_path: str, target: str, backend: str = "ghidra") -> dict[str, object]:
+    """Find the shortest static path from an entry point to a function.
+
+    Call to check whether a capability is actually reachable: code capa
+    flags inside a function nothing calls may be dead or library code.
+    Direct calls and taken addresses (callbacks, thread start routines)
+    both count as edges.
+
+    Returns reachable, the path (name, address, edge) when there is one,
+    the entry points used, and how many functions were visited. No path
+    is not proof of dead code: indirect calls through computed pointers
+    are invisible to static analysis.
+
+    Args:
+        file_path: Absolute path to the sample.
+        target: Function name or hex address.
+        backend: Reverse-engineering engine ("ghidra").
+    """
+    params: dict[str, object] = {"file_path": file_path, "target": target, "backend": backend}
+    return _read("reverse_call_path", params, file_path, backend, "call_path", {"target": target})
+
+
+_MAP_STRING_RE = re.compile(
+    r"(?i)(https?://|ftp://|\b(?:\d{1,3}\.){3}\d{1,3}\b|\\\\[\w.$-]+\\|"
+    r"\b(?:HKLM|HKCU|HKEY_[A-Z_]+|SOFTWARE\\|SYSTEM\\CurrentControlSet)|"
+    r"[a-z]:\\|%(?:appdata|temp|programdata|userprofile|windir)%|"
+    r"\b(?:cmd(?:\.exe)?|powershell|rundll32|regsvr32|schtasks|mshta|wscript|cscript|"
+    r"bitsadmin|certutil|vssadmin|wmic)\b|mozilla/|user-agent|global\\|local\\|"
+    r"\.(?:exe|dll|ps1|bat|vbs|js|hta|lnk|zip|onion)\b|[\w.-]+\.(?:com|net|org|ru|cn|io|xyz|"
+    r"top|info|invalid)\b|\b[A-Za-z0-9+/]{32,}={0,2}\b)"
+)
+_MAP_PAGE = 200
+_MAP_MAX_PAGES = 25
+
+
+def _all_pages(prep: _Prepared, op: str, params: dict[str, Any]) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    offset: int | None = 0
+    pages = 0
+    while offset is not None and pages < _MAP_MAX_PAGES:
+        page_ = prep.backend.call(
+            prep.project, op, {**params, "offset": offset, "limit": _MAP_PAGE}, _READ_TIMEOUT_S
+        )
+        items.extend(page_.get("items") or [])
+        nxt = page_.get("next_offset")
+        offset = nxt if isinstance(nxt, int) else None
+        pages += 1
+    return items
+
+
+def _suspicious_category(name: str) -> str | None:
+    from mulder.server.tools.binary import SUSPICIOUS_API_CATEGORIES
+
+    base = name.rstrip("AW") if name[-1:] in ("A", "W") else name
+    for category, apis in SUSPICIOUS_API_CATEGORIES.items():
+        if name in apis or base in apis:
+            return category
+    return None
+
+
+@mcp.tool()
+@tool_access(Role.RE_EXECUTOR)
+def reverse_map_sample(file_path: str, backend: str = "ghidra") -> dict[str, object]:
+    """Build a map of an analysed sample: suspicious imports, IOC-like strings, hot functions.
+
+    Call after reverse_analyze (and run_capa when available) to give the
+    analyst leads to prioritise. Collects every import with its callers,
+    strings that look like URLs, IPs, paths, registry keys, commands or
+    blobs with the functions using them, the most-called and largest
+    non-library functions, and the functions containing capa matches.
+
+    Returns counts and the top leads; the full map is indexed as
+    'reverse.map' for search() and get_raw_output().
+
+    Args:
+        file_path: Absolute path to the sample.
+        backend: Reverse-engineering engine ("ghidra").
+    """
+    tc_id = make_tool_call_id()
+    t0 = time.monotonic()
+    params: dict[str, object] = {"file_path": file_path, "backend": backend}
+    try:
+        prep = _prepare(file_path, backend)
+        info = prep.backend.call(prep.project, "info", {}, _READ_TIMEOUT_S)
+        imports = _all_pages(prep, "imports", {})
+        strings = _all_pages(prep, "strings", {"min_length": 5})
+        by_callers = prep.backend.call(
+            prep.project, "list_functions", {"sort": "callers", "limit": 25}, _READ_TIMEOUT_S
+        )["items"]
+        by_size = prep.backend.call(
+            prep.project, "list_functions", {"sort": "size", "limit": 25}, _READ_TIMEOUT_S
+        )["items"]
+    except BackendError as exc:
+        return _fail(tc_id, "reverse_map_sample", params, exc, t0)
+
+    suspicious = []
+    for imp in imports:
+        cat = _suspicious_category(str(imp.get("name", "")))
+        if cat:
+            suspicious.append({**imp, "category": cat})
+    ioc_strings = [s for s in strings if _MAP_STRING_RE.search(str(s.get("value", "")))]
+
+    capa_rows: list[dict[str, Any]] = []
+    if has_ctx():
+        from mulder.reverse.state import capa_capabilities
+
+        caps = capa_capabilities(get_ctx().db.get_kv, str(prep.sample)) or []
+        for cap in caps:
+            funcs: list[str] = []
+            for addr in cap.get("addresses", [])[:10]:
+                try:
+                    d = prep.backend.call(
+                        prep.project, "disassemble", {"target": addr, "limit": 1}, _READ_TIMEOUT_S
+                    )
+                except BackendError:
+                    continue
+                name = d.get("function")
+                if name and name not in funcs:
+                    funcs.append(str(name))
+            capa_rows.append(
+                {"capability": cap["name"], "functions": funcs, "attack": cap["attack"]}
+            )
+
+    lines = [
+        f"// reverse.map {prep.sample.name} sha256 {prep.sha256}",
+        f"format={info.get('format')} language={info.get('language')} "
+        f"functions={info.get('functions')} imports={info.get('imports')}",
+        "",
+        f"## suspicious imports ({len(suspicious)} of {len(imports)})",
+    ]
+    lines += [
+        f"{i['category']}: {i.get('library')}!{i.get('name')} called by "
+        f"{', '.join(i.get('callers') or []) or 'no code reference found'}"
+        for i in suspicious
+    ]
+    lines += ["", f"## capa capabilities located in code ({len(capa_rows)})"]
+    lines += [
+        f"{c['capability']} [{', '.join(c['attack'])}] in {', '.join(c['functions']) or '?'}"
+        for c in capa_rows
+    ]
+    lines += ["", f"## IOC-like strings ({len(ioc_strings)} of {len(strings)})"]
+    lines += [
+        f"{s.get('address')} {s.get('value')!r} used by "
+        f"{', '.join(s.get('functions') or []) or 'no code reference found'}"
+        for s in ioc_strings
+    ]
+    lines += ["", "## most-called functions (library code excluded)"]
+    lines += [
+        f"{f['name']} {f['address']} callers={f['callers']} size={f['size']}" for f in by_callers
+    ]
+    lines += ["", "## largest functions (library code excluded)"]
+    lines += [
+        f"{f['name']} {f['address']} size={f['size']} callees={f['callees']}" for f in by_size
+    ]
+    lines += ["", f"## all imports ({len(imports)})"]
+    lines += [f"{i.get('library')}!{i.get('name')}" for i in imports]
+    text = "\n".join(lines)
+
+    summary: dict[str, object] = {
+        "sample_sha256": prep.sha256,
+        "imports_total": len(imports),
+        "suspicious_imports": [
+            {"name": i.get("name"), "category": i["category"], "callers": i.get("callers")}
+            for i in suspicious[:40]
+        ],
+        "ioc_strings_total": len(ioc_strings),
+        "ioc_strings": [
+            {"value": str(s.get("value"))[:120], "functions": s.get("functions")}
+            for s in ioc_strings[:40]
+        ],
+        "capa_in_code": capa_rows[:40],
+        "most_called": [f["name"] for f in by_callers[:15]],
+        "largest": [f["name"] for f in by_size[:15]],
+        "packing_hint": (
+            "Very few imports and functions: the sample may be packed."
+            if len(imports) < 10 and int((info.get("functions") or {}).get("total", 0)) < 30
+            else None
+        ),
+    }
+    if has_ctx():
+        idx = extract_and_index(
+            raw_output=text,
+            source_name="reverse.map",
+            source_path=str(prep.sample),
+            extractor_name=f"reverse.{prep.backend.name}",
+        )
+        summary["windows_indexed"] = idx.get("windows_indexed")
+        summary["line_count"] = idx.get("line_count")
+        source: str | None = "reverse.map"
+    else:
+        summary["map"] = text
+        source = None
+    return tool_response(
+        tc_id, "reverse_map_sample", params, summary, source, (time.monotonic() - t0) * 1000
     )

@@ -21,7 +21,7 @@ from mulder.audit import AuditLog
 from mulder.db import CaseDB
 from mulder.index.correlator import Correlator
 from mulder.server.jobs import JobStore, fill_case_id, validate_tool_args
-from mulder.server.tool_access import EXECUTORS, UNTHROTTLED, tool_access
+from mulder.server.tool_access import EXECUTORS, UNTHROTTLED, Role, tool_access
 
 logger = logging.getLogger(__name__)
 
@@ -690,7 +690,7 @@ _SEQUENTIAL_ONLY: set[str] = {
 
 
 @mcp.tool()
-@tool_access(EXECUTORS)
+@tool_access(EXECUTORS | Role.RE_EXECUTOR)
 async def run_parallel(tasks: list[dict[str, Any]]) -> dict[str, Any]:
     """Run multiple tool calls in parallel and return all results.
 

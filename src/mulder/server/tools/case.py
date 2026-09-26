@@ -32,7 +32,7 @@ from mulder.server.app import (
     validate_case_id,
 )
 from mulder.server.helpers import error_response, hash_output, make_tool_call_id, run_tool
-from mulder.server.tool_access import ALL_ROLES, Role, tool_access
+from mulder.server.tool_access import ALL_ROLES, REVERSE_ROLES, Role, tool_access
 from mulder.triage import RAW_COLLECTION_ARTIFACT_TYPE, TRIAGE_ARTIFACT_TYPE, iter_tree_files
 from mulder.triage.prepare import MANIFEST_NAME, artifact_coverage, missing_artifacts
 
@@ -481,7 +481,7 @@ def list_cases() -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(ALL_ROLES, unthrottled=True)
+@tool_access(ALL_ROLES | REVERSE_ROLES, unthrottled=True)
 def open_case(case_id: str) -> dict[str, object]:
     """Switch the active case to an already-existing case.
 

@@ -151,6 +151,12 @@ class AuditLog:
         """Return True if ``tool_call_id`` appears in this audit log."""
         return tool_call_id in self._tool_call_ids
 
+    def tool_name_of(self, tool_call_id: str) -> str | None:
+        """Name of the tool a logged call ran, or None if the ID is unknown."""
+        entry = self._tool_calls.get(tool_call_id)
+        name = entry.get("tool_name") if entry else None
+        return name if isinstance(name, str) else None
+
     @property
     def tool_call_ids(self) -> set[str]:
         """All tool call IDs indexed from the log (copy of the internal set)."""

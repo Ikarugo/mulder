@@ -50,12 +50,19 @@ def _sources(name: str) -> list[Any]:
     return [s for s in get_ctx().db.get_sources() if s.source_name == name]
 
 
-def test_tools_are_registered_without_a_pipeline_role() -> None:
+def test_reverse_tools_never_reach_a_forensic_phase() -> None:
     import mulder.server.tools  # noqa: F401
-    from mulder.server.tool_access import ALL_ROLES, _registry, get_tools_for_role
+    from mulder.orchestrator.phases import EXTRACTION
+    from mulder.orchestrator.session import off_role_tools
+    from mulder.server.tool_access import (
+        ALL_ROLES,
+        REVERSE_ROLES,
+        _registry,
+        get_tools_for_role,
+    )
 
     names = {n for n in _registry if n.startswith("reverse_")}
-    assert names == {
+    assert {
         "reverse_analyze",
         "reverse_list_functions",
         "reverse_decompile",
@@ -68,8 +75,14 @@ def test_tools_are_registered_without_a_pipeline_role() -> None:
         "reverse_annotations",
         "reverse_read_script",
         "reverse_decode_layer",
-    }
+        "reverse_call_path",
+        "reverse_map_sample",
+    } <= names
     assert not [t for t in get_tools_for_role(ALL_ROLES) if "reverse_" in t]
+    assert all(_registry[n] & REVERSE_ROLES for n in names)
+    # A forensic session's disallowed list removes them from its context.
+    hidden = set(off_role_tools(EXTRACTION.executor_allowed_tools))
+    assert {f"mcp__mulder__{n}" for n in names} <= hidden
 
 
 def test_importing_the_tools_does_not_start_a_jvm() -> None:

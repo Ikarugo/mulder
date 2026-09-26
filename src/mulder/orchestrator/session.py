@@ -32,7 +32,7 @@ from mulder.orchestrator.errors import AuthenticationError, ModelNotAvailableErr
 from mulder.orchestrator.models import ModelConfig
 from mulder.orchestrator.proxy import ModelSettings, is_proxy_model
 from mulder.orchestrator.types import EffortLevel, PhaseResult, extract_json_from_text
-from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
+from mulder.server.tool_access import all_registered_tools
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ def off_role_tools(allowed_tools: list[str]) -> list[str]:
         Sorted MCP tool names the session must not see.
     """
     allowed = frozenset(allowed_tools)
-    return [t for t in get_tools_for_role(ALL_ROLES) if t not in allowed]
+    return [t for t in all_registered_tools() if t not in allowed]
 
 
 def _missing_mcp_tools(init: SystemMessage, expected: set[str]) -> str:

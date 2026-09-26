@@ -754,7 +754,7 @@ def _run_yara_scan(
 
 
 @mcp.tool()
-@tool_access(Role.EXTRACT_EXECUTOR)
+@tool_access(Role.EXTRACT_EXECUTOR | Role.RE_EXECUTOR)
 def yara_scan_files(
     target_path: str,
     rules: str | None = None,

@@ -645,6 +645,58 @@ def _compute_verdict(
 # ---------------------------------------------------------------------------
 
 
+def _capa_match_addresses(matches: object, cap: int = 20) -> list[str]:
+    """Hex addresses of a capa rule's matches, whatever the JSON version.
+
+    capa 7+ writes ``[[{"type": "absolute", "value": 4198400}, {...}], ...]``;
+    older output used a dict keyed by address.
+    """
+    found: list[str] = []
+    items: list[object] = []
+    if isinstance(matches, dict):
+        items = list(matches.keys())
+    elif isinstance(matches, list):
+        items = [m[0] if isinstance(m, list | tuple) and m else m for m in matches]
+    for item in items:
+        value: object = item.get("value") if isinstance(item, dict) else item
+        if isinstance(value, int):
+            found.append(f"0x{value:x}")
+        elif isinstance(value, str) and re.fullmatch(r"(0x)?[0-9a-fA-F]+", value):
+            found.append("0x" + value.lower().removeprefix("0x"))
+        if len(found) >= cap:
+            break
+    return found
+
+
+def _remember_capa_capabilities(raw: dict[str, Any], file_path: str) -> None:
+    """Keep the capability list for the reverse-engineering pipeline.
+
+    Its deep-analysis gate checks that every capability capa reported was
+    confirmed or refuted in the code, so it needs the names and the match
+    addresses without re-parsing the indexed JSON.
+    """
+    from mulder.server.app import get_ctx, has_ctx
+
+    if not has_ctx():
+        return
+    rows = []
+    for rule_name, rule_data in (raw.get("rules") or {}).items():
+        if not isinstance(rule_data, dict):
+            continue
+        meta = rule_data.get("meta") or {}
+        if meta.get("lib"):
+            continue  # library rules are building blocks, not capabilities
+        rows.append(
+            {
+                "name": str(rule_name),
+                "namespace": str(meta.get("namespace", "")),
+                "attack": [str(a.get("id", "")) for a in meta.get("attack", []) if a.get("id")],
+                "addresses": _capa_match_addresses(rule_data.get("matches")),
+            }
+        )
+    get_ctx().db.set_kv(f"capa:capabilities:{file_path}", json.dumps(rows))
+
+
 def _parse_capa_output(raw: dict[str, Any], file_path: str) -> dict[str, object]:
     """Parse CAPA JSON output into structured result.
 
@@ -878,7 +930,7 @@ def _parse_die_output(raw: dict[str, Any], file_path: str) -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(Role.EXTRACT_EXECUTOR | Role.EXTRACT_ANALYST)
+@tool_access(Role.EXTRACT_EXECUTOR | Role.EXTRACT_ANALYST | Role.RE_EXECUTOR)
 def triage_binary(
     case_id: str,
     file_path: str,
@@ -1057,7 +1109,7 @@ def triage_binary(
 
 
 @mcp.tool()
-@tool_access(Role.EXTRACT_EXECUTOR | Role.EXTRACT_ANALYST)
+@tool_access(Role.EXTRACT_EXECUTOR | Role.EXTRACT_ANALYST | Role.RE_EXECUTOR)
 def run_capa(
     case_id: str,
     file_path: str,
@@ -1189,6 +1241,7 @@ def run_capa(
     summary = extract_and_index(proc.stdout, "capa.analysis", file_path, "capa")
     summary.update(parsed)
     summary["grouped_by"] = "mitre_tactic" if output_format == "mitre" else "namespace"
+    _remember_capa_capabilities(raw_json, file_path)
 
     elapsed = (time.monotonic() - t0) * 1000
     return tool_response(tc_id, "run_capa", params, summary, "capa.analysis", elapsed)
@@ -1200,7 +1253,7 @@ def run_capa(
 
 
 @mcp.tool()
-@tool_access(Role.EXTRACT_EXECUTOR)
+@tool_access(Role.EXTRACT_EXECUTOR | Role.RE_EXECUTOR)
 def run_floss(
     case_id: str,
     file_path: str,
@@ -1342,7 +1395,7 @@ def run_floss(
 
 
 @mcp.tool()
-@tool_access(Role.EXTRACT_EXECUTOR)
+@tool_access(Role.EXTRACT_EXECUTOR | Role.RE_EXECUTOR)
 def run_detect_it_easy(
     case_id: str,
     file_path: str,

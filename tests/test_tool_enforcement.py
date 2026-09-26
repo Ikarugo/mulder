@@ -19,9 +19,12 @@ from mulder.orchestrator.roles import _EXECUTOR_CONTROL_TOOLS, RoleRunner
 from mulder.orchestrator.runner import Orchestrator
 from mulder.orchestrator.session import _MCP_CONNECT_ATTEMPTS, builtin_tools, off_role_tools
 from mulder.orchestrator.types import AnalystResult, ExecutionResults, PhaseResult, Plan
-from mulder.server.tool_access import ALL_ROLES, get_tools_for_role
+from mulder.server.tool_access import all_registered_tools
 
-ALL_TOOLS = frozenset(get_tools_for_role(ALL_ROLES))
+#: Every registered tool, whatever its roles: a session must not see a tool
+#: outside its allowlist, including interactive-only tools and the tools of
+#: the reverse-engineering pipeline.
+ALL_TOOLS = frozenset(all_registered_tools())
 
 #: ``@tool_access(Role.EXTRACT_EXECUTOR)`` only; the analyst called all six
 #: in the benchmark run that exposed the bug.

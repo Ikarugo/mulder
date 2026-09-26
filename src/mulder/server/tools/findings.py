@@ -245,7 +245,7 @@ def _sanitize_event_time(ts: str | None) -> tuple[str | None, str | None]:
 
 
 @mcp.tool()
-@tool_access(ANALYSTS)
+@tool_access(ANALYSTS | Role.RE_ANALYST)
 def submit_finding(
     title: str,
     description: str,
@@ -375,7 +375,7 @@ def submit_finding(
 
 
 @mcp.tool()
-@tool_access(ANALYSTS | Role.NARRATIVE_EXECUTOR | Role.REPORT)
+@tool_access(ANALYSTS | Role.NARRATIVE_EXECUTOR | Role.REPORT | Role.RE_ANALYST | Role.RE_REPORT)
 def update_finding(
     finding_id: str,
     title: str | None = None,
@@ -490,7 +490,7 @@ def update_finding(
 
 
 @mcp.tool()
-@tool_access(Role.CROSS_ANALYST | Role.NARRATIVE_ANALYST)
+@tool_access(Role.CROSS_ANALYST | Role.NARRATIVE_ANALYST | Role.RE_ANALYST)
 def delete_finding(finding_id: str) -> dict[str, object]:
     """Delete a finding that was submitted in error.
 
@@ -535,7 +535,7 @@ def delete_finding(finding_id: str) -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(Role.REPORT)
+@tool_access(Role.REPORT | Role.RE_REPORT)
 def submit_narrative(narrative: str) -> dict[str, object]:
     """Submit the long-form investigation narrative report.
 
@@ -573,7 +573,14 @@ def submit_narrative(narrative: str) -> dict[str, object]:
 
 @mcp.tool()
 @tool_access(
-    ANALYSTS | Role.CROSS_PLANNER | Role.NARRATIVE_PLANNER | Role.NARRATIVE_EXECUTOR | Role.REPORT,
+    ANALYSTS
+    | Role.CROSS_PLANNER
+    | Role.NARRATIVE_PLANNER
+    | Role.NARRATIVE_EXECUTOR
+    | Role.REPORT
+    | Role.RE_PLANNER
+    | Role.RE_ANALYST
+    | Role.RE_REPORT,
     unthrottled=True,
 )
 def get_findings(limit: int = 20, offset: int = 0) -> dict[str, object]:
@@ -623,7 +630,7 @@ def get_findings(limit: int = 20, offset: int = 0) -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(Role.REPORT)
+@tool_access(Role.REPORT | Role.RE_REPORT)
 def finalize_report() -> dict[str, object]:
     """Generate the final investigation report from all submitted findings.
 
@@ -993,7 +1000,7 @@ def _consolidate_group(
 
 
 @mcp.tool()
-@tool_access(Role.NARRATIVE_EXECUTOR | Role.NARRATIVE_ANALYST | Role.REPORT)
+@tool_access(Role.NARRATIVE_EXECUTOR | Role.NARRATIVE_ANALYST | Role.REPORT | Role.RE_ANALYST)
 def deduplicate_findings(
     case_id: str,
     similarity_threshold: float = 0.4,

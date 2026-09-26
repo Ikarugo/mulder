@@ -110,6 +110,7 @@ OPERATIONS: dict[str, tuple[str, ...]] = {
     "read_bytes": ("target", "length"),
     "annotate": ("target", "new_name", "comment"),
     "annotations": (),
+    "call_path": ("target",),
 }
 
 _registry: dict[str, type] = {}

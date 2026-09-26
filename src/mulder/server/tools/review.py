@@ -121,7 +121,13 @@ def _get_source_samples(db: CaseDB, source_name: str) -> list[str]:
 
 
 @mcp.tool()
-@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST | Role.REPORT)
+@tool_access(
+    Role.NARRATIVE_PLANNER
+    | Role.NARRATIVE_ANALYST
+    | Role.REPORT
+    | Role.RE_ANALYST
+    | Role.RE_REPORT
+)
 def audit_evidence_coverage() -> dict[str, object]:
     """Identify indexed evidence sources not cited by any submitted finding.
 
@@ -202,7 +208,13 @@ def audit_evidence_coverage() -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST | Role.REPORT)
+@tool_access(
+    Role.NARRATIVE_PLANNER
+    | Role.NARRATIVE_ANALYST
+    | Role.REPORT
+    | Role.RE_ANALYST
+    | Role.RE_REPORT
+)
 def audit_tool_coverage() -> dict[str, object]:
     """Report applicable forensic tools that were never invoked during the investigation.
 
@@ -288,7 +300,14 @@ def audit_tool_coverage() -> dict[str, object]:
 
 
 @mcp.tool()
-@tool_access(Role.NARRATIVE_PLANNER | Role.NARRATIVE_ANALYST | Role.REPORT, unthrottled=True)
+@tool_access(
+    Role.NARRATIVE_PLANNER
+    | Role.NARRATIVE_ANALYST
+    | Role.REPORT
+    | Role.RE_ANALYST
+    | Role.RE_REPORT,
+    unthrottled=True,
+)
 def check_finalize_readiness() -> dict[str, object]:
     """Check whether the investigation meets all finalize_report requirements.
 
@@ -390,7 +409,10 @@ def track_progress(
     | Role.CROSS_ANALYST
     | Role.NARRATIVE_PLANNER
     | Role.NARRATIVE_ANALYST
-    | Role.REPORT,
+    | Role.REPORT
+    | Role.RE_PLANNER
+    | Role.RE_ANALYST
+    | Role.RE_REPORT,
     unthrottled=True,
 )
 def get_investigation_summary() -> dict[str, object]:
@@ -479,7 +501,7 @@ _NOISE_DOMAINS = frozenset({"microsoft.com", "windows.com", "windowsupdate.com"}
 
 
 @mcp.tool()
-@tool_access(Role.CROSS_ANALYST | Role.NARRATIVE_ANALYST | Role.REPORT)
+@tool_access(Role.CROSS_ANALYST | Role.NARRATIVE_ANALYST | Role.REPORT | Role.RE_REPORT)
 def get_ioc_summary() -> dict[str, object]:
     """Extract and deduplicate IOCs from findings and bulk_extractor data.
 
