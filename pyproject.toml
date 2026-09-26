@@ -65,6 +65,9 @@ dependencies = [
 [project.optional-dependencies]
 pdf = ["weasyprint>=60.0"]
 stix = ["stix2>=3.0"]
+# Static malware analysis with Ghidra (``mulder serve`` reverse_* tools).
+# Needs a Ghidra install and a JDK 21 as well; see docs/reverse-engineering.md.
+reverse = ["pyghidra>=3.0"]
 # Zircolite's runtime dependencies. Verified against
 # https://github.com/wagga40/Zircolite/blob/2.20.0/requirements.txt (the four
 # required entries) plus `evtx`, which Zircolite imports optionally and which
@@ -160,6 +163,14 @@ module = [
     "dissect.*",
 ]
 ignore_missing_imports = true
+
+# Reverse-engineering engines: optional, untyped (Ghidra's Java packages are
+# only importable inside a running JVM). Skipped so the check gives the same
+# answer with or without them installed.
+[[tool.mypy.overrides]]
+module = ["pyghidra", "pyghidra.*", "ghidra", "ghidra.*", "jpype", "jpype.*", "r2pipe"]
+ignore_missing_imports = true
+follow_imports = "skip"
 
 [[tool.mypy.overrides]]
 module = "tests.*"
