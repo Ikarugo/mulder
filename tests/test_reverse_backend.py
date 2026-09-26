@@ -85,6 +85,9 @@ def test_find_ghidra_dir_falls_back_to_newest_install(
         (tmp_path / f"ghidra_{v}_PUBLIC").mkdir()
     assert find_ghidra_dir(tmp_path) == tmp_path / "ghidra_12.1.4_PUBLIC"
     assert find_ghidra_dir(tmp_path / "empty") is None
+    (tmp_path / "ghidra" / "support").mkdir(parents=True)
+    (tmp_path / "ghidra" / "support" / "launch.properties").write_text("")
+    assert find_ghidra_dir(tmp_path) == tmp_path / "ghidra", "the Docker image layout wins"
 
 
 def test_check_reports_missing_pyghidra(monkeypatch: pytest.MonkeyPatch) -> None:

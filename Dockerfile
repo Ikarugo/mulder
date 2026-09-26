@@ -107,6 +107,8 @@ RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
     && chmod +x /tmp/dotnet-install.sh \
     && /tmp/dotnet-install.sh --channel 9.0 --runtime dotnet \
         --install-dir /opt/dotnet \
+    && /tmp/dotnet-install.sh --channel 8.0 --runtime dotnet \
+        --install-dir /opt/dotnet \
     && rm /tmp/dotnet-install.sh
 
 RUN mkdir -p /opt/zimmermantools && cd /opt/zimmermantools \
@@ -195,6 +197,62 @@ ARG RADARE2_VERSION=5.9.8
 RUN ARCH="$(dpkg --print-architecture)" \
     && curl -fsSL "https://github.com/radareorg/radare2/releases/download/${RADARE2_VERSION}/radare2_${RADARE2_VERSION}_${ARCH}.deb" \
         -o /tmp/radare2.deb
+
+# r2ghidra: the decompiler behind `pdg`, used by the radare2 reverse backend.
+# Upstream publishes it for amd64 only; on arm64 the backend still works but
+# reverse_decompile answers binary_missing. /tmp/r2ghidra/ holds the .deb or
+# nothing, so the runtime stage can bind-mount it on every architecture.
+ARG R2GHIDRA_VERSION=5.9.8
+RUN mkdir -p /tmp/r2ghidra \
+    && ARCH="$(dpkg --print-architecture)" \
+    && if [ "$ARCH" = "amd64" ]; then \
+        curl -fsSL "https://github.com/radareorg/r2ghidra/releases/download/${R2GHIDRA_VERSION}/r2ghidra_${R2GHIDRA_VERSION}_${ARCH}.deb" \
+            -o /tmp/r2ghidra/r2ghidra.deb; \
+    fi
+
+# Ghidra: headless disassembler/decompiler for the reverse-engineering tools
+# (Java zip, platform-independent except its native decompiler, which is
+# x86_64-only: on arm64 Ghidra disassembles but cannot decompile; pin to build
+# platform to avoid QEMU).
+FROM --platform=$BUILDPLATFORM ubuntu:22.04 AS ghidra-fetch
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG GHIDRA_VERSION=12.1.4
+ARG GHIDRA_BUILD_DATE=20260921
+ARG GHIDRA_SHA256=ddac49f903da9d5bac833e5cc79395098b9c33cfd3279be5f31bd00387d2d4db
+RUN curl -fsSL "https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_${GHIDRA_VERSION}_build/ghidra_${GHIDRA_VERSION}_PUBLIC_${GHIDRA_BUILD_DATE}.zip" \
+        -o /tmp/ghidra.zip \
+    && echo "${GHIDRA_SHA256}  /tmp/ghidra.zip" | sha256sum -c - \
+    && unzip -q /tmp/ghidra.zip -d /opt \
+    && mv "/opt/ghidra_${GHIDRA_VERSION}_PUBLIC" /opt/ghidra \
+    && rm /tmp/ghidra.zip
+
+# ilspycmd (.NET decompiler for the ILSpy reverse backend). The NuGet package
+# of a dotnet tool is a zip holding the framework-dependent tool, so it runs on
+# the .NET 8 runtime installed with the EZ Tools without needing the SDK.
+FROM --platform=$BUILDPLATFORM ubuntu:22.04 AS ilspy-fetch
+
+ENV DEBIAN_FRONTEND=noninteractive
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl unzip \
+    && rm -rf /var/lib/apt/lists/*
+
+ARG ILSPYCMD_VERSION=9.1.0.7988
+RUN curl -fsSL "https://www.nuget.org/api/v2/package/ilspycmd/${ILSPYCMD_VERSION}" \
+        -o /tmp/ilspycmd.nupkg \
+    && mkdir -p /opt/ilspycmd \
+    && unzip -q /tmp/ilspycmd.nupkg -d /opt/ilspycmd \
+    && rm /tmp/ilspycmd.nupkg \
+    && DLL="$(find /opt/ilspycmd/tools -name ilspycmd.dll | head -1)" \
+    && test -n "$DLL" \
+    && printf '#!/bin/sh\nexec dotnet "%s" "$@"\n' "$DLL" > /opt/ilspycmd/ilspycmd \
+    && chmod 0755 /opt/ilspycmd/ilspycmd
 
 # MITRE ATT&CK Enterprise + ICS STIX data (data-only; pin to build platform to avoid QEMU)
 FROM --platform=$BUILDPLATFORM ubuntu:22.04 AS attack-fetch
@@ -452,6 +510,24 @@ COPY --from=suricata-builder /etc/suricata/ /etc/suricata/
 RUN --mount=type=bind,from=radare2-fetch,source=/tmp/radare2.deb,target=/tmp/radare2.deb \
     dpkg -i /tmp/radare2.deb || apt-get install -yf --no-install-recommends
 
+# The r2ghidra 5.9.8 package installs its plugin under the next version's
+# directory (/usr/lib/radare2/5.9.9), which radare2 5.9.8 never loads, and
+# looks for its SLEIGH files under /usr/lib/radare2/5.9.0. Put the plugin
+# where this radare2 looks and point the default at the real files.
+RUN --mount=type=bind,from=radare2-fetch,source=/tmp/r2ghidra,target=/tmp/r2ghidra \
+    if [ -f /tmp/r2ghidra/r2ghidra.deb ]; then \
+        dpkg -i /tmp/r2ghidra/r2ghidra.deb \
+        && R2LIB="$(readlink -f "$(r2 -H R2_LIBR_PLUGINS)")" \
+        && for d in /usr/lib/radare2/*/; do \
+            if [ -e "${d}core_ghidra.so" ] && [ "$(readlink -f "$d")" != "$R2LIB" ]; then \
+                cp -a "${d}." "$R2LIB/"; \
+            fi; \
+        done \
+        && test -e "$R2LIB/core_ghidra.so" \
+        && mkdir -p /usr/lib/radare2/5.9.0 \
+        && ln -sfn "$R2LIB/r2ghidra_sleigh" /usr/lib/radare2/5.9.0/r2ghidra_sleigh; \
+    fi
+
 ARG TARGETARCH
 
 # FLOSS: symlink pre-built binary on amd64 (arm64 uses pip entry point)
@@ -518,6 +594,22 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Install pure Python forensic tool dependencies
 RUN uv pip install --system --no-cache \
         stix2 evtx jsonpath-ng colorama tqdm aiohttp lark
+
+# Reverse engineering (`mulder reverse`, reverse_* tools): Ghidra needs a JDK
+# 21; pyghidra and the JPype it was tested with ship with Ghidra; r2pipe drives the
+# radare2 backend; ilspycmd runs on the .NET 8 runtime copied above.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        openjdk-21-jdk-headless \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=ghidra-fetch /opt/ghidra /opt/ghidra
+COPY --from=ilspy-fetch /opt/ilspycmd /opt/ilspycmd
+RUN ln -sf /opt/ilspycmd/ilspycmd /usr/local/bin/ilspycmd \
+    && uv pip install --system --no-cache --no-index \
+        --find-links /opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist \
+        /opt/ghidra/Ghidra/Features/PyGhidra/pypkg/dist/pyghidra-*.whl \
+    && uv pip install --system --no-cache r2pipe
+ENV MULDER_GHIDRA_DIR=/opt/ghidra
 
 # Keep real Git metadata for setup --verify, excluding mobile test fixtures
 # from both the working tree and the partial clone's object store.

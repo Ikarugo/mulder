@@ -5,6 +5,9 @@ Run from the checkout (the normal entrypoint drops privileges):
     docker run --rm -i --pull=never --network none IMAGE python3 - \
         < scripts/container-smoke.py
 
+Append ``--reverse-only`` (``python3 - --reverse-only``) to run just the
+reverse-engineering checks (Ghidra, radare2 + r2ghidra, ILSpy).
+
 Fixtures and tool outputs live in a temporary container directory. This checks
 representative extraction paths, not forensic accuracy across every parser.
 """
@@ -29,6 +32,95 @@ def run(*args: str | Path, cwd: Path | None = None, timeout: int = 180) -> str:
     if result.returncode:
         raise RuntimeError(f"exit {result.returncode}:\n{result.stdout}\n{result.stderr}")
     return result.stdout
+
+
+def _first_function(backend: object, project: Path) -> str:
+    items = backend.call(project, "list_functions", {"limit": 200}, 120)["items"]  # type: ignore[attr-defined]
+    assert items, f"no function listed in {project}"
+    body = [f for f in items if not f.get("thunk") and not f.get("library")]
+    return str((body or items)[0]["address"])
+
+
+def reverse_checks() -> None:
+    """Static reverse engineering: every backend opens a real binary, offline."""
+    native_reverse_checks()
+    dotnet_reverse_checks()
+    run("mulder", "reverse", "--help")
+
+
+def native_reverse_checks() -> None:
+    """Ghidra and radare2 analyse an ELF from the image (read, never executed).
+
+    Both decompilers (Ghidra's native one, r2ghidra) are only shipped upstream
+    for x86_64; on arm64 the checks stop at disassembly.
+    """
+    import platform
+
+    from mulder.reverse import get_backend
+    from mulder.reverse.backend import BackendError
+
+    for name in ("pyghidra", "r2pipe"):
+        importlib.import_module(name)
+    run("java", "-version")
+    plugins = Path(run("r2", "-H", "R2_LIBR_PLUGINS").strip())
+    has_r2ghidra = (plugins / "core_ghidra.so").exists()
+    x86_64 = platform.machine() in ("x86_64", "AMD64")
+    if x86_64:
+        assert has_r2ghidra, f"r2ghidra plugin missing from {plugins}"
+    for name in ("ghidra", "radare2"):
+        reason = get_backend(name).check()
+        assert reason is None, f"{name} backend unavailable: {reason}"
+
+    with tempfile.TemporaryDirectory(prefix="mulder-reverse-") as directory:
+        work = Path(directory)
+        elf = work / "sample.elf"
+        elf.write_bytes(Path("/usr/bin/true").read_bytes())  # read, never run
+
+        ghidra = get_backend("ghidra")
+        info = ghidra.analyze(elf, work / "ghidra-project", 900)
+        assert "ELF" in info["format"], info
+        target = _first_function(ghidra, work / "ghidra-project")
+        if x86_64:  # the Ghidra zip ships its native decompiler for x86_64 only
+            code = ghidra.call(work / "ghidra-project", "decompile", {"target": target}, 300)
+            assert code["code"].strip(), code
+        else:
+            ghidra.call(work / "ghidra-project", "disassemble", {"target": target}, 300)
+            print("NOTE Ghidra decompiler not checked: no native build for this architecture")
+        ghidra.close()
+        print(f"PASS Ghidra analysis and decompilation ({info['functions']['total']} functions)")
+
+        r2 = get_backend("radare2")
+        info = r2.analyze(elf, work / "r2-project", 900)
+        target = _first_function(r2, work / "r2-project")
+        try:
+            code = r2.call(work / "r2-project", "decompile", {"target": target}, 300)
+        except BackendError as exc:
+            assert not has_r2ghidra and exc.error_type == "binary_missing", exc
+            print("NOTE radare2 without r2ghidra: decompilation unavailable (expected on arm64)")
+        else:
+            assert code["code"].strip(), code
+        r2.close()
+        print(f"PASS radare2 analysis ({info['functions']['total']} functions)", flush=True)
+
+
+def dotnet_reverse_checks() -> None:
+    """ILSpy decompiles one of the .NET EZ Tools on the shared .NET 8 runtime."""
+    from mulder.reverse import get_backend
+
+    run("ilspycmd", "--version")
+    reason = get_backend("ilspy").check()
+    assert reason is None, f"ilspy backend unavailable: {reason}"
+    with tempfile.TemporaryDirectory(prefix="mulder-reverse-") as directory:
+        work = Path(directory)
+        assembly = next(Path("/opt/zimmermantools").rglob("PECmd.dll"))
+        dotnet = work / "PECmd.dll"
+        dotnet.write_bytes(assembly.read_bytes())
+        ilspy = get_backend("ilspy")
+        info = ilspy.analyze(dotnet, work / "ilspy-project", 900)
+        target = _first_function(ilspy, work / "ilspy-project")
+        code = ilspy.call(work / "ilspy-project", "decompile", {"target": target}, 300)
+        assert code["code"].strip(), code
+        print(f"PASS ILSpy decompilation ({info['functions']['total']} methods)", flush=True)
 
 
 def main() -> None:
@@ -239,8 +331,16 @@ def main() -> None:
             assert any(expected in path.read_text() for path in output.rglob("*.tsv")), name
             assert list(output.rglob("tabler-icons.css")), f"{name} report assets missing"
             print(f"PASS {name} synthetic artifact and HTML assets", flush=True)
+    reverse_checks()
     print("PASS container smoke checks", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    import sys
+
+    if "--reverse-only" in sys.argv[1:]:
+        assert os.getuid() != 0, "Run through the image entrypoint as mulder"
+        reverse_checks()
+        print("PASS reverse-engineering smoke checks", flush=True)
+    else:
+        main()

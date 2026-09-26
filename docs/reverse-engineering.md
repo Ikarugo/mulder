@@ -88,8 +88,45 @@ the same.
 
 ## 3. Installation
 
-The Mulder Docker image already has capa, FLOSS, Detect-It-Easy, rabin2
-and YARA. The disassemblers are optional; install at least one.
+### Docker image (everything included)
+
+The Mulder Docker image ships the three engines ready to use, next to capa,
+FLOSS, Detect-It-Easy, rabin2 and YARA:
+
+| Component | In the image | Where |
+|---|---|---|
+| Ghidra | 12.1.4 (zip checked against its SHA-256) | `/opt/ghidra` (`MULDER_GHIDRA_DIR`) |
+| Java | OpenJDK 21 (headless) | apt |
+| pyghidra + JPype | 3.1.0 + 1.5.2, the wheels bundled with Ghidra | system Python |
+| radare2 + r2pipe | 5.9.8 (upstream `.deb`) + PyPI | `/usr/bin/r2` |
+| r2ghidra | 5.9.8 (upstream `.deb`), **amd64 only** | radare2 plugin dir |
+| ilspycmd | 9.1.0.7988 on the .NET 8 runtime | `/opt/ilspycmd`, on `PATH` |
+
+```bash
+docker build -t mulder .
+# check the three engines, offline and as the unprivileged user:
+docker run --rm -i --pull=never --network none mulder python3 - --reverse-only \
+    < scripts/container-smoke.py
+```
+
+The check opens `/usr/bin/true` with Ghidra and radare2 (read, never run)
+and decompiles one of the .NET EZ Tools with ILSpy; the CI smoke test runs
+it too. Nothing is downloaded at run time.
+
+The reverse-engineering half of the image targets **amd64** (the platform
+CI builds and tests). On an arm64 build (Apple Silicon without
+`--platform linux/amd64`) neither decompiler has a native binary: the
+Ghidra release zip carries its decompiler for `linux_x86_64` only
+(`support/buildNatives` can compile it, with gcc and Gradle), and upstream
+publishes r2ghidra for amd64 only, so radare2 disassembles but
+`reverse_decompile` answers `binary_missing`. On Apple Silicon, build and
+run the image with `--platform linux/amd64`.
+
+Ghidra's analysis runs in a JVM: give Docker Desktop at least 4 GB of
+memory (8 GB for large samples). The image is about 1.3 GB bigger than
+without the reverse tools.
+
+The disassemblers are optional outside Docker; install at least one.
 
 ### Ghidra (recommended)
 
@@ -108,7 +145,7 @@ pip install /opt/ghidra_12.1.4_PUBLIC/Ghidra/Features/PyGhidra/pypkg/dist/pyghid
 ```
 
 Mulder finds Ghidra through `MULDER_GHIDRA_DIR`, then `GHIDRA_INSTALL_DIR`,
-then the newest `/opt/ghidra_*_PUBLIC`.
+then `/opt/ghidra`, then the newest `/opt/ghidra_*_PUBLIC`.
 
 ### radare2 (alternative engine)
 
@@ -127,7 +164,11 @@ sources in `third-party/pugixml`, `#include <memory>` added to
 `src/R2Scope.h`, then recompile the x86 SLEIGH files with the `sleighc` it
 builds and copy the matching `.pspec`/`.cspec`/`.ldefs` into
 `~/.local/share/radare2/plugins/r2ghidra_sleigh`. A recent radare2 from
-upstream avoids all of this.
+upstream avoids all of this, with one catch the Dockerfile works around: the
+r2ghidra 5.9.8 `.deb` installs its plugin under `/usr/lib/radare2/5.9.9`
+and looks for SLEIGH files under `/usr/lib/radare2/5.9.0`; copy the plugin
+into the directory `r2 -H R2_LIBR_PLUGINS` prints and link
+`r2ghidra_sleigh` into `5.9.0` (or set `e r2ghidra.sleighhome`).
 
 ### ILSpy (.NET)
 

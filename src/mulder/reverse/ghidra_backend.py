@@ -63,11 +63,14 @@ _EOF = object()
 
 
 def find_ghidra_dir(search_root: Path = Path("/opt")) -> Path | None:
-    """Ghidra install: ``MULDER_GHIDRA_DIR``, ``GHIDRA_INSTALL_DIR``, newest ``/opt``."""
+    """Ghidra install: ``MULDER_GHIDRA_DIR``, ``GHIDRA_INSTALL_DIR``, ``/opt/ghidra``
+    (the Docker image), then the newest ``/opt/ghidra_<version>_PUBLIC``."""
     for var in ("MULDER_GHIDRA_DIR", "GHIDRA_INSTALL_DIR"):
         value = os.environ.get(var)
         if value:
             return Path(value)
+    if (search_root / "ghidra" / "support" / "launch.properties").is_file():
+        return search_root / "ghidra"
     candidates = [p for p in search_root.glob("ghidra_*_PUBLIC") if p.is_dir()]
 
     def version_key(p: Path) -> tuple[int, ...]:
