@@ -1,5 +1,80 @@
 <div align="center">
 
+# mulder — triage fork
+### Fork of [calebevans/mulder](https://github.com/calebevans/mulder) for incident response on triage collections
+
+</div>
+
+> **This is a fork.** Mulder is the work of [Caleb Evans](https://github.com/calebevans) and its contributors, released under Apache-2.0; winner of the SANS Find Evil Hackathon 2026. This fork is not affiliated with or endorsed by the upstream project. The original README is kept, unchanged, in the collapsible section at the end of this page. Report problems with the additions here, not upstream.
+
+## What this fork adds
+
+Upstream Mulder is built around full disk images and memory dumps. In a remote incident response, a CERT usually gets a **triage collection** instead: a Velociraptor or KAPE collection, or a copy of `C:\`. This fork makes Mulder work on those, adds the Windows artifacts an investigation of a collected host needs, and makes the tools state what they did not read. All additions are on the [`feat/triage-collections`](https://github.com/Ikarugo/mulder/tree/feat/triage-collections) branch.
+
+### Triage collections as evidence
+
+- `mulder prepare-triage` normalizes a **Velociraptor** offline collection (zip or folder), a **KAPE** output folder or a **volume copy** into one folder per host, decoding Velociraptor's encoded paths and keeping the raw NTFS copy. It writes `TRIAGE_MANIFEST.json`: SHA-256 and source path of every file, and which artifacts are present or missing.
+- Every Windows parser reads the collected files directly (registry and user hives, Amcache, ShimCache, `$MFT`, `$J`, EVTX, application files). The `$MFT` analyzed is the one collected from the host, never a container's.
+- The catalog lists scripts, archives, SQLite and ESE databases where users write, not the thousands shipped under `Windows` and `Program Files`. Collector results (Velociraptor `results/`, KAPE logs) are kept with their hashes.
+
+### New parsers
+
+| Tool | What it reads |
+|---|---|
+| `run_usn_parser`, `run_lnk_parser`, `run_jumplist_parser`, `run_shellbags_parser` | USN journal, LNK files, Jump Lists, Shellbags (EZ Tools) |
+| `run_srum_parser` | SRUM, read in Python ([dissect.esedb](https://github.com/fox-it/dissect.esedb)): works on Linux and on databases copied from a running system. SrumECmd cannot run on Linux. |
+| `parse_windows_search` | Windows Search index (`Windows.edb`, or `Windows.db` on Windows 11 with WAL recovery): indexed files, e-mail headers, contacts, content summaries |
+| `query_ese_database` | Any ESE database (`WebCacheV01.dat`, `.edb`): tables, then rows in pages |
+| `parse_scheduled_tasks` | Every scheduled task from its XML **and** the SOFTWARE hive's TaskCache: command line, triggers, account, UTC registration and last-run times; flags tasks hidden from schtasks, deleted XML and actions changed in the registry only |
+| `parse_cryptnet_url_cache` | CryptnetUrlCache: files downloaded with `certutil -urlcache` or CryptAPI (URL, time, size, hash of the cached copy) |
+| `extract_mft_record` | A file's `$MFT` record with its resident content: small scripts or droppers that were deleted or not collected |
+| `query_sqlite_file` | Any SQLite file in the evidence (browser history, Windows Timeline, chat apps), read-only |
+
+### Tools that say what they did not read
+
+An agent cannot tell "the data does not exist" from "the tool did not show it to me": a tool that returns part of the data without saying so leads it to conclude, wrongly, that something is absent.
+
+- `search` returns excerpts centred on the matches, with match counts, instead of the start of the window; dates and times match ISO timestamps; an empty result says why it can be empty.
+- Truncated output says how much is missing and how to page through it. Text files are decoded whatever their encoding (UTF-16 Defender and PowerShell logs).
+- A failed external tool reports its exit code and last output lines as `error` or `partial`, instead of "success, nothing found"; the same failing run is not retried unchanged, and empty sources no longer count as "already indexed" or "evidence checked".
+- Fixes found on the way: `get_amcache` returned the SYSTEM hive; SAM, SOFTWARE and SECURITY could be mistaken for SYSTEM; `decode_payload` was out of the analyst's reach; `--effort` now accepts `low` and `medium`.
+
+### Using the fork
+
+The PyPI package and the `ghcr.io/calebevans/mulder` image are upstream Mulder, **without** these additions. Build the image from this branch:
+
+```bash
+git clone -b feat/triage-collections https://github.com/Ikarugo/mulder.git
+cd mulder
+docker build -t mulder:triage .
+```
+
+Then, inside the container, normalize the collection and investigate it:
+
+```bash
+mulder prepare-triage /evidence/Collection-HOST.zip /triage            # Velociraptor
+mulder prepare-triage /evidence/C /triage --hostname HOST --kind tree   # copy of C:\
+mulder investigate /triage my-case-id
+```
+
+Use a new case id for each run. See the [usage guide](https://github.com/Ikarugo/mulder/blob/feat/triage-collections/docs/usage-guide.md) and the [tool manifest](https://github.com/Ikarugo/mulder/blob/feat/triage-collections/docs/tool-manifest.md) of this branch for the new tools.
+
+### Status and known limits
+
+Prototype, covered by tests (2,000+) and tested on a small number of cases so far. Not handled yet:
+
+- **Prefetch**: PECmd cannot decompress Windows 10/11 Prefetch on Linux, so Prefetch is not parsed in the container.
+- **VHDX and VMDK**: the mount-based parsers (registry, Amcache, ShimCache, `$MFT`) handle them as raw images and fail; KAPE's `--vhdx` containers are not recognized as collections. Convert them to raw (`qemu-img convert -O raw`) or extract the files first. DFIR-ORC is not supported.
+- Browser history on triage collections, and reuse of the collector's own parsed results (Velociraptor JSON, KAPE CSV).
+- Databases copied from a running system are read from their pages; changes still in transaction logs are missing, and the tools say so.
+
+---
+
+<details>
+<summary><b>Upstream README</b> (calebevans/mulder, unchanged)</summary>
+
+<div align="center">
+
 # mulder
 ### 🏆 1st Place - SANS Institute [Find Evil Hackathon 2026](https://www.sans.org/press/announcements/sans-names-the-five-winners-of-find-evil-2026)
 </div>
@@ -167,3 +242,5 @@ Each investigation produces:
 ## License
 
 Apache-2.0
+
+</details>
