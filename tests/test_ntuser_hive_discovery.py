@@ -29,7 +29,7 @@ class _IcatMock(MagicMock):
 
     def __call__(self, *args: Any, **kwargs: Any) -> Any:
         result = super().__call__(*args, **kwargs)
-        out = kwargs.get("stdout")
+        out: Any = kwargs.get("stdout")
         data = getattr(result, "stdout", b"")
         if hasattr(out, "write") and isinstance(data, bytes):
             out.write(data)

@@ -74,7 +74,7 @@ class TestValues:
     def test_filetime_bytes_under_a_date_name(self) -> None:
         raw = _FT.to_bytes(8, "little")
         assert ese.format_value(raw, date_hint=True) == "2025-03-14T09:41:27Z"
-        assert ese.format_value(raw).startswith("hex:")
+        assert str(ese.format_value(raw)).startswith("hex:")
 
     @pytest.mark.parametrize(
         ("raw", "expected"),
@@ -94,7 +94,7 @@ class TestValues:
         assert str(ese.format_value(raw)).startswith("hex:")
 
     def test_identifier_columns_stay_hex(self) -> None:
-        assert ese.format_value("Bob".encode("utf-16-le"), as_text=False).startswith("hex:")
+        assert str(ese.format_value("Bob".encode("utf-16-le"), as_text=False)).startswith("hex:")
 
     def test_filetime_integers_and_local_times(self) -> None:
         assert ese.format_value(_FT, date_hint=True) == "2025-03-14T09:41:27Z"
@@ -253,7 +253,7 @@ class TestWindowsSearch:
         assert any("Meeting Notes" in w for w in _windows(hits))
 
     def test_other_properties_are_kept(self, tmp_path: Path) -> None:
-        items = {
+        items: dict[int, dict[str, object]] = {
             3: {
                 "4447-System_ItemPathDisplay": r"\\{S-1-5-21-1}\LS\Desktop\ActivityHistory\{D339}",
                 "4302-System_FileOwner": "WS01\\Alice",
