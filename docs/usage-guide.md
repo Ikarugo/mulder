@@ -26,6 +26,7 @@ Try-it-out instructions for running Mulder, the forensic investigation platform.
   - [Using Non-Anthropic Models via LiteLLM](#using-non-anthropic-models-via-litellm)
     - [Provider Prefixes](#provider-prefixes)
     - [Mixing Providers Across Roles](#mixing-providers-across-roles)
+    - [Gemini on Vertex AI](#gemini-on-vertex-ai)
     - [Local Models with Ollama](#local-models-with-ollama)
     - [Thinking Through the Proxy](#thinking-through-the-proxy)
     - [Models LiteLLM does not know](#models-litellm-does-not-know)
@@ -405,6 +406,59 @@ mulder investigate /evidence my-case \
   --planner-model claude-opus-4-6 \
   --analyst-model claude-opus-4-6
 ```
+
+### Gemini on Vertex AI
+
+Gemini goes through the proxy with the `vertex_ai/` prefix. This is separate from
+[Claude on Vertex](#using-google-cloud-vertex-ai): do not set `CLAUDE_CODE_USE_VERTEX`
+(mulder turns it off for proxy-routed sessions anyway). LiteLLM authenticates with
+Application Default Credentials and reads the project and region from its own variables:
+
+| Variable | Description |
+|----------|-------------|
+| `VERTEXAI_PROJECT` | GCP project ID with the Vertex AI API enabled |
+| `VERTEXAI_LOCATION` | Region, e.g. `europe-west1`; Gemini preview models are often served only from `global` |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path inside the container to a service-account key or ADC file |
+
+The account needs the `roles/aiplatform.user` role on the project. Keep the credentials
+file outside the evidence directory and mount it read-only:
+
+```bash
+docker run -it --privileged \
+  -v /path/to/evidence:/evidence:ro \
+  -v ~/mulder-cases:/home/mulder/.mulder/cases \
+  -v ~/.config/gcloud/application_default_credentials.json:/tmp/gcloud-creds.json:ro \
+  -v ./mulder.yaml:/tmp/mulder.yaml:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud-creds.json \
+  -e VERTEXAI_PROJECT=your-gcp-project-id \
+  -e VERTEXAI_LOCATION=global \
+  ghcr.io/calebevans/mulder:1.5.2 \
+  mulder investigate /evidence my-case --config /tmp/mulder.yaml
+```
+
+LiteLLM's model map knows the Gemini 2.5 and 3 models: their 1M-token window and
+reasoning support are picked up without configuration. A `--config` file is still the
+place to choose models per role and to cap the window. Gemini Pro bills input above
+200K tokens at a higher rate, so capping `context_window` makes Claude Code compact
+before a request crosses that threshold:
+
+```yaml
+models:
+  planner: vertex_ai/gemini-2.5-pro
+  analyst: vertex_ai/gemini-2.5-pro
+  executor: vertex_ai/gemini-2.5-flash
+  vertex_ai/gemini-2.5-pro:
+    context_window: 200000
+    max_output_tokens: 32768
+    reasoning: true
+  vertex_ai/gemini-2.5-flash:
+    context_window: 200000
+    max_output_tokens: 32768
+    reasoning: true
+```
+
+Leave `context_window` out to use the full window. Without credentials the proxy
+starts, but every request fails with `Your default credentials were not found`.
 
 ### Local Models with Ollama
 
