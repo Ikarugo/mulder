@@ -16,6 +16,10 @@ permissions: {}
 jobs:
   build-dists:
     name: Build sdist and wheel
+    # PyPI trusts only the upstream repository; a fork's release tags would
+    # otherwise end in a failed upload. pypi-publish needs this job, so it
+    # is skipped with it.
+    if: github.repository == 'calebevans/mulder'
     runs-on: ubuntu-latest
     permissions:
       contents: read

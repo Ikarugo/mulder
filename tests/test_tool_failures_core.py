@@ -22,7 +22,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -196,7 +196,7 @@ class TestSkips:
         image = str(case / "disk.E01")
         Path(image).write_bytes(b"x")
         _register("registry.software", image, "Microsoft\\Windows")
-        fn = run_registry_parser.__wrapped__
+        fn = run_registry_parser.__wrapped__  # type: ignore[attr-defined]
         skipped = fn(image_path=image, hive="SOFTWARE")
         assert skipped["hint"] and "already indexed" in str(skipped["hint"])
         with patch(
@@ -211,7 +211,7 @@ class TestSkips:
         evtx = case / "logs"
         evtx.mkdir()
         _register("chainsaw.hunt", str(evtx), "detection")
-        fn = chainsaw.run_chainsaw.__wrapped__
+        fn = chainsaw.run_chainsaw.__wrapped__  # type: ignore[attr-defined]
         assert "already indexed" in str(fn(evidence_path=str(evtx), mode="hunt").get("hint"))
         with patch.object(chainsaw, "_chainsaw_binary", return_value=None):
             other = fn(evidence_path=str(evtx), mode="srum")
@@ -229,7 +229,7 @@ class TestCompositeEmptySources:
         assert "indexed nothing" in missing["reason"]
         meta = core._build_coverage_metadata(["hayabusa.alerts"])
         assert meta["sources_empty"] == ["hayabusa.alerts"]
-        assert "hayabusa.alerts" not in meta["sources_queried_names"]
+        assert "hayabusa.alerts" not in cast("list[str]", meta["sources_queried_names"])
 
     def test_real_source_is_counted(self, case: Path) -> None:
         from mulder.server.tools.composite import core
@@ -314,7 +314,7 @@ class TestBatchResults:
             {"job_id": "b", "tool": "run_prefetch_parser", "result": {"status": "success"}},
         ]
         with patch.object(jobs, "_get_job_store", return_value=store):
-            resp = jobs.get_completed_results.__wrapped__("bg_1")
+            resp = jobs.get_completed_results.__wrapped__("bg_1")  # type: ignore[attr-defined]
         assert resp["results_not_clean"] == ["run_hayabusa (partial)"]
         assert "gap" in str(resp["hint"])
 
@@ -366,7 +366,7 @@ class TestReviewFixes:
 
         proc = subprocess.CompletedProcess([], rc, stdout=stdout, stderr="")
         with (
-            patch.object(volatility.subprocess, "run", return_value=proc),
+            patch("mulder.server.tools.extract.volatility.subprocess.run", return_value=proc),
             patch.object(volatility, "extract_and_index", side_effect=_index),
         ):
             return volatility._run_single_vol_plugin(["vol"], "/e/mem.raw", plugin), indexed
@@ -441,5 +441,5 @@ class TestReviewFixes:
             {"tool": "run_fls", "result": {"status": "partial"}},
         ]
         with patch.object(jobs, "_get_job_store", return_value=store):
-            resp = jobs.get_completed_results.__wrapped__("bg_1")
+            resp = jobs.get_completed_results.__wrapped__("bg_1")  # type: ignore[attr-defined]
         assert resp["results_not_clean"] == ["run_fls (partial)"]

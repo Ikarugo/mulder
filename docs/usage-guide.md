@@ -26,6 +26,11 @@ Try-it-out instructions for running Mulder, the forensic investigation platform.
   - [Using Non-Anthropic Models via LiteLLM](#using-non-anthropic-models-via-litellm)
     - [Provider Prefixes](#provider-prefixes)
     - [Mixing Providers Across Roles](#mixing-providers-across-roles)
+    - [Gemini on Vertex AI](#gemini-on-vertex-ai)
+      - [Choosing a region](#choosing-a-region)
+      - [Credentials and permissions](#credentials-and-permissions)
+      - [Context window and cost](#context-window-and-cost)
+      - [What to change, and when](#what-to-change-and-when)
     - [Local Models with Ollama](#local-models-with-ollama)
     - [Thinking Through the Proxy](#thinking-through-the-proxy)
     - [Models LiteLLM does not know](#models-litellm-does-not-know)
@@ -405,6 +410,116 @@ mulder investigate /evidence my-case \
   --planner-model claude-opus-4-6 \
   --analyst-model claude-opus-4-6
 ```
+
+### Gemini on Vertex AI
+
+Gemini goes through the proxy with the `vertex_ai/` prefix: Claude Code talks to the local
+LiteLLM proxy and LiteLLM calls Vertex AI. This is separate from
+[Claude on Vertex](#using-google-cloud-vertex-ai), where Claude Code calls Vertex itself:
+do not set `CLAUDE_CODE_USE_VERTEX` for Gemini (mulder turns it off for proxy-routed
+sessions anyway). LiteLLM authenticates with Application Default Credentials and reads
+the project and region from its own variables:
+
+| Variable | Description |
+|----------|-------------|
+| `VERTEXAI_PROJECT` | GCP project billed for the calls; the Vertex AI API (`aiplatform.googleapis.com`) must be enabled on it |
+| `VERTEXAI_LOCATION` | Region of the endpoint called, e.g. `europe-west1` (see [Choosing a region](#choosing-a-region)) |
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path inside the container to a service-account key or ADC file (not needed on a GCP VM with an attached service account) |
+
+```bash
+docker run -it --privileged \
+  -v /path/to/evidence:/evidence:ro \
+  -v ~/mulder-cases:/home/mulder/.mulder/cases \
+  -v ~/.config/gcloud/application_default_credentials.json:/tmp/gcloud-creds.json:ro \
+  -v ./mulder.yaml:/tmp/mulder.yaml:ro \
+  -e GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcloud-creds.json \
+  -e VERTEXAI_PROJECT=your-gcp-project-id \
+  -e VERTEXAI_LOCATION=europe-west1 \
+  ghcr.io/calebevans/mulder:1.5.2 \
+  mulder investigate /evidence my-case --config /tmp/mulder.yaml
+```
+
+LiteLLM's model map knows the Gemini 2.5 and 3 models: their 1M-token window and
+reasoning support are picked up without configuration. The `--config` file chooses a
+model per role and, for Pro, caps the window (see [Context window and cost](#context-window-and-cost)):
+
+```yaml
+models:
+  planner: vertex_ai/gemini-2.5-pro
+  analyst: vertex_ai/gemini-2.5-pro
+  executor: vertex_ai/gemini-2.5-flash
+  vertex_ai/gemini-2.5-pro:
+    context_window: 200000
+```
+
+Without credentials the proxy starts, but every request fails with
+`Your default credentials were not found`.
+
+#### Choosing a region
+
+Investigations send evidence content (log lines, registry values, timeline rows) to the
+model, so the region decides where that content is processed.
+
+- A regional endpoint (`europe-west1`, `europe-west4`, `europe-west9`, `us-central1`, ...)
+  processes requests in that region. The stable Gemini models are served from most of them.
+- `global` lets Google route each request to any region, with no guarantee on where it is
+  processed. Preview models (`*-preview`) are often served only from `global`; they also
+  carry no SLA and can change without notice.
+
+Use a regional endpoint and a stable model for real cases, and keep `global` and preview
+models for test data. Model availability per region changes; check it in the Vertex AI
+console (Model Garden) before you settle on one.
+
+#### Credentials and permissions
+
+The identity behind the credentials needs permission to call the model:
+
+- `roles/aiplatform.user` (Vertex AI User) on the project is enough, but it also allows
+  creating datasets, training jobs and endpoints.
+- To narrow it, give a service account dedicated to mulder a custom role holding
+  `aiplatform.endpoints.predict`, and confirm with a test run that it is sufficient.
+
+Three ways to provide the credentials:
+
+| Credentials | When to use | Notes |
+|-------------|-------------|-------|
+| Service-account key (JSON) | Workstation or on-premises server | Long-lived secret; rotate it. Organisations often forbid creating keys (`iam.disableServiceAccountKeyCreation`). |
+| User ADC (`gcloud auth application-default login`) | Personal tests | No key to manage, but runs with your own, usually broader, rights. |
+| Service account attached to a GCP VM | mulder running on GCP | No file at all: drop `GOOGLE_APPLICATION_CREDENTIALS` and the volume; short-lived tokens come from the metadata server. |
+
+Mount the file read-only and outside the evidence directory. Mulder's agents read
+everything under the evidence path, and what they read is sent to the model and can end
+up in the report; a credentials file there can leak. Keep it out of the cases directory
+and out of any repository for the same reason.
+
+#### Context window and cost
+
+Gemini Pro bills a request whose input exceeds 200K tokens at a higher rate for the whole
+request (for Gemini 2.5 Pro, about twice the input price and 1.5 times the output price;
+check the current Vertex AI pricing page). An agent re-sends the whole conversation on
+every turn, so once a session passes 200K every tool call is billed at that rate.
+
+`context_window: 200000` hands Claude Code a 200K window, and it compacts the conversation
+before a request reaches it (around 167K with the 32768-token output cap). The trade-off is
+that compaction summarises: the agent can lose a detail it saw earlier and have to read it
+again. Leaving the window uncapped keeps up to 1M tokens of context, at a higher price.
+
+Gemini Flash has a single price at every size, so a cap saves nothing there and only adds
+compactions; leave its window uncapped.
+
+#### What to change, and when
+
+| Situation | Change |
+|-----------|--------|
+| Real case data, data must stay in the EU | `VERTEXAI_LOCATION` to an EU region (`europe-west1`, `europe-west9`, ...) and a stable model |
+| Trying a preview model (`*-preview`) | `VERTEXAI_LOCATION=global`, test data only |
+| Model not found in the chosen region | Check Model Garden for the regions serving it; switch region or model |
+| Organisation forbids service-account keys | Run on a GCP VM with an attached service account, or use user ADC for tests |
+| `Permission denied` on `aiplatform.endpoints.predict` | Grant `roles/aiplatform.user` (or the custom role) to the identity in use |
+| `Your default credentials were not found` | Check the volume and `GOOGLE_APPLICATION_CREDENTIALS` point to the same path |
+| Pro runs cost too much | Keep `context_window: 200000` on Pro; move the executor to Flash |
+| Analysis misses details after compactions | Remove `context_window` on Pro, or raise it, and compare the reports |
+| Model outputs get cut off mid-reasoning | Raise `max_output_tokens` for that model (Gemini 2.5 accepts up to 65535) |
 
 ### Local Models with Ollama
 

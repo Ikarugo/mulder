@@ -22,7 +22,7 @@ import struct
 import subprocess
 import zlib
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
@@ -192,8 +192,8 @@ class TestWindowedResponse:
         windows = [{"id": i, "raw_text": "y" * 50_000, "source_name": "s"} for i in range(80)]
         resp = windowed_response("tc_1", windows, "s", "tool", {}, 1.0)
         assert resp["truncated"] is True
-        assert resp["windows_not_shown"] > 0
-        assert resp["windows_with_text_cut"] > 0
+        assert cast(int, resp["windows_not_shown"]) > 0
+        assert cast(int, resp["windows_with_text_cut"]) > 0
         assert "Absence from this view proves nothing" in str(resp.get("hint", ""))
 
     def test_complete_view_is_not_flagged(self) -> None:
@@ -421,7 +421,7 @@ class TestEzToolFailures:
         with (
             patch.object(misc, "require_binary", return_value=True),
             patch.object(misc, "_find_ez_tool", return_value="/opt/SrumECmd.dll"),
-            patch.object(misc.subprocess, "run", return_value=proc) as run,
+            patch("mulder.server.tools.extract.misc.subprocess.run", return_value=proc) as run,
         ):
             first = self._run()
             second = self._run()

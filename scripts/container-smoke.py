@@ -89,6 +89,8 @@ def main() -> None:
     assert "external FUSE" in ntfs_version, (
         f"ntfs-3g is not the external-FUSE build: {ntfs_version!r}"
     )
+    # vertex_ai/ models authenticate through google-auth inside LiteLLM's venv.
+    run("/opt/litellm/bin/python", "-c", "import google.auth")
     proxy = importlib.import_module("mulder.orchestrator.proxy")
     with proxy.ProxyManager(models=["ollama/smoke"]):
         print("PASS LiteLLM proxy startup and health", flush=True)
