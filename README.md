@@ -41,7 +41,18 @@ An agent cannot tell "the data does not exist" from "the tool did not show it to
 
 ### Using the fork
 
-The PyPI package and the `ghcr.io/calebevans/mulder` image are upstream Mulder, **without** these additions. Build the image from this branch:
+The PyPI package and the `ghcr.io/calebevans/mulder` image are upstream Mulder, **without** these additions. Use the fork's image, published with each [release](https://github.com/Ikarugo/mulder/releases) (`linux/amd64` only):
+
+```bash
+docker pull ghcr.io/ikarugo/mulder:1.5.2-fork.1
+docker run -it --privileged \
+  -v /path/to/evidence:/evidence:ro \
+  -v ~/mulder-cases:/home/mulder/.mulder/cases \
+  -e ANTHROPIC_API_KEY \
+  ghcr.io/ikarugo/mulder:1.5.2-fork.1 bash
+```
+
+`:latest` follows the most recent release. For Bedrock, Vertex AI or Gemini credentials instead of an Anthropic key, see the [usage guide](https://github.com/Ikarugo/mulder/blob/feat/triage-collections/docs/usage-guide.md#gemini-on-vertex-ai). To build the image from this branch instead:
 
 ```bash
 git clone -b feat/triage-collections https://github.com/Ikarugo/mulder.git
