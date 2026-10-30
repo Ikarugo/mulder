@@ -40,7 +40,7 @@ from mulder.orchestrator.phases import (
 )
 from mulder.orchestrator.proxy import ProxyManager
 from mulder.orchestrator.roles import RoleRunner
-from mulder.orchestrator.session import SessionExecutor
+from mulder.orchestrator.session import SessionExecutor, tool_call_written_as_text
 from mulder.orchestrator.types import (
     EffortLevel,
     ExecutionResults,
@@ -57,6 +57,9 @@ from mulder.patterns import (
 )
 
 logger = logging.getLogger(__name__)
+
+#: Corrections sent when a session ends on a tool call written as text.
+_TEXT_TOOL_CALL_NUDGES = 2
 
 
 class Orchestrator:
@@ -542,6 +545,10 @@ class Orchestrator:
                 phase_result.turns_exhausted = continuation.turns_exhausted
                 phase_result.turns_used = accumulated_turns
 
+            accumulated_turns = await self._recover_text_tool_calls(
+                phase, phase_result, model, accumulated_turns
+            )
+
             gate = await self._validate_phase(phase, phase_result)
             phase_result.gate_result = gate
             phase_result.turns_used = accumulated_turns
@@ -873,6 +880,52 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # Compaction prompt builder
     # ------------------------------------------------------------------
+
+    async def _recover_text_tool_calls(
+        self,
+        phase: PhaseConfig,
+        phase_result: PhaseResult,
+        model: str,
+        accumulated_turns: int,
+    ) -> int:
+        """Resume a session that ended on a tool call written as text.
+
+        The answer then holds no result and the gate would fail; a retry
+        starts the phase over and loses every turn already spent. Resuming
+        the same conversation with a correction keeps them. Tried at most
+        :data:`_TEXT_TOOL_CALL_NUDGES` times; returns the updated turn count.
+        """
+        for _ in range(_TEXT_TOOL_CALL_NUDGES):
+            written = tool_call_written_as_text(phase_result.messages)
+            if written is None or not phase_result.session_id:
+                break
+            logger.warning(
+                "Phase '%s' ended on a tool call written as text (%r); resuming the session",
+                phase.name,
+                written,
+            )
+            self.dashboard.log_info("Tool call written as text; resuming the session")
+            follow = await self._session.execute(
+                system_prompt=phase.single_system_prompt,
+                prompt=(
+                    "Your last message wrote a tool call as text instead of calling the "
+                    f"tool, so it was NOT run: {written}\n"
+                    "Call tools only through the function-calling interface. Continue the "
+                    "task from where you stopped, and end with the final answer the task "
+                    "asks for."
+                ),
+                model=model,
+                allowed_tools=phase.single_allowed_tools,
+                disallowed_tools=phase.disallowed_tools,
+                max_turns=phase.single_max_turns,
+                resume=phase_result.session_id,
+            )
+            accumulated_turns += follow.turns_used
+            phase_result.messages.extend(follow.messages)
+            phase_result.tool_names.extend(follow.tool_names)
+            phase_result.session_id = follow.session_id or phase_result.session_id
+            phase_result.turns_used = accumulated_turns
+        return accumulated_turns
 
     def _build_compaction_prompt(
         self,

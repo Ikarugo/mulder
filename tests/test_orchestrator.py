@@ -258,6 +258,92 @@ class TestSinglePhaseGate:
         assert call_count == 1 + CATALOG.max_retries
 
 
+class TestToolCallWrittenAsText:
+    """A session that ends on a tool call written as text is resumed, not restarted."""
+
+    @pytest.mark.parametrize(
+        ("text", "found"),
+        [
+            ("Let's look.call:default_api:mcp__mulder__list_directory{path:/triage/C}", True),
+            ("Next step: mcp__mulder__run_fls(image_path='/e/disk.E01')", True),
+            ('<tool_call>{"name": "search"}</tool_call>', True),
+            ('{"case_id": "c1", "systems": []}', False),
+            ("I used mcp__mulder__list_directory earlier to list the folder.", False),
+        ],
+    )
+    def test_detection(self, text: str, found: bool) -> None:
+        from mulder.orchestrator.session import tool_call_written_as_text
+
+        assert (tool_call_written_as_text([text]) is not None) is found
+        assert tool_call_written_as_text([]) is None
+
+    @pytest.mark.asyncio()
+    async def test_session_is_resumed_with_a_correction(self) -> None:
+        orch = _make_orchestrator()
+        orch._case_id = "test-case"
+        calls: list[dict[str, object]] = []
+
+        async def mock_execute(**kwargs: object) -> PhaseResult:
+            calls.append(kwargs)
+            if len(calls) == 1:
+                text = "Checking.call:default_api:mcp__mulder__list_directory{path:/triage/C}"
+            else:
+                text = '{"case_id": "test-case"}'
+            return PhaseResult(
+                phase_name="query",
+                success=False,
+                messages=[text],
+                turns_used=10,
+                session_id="sess-1",
+            )
+
+        gate = GateResult(passed=True, phase_name="catalog")
+
+        from mulder.orchestrator.phases import CATALOG
+
+        with (
+            patch.object(orch._session, "execute", side_effect=mock_execute),
+            patch.object(orch, "_validate_phase", return_value=gate),
+        ):
+            result = await orch._run_single_phase(CATALOG, prompt_vars={"evidence_path": "/e"})
+
+        assert result.success
+        assert len(calls) == 2  # one correction, no retry of the whole phase
+        assert calls[1]["resume"] == "sess-1"
+        assert "NOT run" in str(calls[1]["prompt"])
+        assert result.turns_used == 20
+
+    @pytest.mark.asyncio()
+    async def test_corrections_are_bounded(self) -> None:
+        orch = _make_orchestrator()
+        orch._case_id = "test-case"
+        calls: list[dict[str, object]] = []
+
+        async def mock_execute(**kwargs: object) -> PhaseResult:
+            calls.append(kwargs)
+            return PhaseResult(
+                phase_name="query",
+                success=False,
+                messages=["call:default_api:mcp__mulder__search{query:x}"],
+                turns_used=1,
+                session_id="sess-1",
+            )
+
+        gate = GateResult(passed=True, phase_name="catalog")
+
+        from mulder.orchestrator.phases import CATALOG
+
+        with (
+            patch.object(orch._session, "execute", side_effect=mock_execute),
+            patch.object(orch, "_validate_phase", return_value=gate),
+        ):
+            await orch._run_single_phase(CATALOG, prompt_vars={"evidence_path": "/e"})
+
+        from mulder.orchestrator.runner import _TEXT_TOOL_CALL_NUDGES
+
+        assert len(calls) == 1 + _TEXT_TOOL_CALL_NUDGES
+
+
 class TestNarrativeGateNonVacuous:
     """Narrative gate should fail when no checks are evaluated."""
 
