@@ -582,3 +582,46 @@ class TestEmptyEventLogs:
             result = h.call(evtx.index_evtx_file, "System.evtx", module=evtx)
         assert result["status"] == "success"
         assert "holds no event record" in str(result["results"]["message"])
+
+
+class TestEvtxNameResolution:
+    """index_evtx_file finds a log under the names models actually use."""
+
+    @pytest.fixture()
+    def dirs(self, tmp_path: Path) -> list[Path]:
+        old, new = tmp_path / "old", tmp_path / "new"
+        old.mkdir()
+        new.mkdir()
+        prefix = "Windows_System32_winevt_Logs_"
+        for name in ("Application", "Security", "System", "Microsoft-Windows-AAD%4Operational"):
+            (new / f"{prefix}{name}.evtx").write_bytes(b"ElfFile")
+        for name in ("Microsoft-Windows-PowerShell%4Operational", "Windows PowerShell"):
+            (old / f"{prefix}{name}.evtx").write_bytes(b"ElfFile")
+        return [new, old]
+
+    @pytest.mark.parametrize(
+        ("asked", "expected"),
+        [
+            ("Windows_System32_winevt_Logs_Security.evtx", "Security"),
+            ("Security.evtx", "Security"),
+            ("security", "Security"),
+            ("Microsoft-Windows-PowerShell%4Operational.evtx", "PowerShell%4Operational"),
+            ("Microsoft-Windows-PowerShell/Operational", "PowerShell%4Operational"),
+            ("Windows_System32_winevt_logs_Windows PowerShell.evtx", "Windows PowerShell"),
+        ],
+    )
+    def test_found_in_any_directory_under_any_spelling(
+        self, dirs: list[Path], asked: str, expected: str
+    ) -> None:
+        found, closest = evtx._resolve_evtx_file(asked, dirs)
+        assert found is not None, closest
+        assert found.name.endswith(f"{expected}.evtx")
+        assert closest == []
+
+    def test_absent_log_names_the_closest_ones(self, dirs: list[Path]) -> None:
+        found, closest = evtx._resolve_evtx_file(
+            "Microsoft-Windows-Sysmon%4Operational.evtx", dirs
+        )
+        assert found is None
+        assert closest
+        assert all(name.endswith(".evtx") for name in closest)
