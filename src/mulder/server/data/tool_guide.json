@@ -446,8 +446,8 @@
   "browser_forensics": [
     {
       "tool": "parse_browser_history",
-      "description": "Extract browser history from Chrome, Firefox, and Safari databases",
-      "input": "Requires disk image with browser data indexed",
+      "description": "Visits and downloads of Chrome, Edge, Brave, Opera, Vivaldi, Firefox and Safari for every user, on one timeline; executable and archive downloads flagged with URL and referrer",
+      "input": "Disk image or triage collection directory (image_path)",
       "related": ["run_hindsight", "run_pasco"]
     },
     {

@@ -2,6 +2,7 @@
 
 from mulder.server.tools.extract import (  # noqa: F401
     app_files,
+    browser,
     carving,
     cryptnet,
     disk_pcap,

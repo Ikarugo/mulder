@@ -1784,11 +1784,14 @@ Export a 5-minute timeline slice centred on a timestamp.
 
 ### parse_browser_history
 
-Extract browser history from Chrome, Firefox, and Safari databases in a disk image.
+Read the visits and downloads of Chrome, Edge, Brave, Opera, Vivaldi, Chromium (`History`), Firefox (`places.sqlite`) and Safari (`History.db`) for every user, on a disk image or a triage collection. Each database is copied with its `-wal`/`-journal` files before it is read. Every visit and download is indexed on one timeline as `browser.history` (UTC time, user, URL; for a download also the saved path, referrer and size). Downloads of executables, scripts, disk images and archives are flagged `[EXECUTABLE OR ARCHIVE]` and listed first in `downloads`. A database that cannot be read is reported in `databases` and `tool_warning`.
 
-*No parameters.*
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| image_path | str | yes | Disk image, or triage collection directory |
+| force | bool | no | Re-run even if `browser.history` is already indexed |
 
-**Returns:** `source` (browser.history), `result_count`
+**Returns:** `databases`, `visits`, `downloads_total`, `downloads`, `indexed_as` (browser.history)
 
 **Roles:** `EXTRACT_ANALYST` `CROSS_EXECUTOR` `CROSS_ANALYST`
 
