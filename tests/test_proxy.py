@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import subprocess
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mulder.orchestrator.proxy import (
+    DEBUG_ENV_VAR,
     ModelSettings,
     ProxyManager,
     _build_proxy_config,
@@ -163,3 +166,88 @@ class TestProxyManager:
             assert pm._process is mock_proc
 
         mock_proc.terminate.assert_called_once()
+
+
+class TestProxyLog:
+    """The proxy's own output goes to a log file instead of being discarded."""
+
+    @patch("shutil.which", return_value="/usr/local/bin/litellm")
+    @patch("mulder.orchestrator.proxy.fetch_model_windows", MagicMock(return_value={}))
+    @patch("mulder.orchestrator.proxy._wait_for_health", return_value=True)
+    @patch("subprocess.Popen")
+    def test_output_is_appended_to_the_log(
+        self, mock_popen: MagicMock, _health: MagicMock, _which: MagicMock, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "cases" / "litellm.log"
+        log.parent.mkdir()
+        log.write_text("earlier run\n")
+        pm = ProxyManager(models=["openai/test"], port=4000, log_path=log)
+        pm.start()
+
+        kwargs = mock_popen.call_args.kwargs
+        assert kwargs["stdout"] is pm._log_file
+        assert kwargs["stderr"] == subprocess.STDOUT
+        pm.stop()
+        text = log.read_text()
+        assert text.startswith("earlier run\n")
+        assert "LiteLLM proxy for ['openai/test']" in text
+        assert pm._log_file is None
+
+    @patch("shutil.which", return_value="/usr/local/bin/litellm")
+    @patch("mulder.orchestrator.proxy.fetch_model_windows", MagicMock(return_value={}))
+    @patch("mulder.orchestrator.proxy._wait_for_health", return_value=True)
+    @patch("subprocess.Popen")
+    def test_without_log_path_output_is_discarded(
+        self, mock_popen: MagicMock, _health: MagicMock, _which: MagicMock
+    ) -> None:
+        ProxyManager(models=["openai/test"], port=4000).start()
+        kwargs = mock_popen.call_args.kwargs
+        assert kwargs["stdout"] is subprocess.DEVNULL
+        assert kwargs["stderr"] is subprocess.DEVNULL
+
+    @patch("shutil.which", return_value="/usr/local/bin/litellm")
+    @patch("mulder.orchestrator.proxy._wait_for_health", return_value=False)
+    @patch("subprocess.Popen")
+    def test_failed_start_quotes_the_log(
+        self, mock_popen: MagicMock, _health: MagicMock, _which: MagicMock, tmp_path: Path
+    ) -> None:
+        log = tmp_path / "litellm.log"
+
+        def _fake_popen(*_args: object, **kwargs: object) -> MagicMock:
+            out = kwargs["stdout"]
+            out.write(b"ssl.SSLError: [X509] cannot load certificate file\n")  # type: ignore[attr-defined]
+            out.flush()  # type: ignore[attr-defined]
+            return MagicMock()
+
+        mock_popen.side_effect = _fake_popen
+        pm = ProxyManager(models=["openai/test"], port=4000, log_path=log)
+        with pytest.raises(RuntimeError) as exc_info:
+            pm.start()
+        message = str(exc_info.value)
+        assert "failed to start" in message
+        assert str(log) in message
+        assert "cannot load certificate file" in message
+
+    @pytest.mark.parametrize(
+        ("value", "expected"), [("1", True), ("true", True), ("", False), ("0", False)]
+    )
+    @patch("shutil.which", return_value="/usr/local/bin/litellm")
+    @patch("mulder.orchestrator.proxy.fetch_model_windows", MagicMock(return_value={}))
+    @patch("mulder.orchestrator.proxy._wait_for_health", return_value=True)
+    @patch("subprocess.Popen")
+    def test_debug_variable_turns_on_detailed_debug(
+        self,
+        mock_popen: MagicMock,
+        _health: MagicMock,
+        _which: MagicMock,
+        value: str,
+        expected: bool,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv(DEBUG_ENV_VAR, value)
+        pm = ProxyManager(models=["openai/test"], port=4000, log_path=tmp_path / "litellm.log")
+        pm.start()
+        pm.stop()
+        assert ("--detailed_debug" in mock_popen.call_args.args[0]) is expected
+        assert ("requests are logged" in (tmp_path / "litellm.log").read_text()) is expected
