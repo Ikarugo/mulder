@@ -315,6 +315,12 @@ def report(case_id: str, db_dir: str) -> None:
     help="Start even if the evidence holds Velociraptor collections that were not "
     "normalized with 'mulder prepare-triage'.",
 )
+@click.option(
+    "--resume",
+    is_flag=True,
+    help="Continue an existing case: its sources, findings and audit trail are kept "
+    "and the new run adds to them. Without it, an existing CASE_ID is refused.",
+)
 def investigate(
     evidence_path: str,
     case_id: str,
@@ -332,6 +338,7 @@ def investigate(
     no_thinking: bool,
     show_cli_stderr: bool,
     allow_raw_collections: bool,
+    resume: bool,
 ) -> None:
     """Run a full multi-pass forensic investigation.
 
@@ -394,6 +401,15 @@ def investigate(
         click.echo(f"Created default MCP configuration at {mcp_config_file}", err=True)
 
     log_dir = resolve_db_dir(db_dir)
+    existing_db = log_dir / f"{case_id}.db"
+    if existing_db.exists() and not resume:
+        # A second run on the same case reuses the first run's sources and keeps
+        # its findings, so its report, duration and token counts describe both.
+        raise click.ClickException(
+            f"Case '{case_id}' already exists ({existing_db}).\n"
+            "Use a new case ID for a new investigation, or pass --resume to continue "
+            "this one (its extracted sources and findings are kept)."
+        )
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / "orchestrator.log"
     file_handler = logging.FileHandler(str(log_file), mode="a")

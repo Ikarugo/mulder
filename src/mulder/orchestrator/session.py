@@ -187,6 +187,28 @@ def _is_context_exhausted(text: str) -> bool:
 _MAX_TURNS_SUBTYPE = "error_max_turns"
 
 
+#: Tool calls a model wrote into its answer as text instead of making them.
+#: Gemini through an OpenAI-compatible gateway sometimes ends a turn with
+#: ``call:default_api:mcp__mulder__list_directory{path:...}``: Claude Code
+#: takes that for the final answer, the tool never runs, and the phase ends.
+_TEXT_TOOL_CALL_RE = re.compile(
+    r"call:\s*default_api:[\w.]+|</?tool_call>|```tool_code|\bmcp__\w+__\w+\s*[({]"
+)
+
+
+def tool_call_written_as_text(messages: list[str]) -> str | None:
+    """The tool call written as text at the end of *messages*, or None.
+
+    Only the end of the last message is looked at: a tool name quoted
+    earlier in an answer is ordinary prose.
+    """
+    if not messages:
+        return None
+    tail = messages[-1][-400:]
+    match = _TEXT_TOOL_CALL_RE.search(tail)
+    return tail[match.start() : match.start() + 120] if match else None
+
+
 def _is_turns_exhausted(message: object) -> bool:
     """Return True when a ResultMessage or SDK error reports the turn limit.
 
@@ -491,6 +513,7 @@ class SessionExecutor:
         max_turns: int,
         log_prefix: str = "",
         task_system: str = "",
+        resume: str = "",
     ) -> PhaseResult:
         """Execute a single SDK query session.
 
@@ -509,11 +532,14 @@ class SessionExecutor:
             log_prefix: Optional prefix for dashboard log lines.
             task_system: When non-empty, tool use blocks update the
                 dashboard task panel for this system name.
+            resume: Session id of an earlier query to continue, with its
+                conversation, instead of starting a new one.
 
         Returns:
             PhaseResult with collected messages and usage information.
         """
         options = ClaudeAgentOptions(
+            resume=resume or None,
             system_prompt=system_prompt,
             model=model,
             max_turns=max_turns,

@@ -175,6 +175,46 @@ def _find_carved_evtx(dest_dir: str) -> list[Path]:
     return found
 
 
+def _evtx_key(name: str) -> str:
+    """A log name reduced to what identifies it: case, extension, path prefix ignored.
+
+    ``Windows_System32_winevt_Logs_Microsoft-Windows-PowerShell%4Operational.evtx``,
+    ``Microsoft-Windows-PowerShell%4Operational.evtx`` and
+    ``microsoft-windows-powershell/operational`` all give the same key.
+    """
+    key = name.strip().lower().replace("\\", "/")
+    key = key.removesuffix(".evtx").replace("/operational", "%4operational")
+    key = key.replace("/admin", "%4admin").replace("/", "_")
+    return key.rsplit("winevt_logs_", 1)[-1]
+
+
+def _resolve_evtx_file(filename: str, dirs: list[Path]) -> tuple[Path | None, list[str]]:
+    """Find *filename* in the extraction *dirs*; else the closest names there.
+
+    Tried in order: the exact name, then a name with the same
+    :func:`_evtx_key` (prefix, case, ``/`` vs ``%4``), then a unique file
+    whose key contains the requested one. Every directory is searched, not
+    only the most recent, since an earlier extraction may hold the file.
+    """
+    import difflib
+
+    files = [f for d in dirs for f in sorted(d.glob("*.evtx"))]
+    for d in dirs:
+        if (d / filename).is_file():
+            return d / filename, []
+    wanted = _evtx_key(filename)
+    same = [f for f in files if _evtx_key(f.name) == wanted]
+    if same:
+        return same[0], []
+    containing = {f.name: f for f in files if wanted and wanted in _evtx_key(f.name)}
+    if len(containing) == 1:
+        return next(iter(containing.values())), []
+    names = sorted({f.name for f in files})
+    keys = {_evtx_key(n): n for n in names}
+    close = [keys[k] for k in difflib.get_close_matches(wanted, list(keys), n=8, cutoff=0.4)]
+    return None, close or sorted(containing) or names[:10]
+
+
 def _cleanup_temp_dirs() -> None:
     """Remove all extraction temp directories."""
     with _evtx_lock:
@@ -847,19 +887,28 @@ def index_evtx_file(
             "No EVTX extraction directory found. Call run_evtx_parser on a disk image first.",
         )
 
-    evtx_path = Path(extract_dir) / filename
-    if not evtx_path.exists():
-        candidates = sorted(Path(extract_dir).glob(f"*{filename}*"))
-        if candidates:
-            evtx_path = candidates[0]
-        else:
-            available = [f.name for f in sorted(Path(extract_dir).glob("*.evtx"))[:10]]
-            return error_response(
-                tc_id,
-                "index_evtx_file",
-                params,
-                f"File not found: {filename}. Available files include: {', '.join(available)}",
-            )
+    with _evtx_lock:
+        known_dirs = list(reversed(_evtx_extract_dirs.values()))
+    stored = get_ctx().db.get_kv("evtx_extract_dir") or ""
+    search_dirs: list[Path] = []
+    for d in (extract_dir, *known_dirs, stored):
+        if d and Path(d).is_dir() and Path(d) not in search_dirs:
+            search_dirs.append(Path(d))
+    found, closest = _resolve_evtx_file(filename, search_dirs)
+    if found is None:
+        total = sum(1 for d in search_dirs for _ in d.glob("*.evtx"))
+        return error_response(
+            tc_id,
+            "index_evtx_file",
+            params,
+            f"File not found: {filename} among {total} extracted EVTX files. "
+            f"Closest names: {', '.join(closest) or '(none)'}. The evtx.manifest source "
+            "lists every extracted file; a log absent from it was not collected.",
+        )
+    evtx_path = found
+    # Companion logs (System and PowerShell next to Security) are looked up
+    # next to the file actually found, under its real name.
+    extract_dir, filename = str(found.parent), found.name
 
     memory_key = failure_key(
         "index_evtx_file", str(evtx_path), ",".join(str(e) for e in sorted(event_ids or []))

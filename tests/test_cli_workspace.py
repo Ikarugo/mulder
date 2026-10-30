@@ -89,3 +89,33 @@ def test_investigate_cli_stderr_opt_in(tmp_path: Path, show_stderr: bool) -> Non
     result, orchestrator_cls = _invoke(args, tmp_path / "db")
     assert result.exit_code == 0
     assert orchestrator_cls.call_args.kwargs["show_cli_stderr"] is show_stderr
+
+
+class TestExistingCase:
+    """Reusing a case ID mixes two runs in one report unless asked for."""
+
+    def test_existing_case_is_refused(self, tmp_path: Path) -> None:
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        (db_dir / "case-1.db").write_bytes(b"")
+        result, orchestrator_cls = _invoke(["--cwd", str(tmp_path / "ws")], db_dir)
+
+        assert result.exit_code != 0
+        assert "already exists" in result.output
+        assert "--resume" in result.output
+        orchestrator_cls.assert_not_called()
+
+    def test_resume_continues_an_existing_case(self, tmp_path: Path) -> None:
+        db_dir = tmp_path / "db"
+        db_dir.mkdir()
+        (db_dir / "case-1.db").write_bytes(b"")
+        result, orchestrator_cls = _invoke(["--cwd", str(tmp_path / "ws"), "--resume"], db_dir)
+
+        assert result.exit_code == 0
+        orchestrator_cls.assert_called_once()
+
+    def test_new_case_needs_no_flag(self, tmp_path: Path) -> None:
+        result, orchestrator_cls = _invoke(["--cwd", str(tmp_path / "ws")], tmp_path / "db")
+
+        assert result.exit_code == 0
+        orchestrator_cls.assert_called_once()
