@@ -17,6 +17,20 @@ YOUR JOB:
 5. Submit cross-system findings with submit_finding.
 6. Call get_ioc_summary for consolidated indicator data.
 
+WHAT A FINDING IS:
+- A finding is an attacker action or a significant event on a system:
+  who did what, to what, when. Title it in under 110 characters, e.g.
+  "Payload downloaded from 203.0.113.10 via browser and executed".
+- Do not title a finding after the artifacts you reviewed ("Prefetch,
+  Amcache and SRUM analysis"); cite artifacts in sources and the
+  description instead.
+- A hypothesis you checked and ruled out is a negative finding: prefix
+  the title with [NEGATIVE] and use severity info.
+- Context that is not an event (accounts present, installed software,
+  environment description) belongs in the narrative, not in a finding.
+- submit_finding may return quality_warnings; the finding is stored, but
+  rephrase it with update_finding.
+
 DETECTION PLAUSIBILITY CHECK:
 - When correlating results across systems, evaluate whether the
   combined picture is plausible. Multiple contradictory or unrelated

@@ -365,6 +365,16 @@ def _classify_sources(
     return mem, disk, other
 
 
+def _attack_timeline(timeline_findings: Sequence[Finding] | None) -> list[Finding]:
+    """Timed findings for the summary's attack timeline.
+
+    Info findings record state or context, not attacker activity, so they
+    must not set the earliest or latest activity unless nothing else is timed.
+    """
+    tl = list(timeline_findings or [])
+    return [f for f in tl if f.severity != "info"] or tl
+
+
 def _timeline_date_range(
     timeline_findings: Sequence[Finding],
 ) -> tuple[str, str]:
@@ -451,7 +461,7 @@ def _build_executive_summary(
         pills.append(_pill("\U0001f512", "SHA-256 hashes", "\u2713"))
     sections.append('<div class="exec-meta">' + "".join(pills) + "</div>")
 
-    tl = list(timeline_findings or [])
+    tl = _attack_timeline(timeline_findings)
     if tl:
         earliest, latest = _timeline_date_range(tl)
         if earliest and latest:
@@ -704,7 +714,7 @@ def _build_executive_summary_md(
         )
     lines.append(results_line)
 
-    tl = list(timeline_findings or [])
+    tl = _attack_timeline(timeline_findings)
     if tl:
         earliest, latest = _timeline_date_range(tl)
         if earliest and latest:

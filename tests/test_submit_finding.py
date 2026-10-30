@@ -198,3 +198,63 @@ class TestTimestampCoverageAtSubmission:
             case_db, audit_log, finding_id=fid, event_time_start="2025-01-15T08:30:00Z"
         )
         assert "timestamp_warnings" not in fixed
+
+
+def _quality(result: dict[str, object]) -> list[str]:
+    warnings = result.get("quality_warnings", [])
+    assert isinstance(warnings, list)
+    return [str(w) for w in warnings]
+
+
+class TestQualityWarnings:
+    """Advisory title checks: they warn, never reject, and can be switched off."""
+
+    @pytest.mark.parametrize(
+        ("title", "expected"),
+        [
+            ("Payload downloaded from 203.0.113.10 and executed", None),
+            ("Attacker abused a legitimate remote access tool", None),
+            ("[NEGATIVE] No backdoor detected on host", None),
+            ("Prefetch, Amcache and SRUM analysis of host activity", "data sources"),
+            ("No persistence mechanism was detected", "ruled-out"),
+            ("Scheduled task alert is a false positive", "ruled-out"),
+            ("Attacker staged files " + "x" * 120, "characters"),
+        ],
+    )
+    def test_titles(
+        self,
+        case_db: CaseDB,
+        audit_log: AuditLog,
+        monkeypatch: pytest.MonkeyPatch,
+        title: str,
+        expected: str | None,
+    ) -> None:
+        monkeypatch.delenv("MULDER_FINDING_CHECKS", raising=False)
+        result = _call_submit_finding(case_db, audit_log, title=title, severity="info", **_BASE)
+        assert result["status"] == "accepted"
+        warnings = _quality(result)
+        if expected is None:
+            assert warnings == []
+        else:
+            assert any(expected in w for w in warnings), warnings
+
+    def test_switched_off(
+        self, case_db: CaseDB, audit_log: AuditLog, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("MULDER_FINDING_CHECKS", "off")
+        result = _call_submit_finding(
+            case_db, audit_log, title="No malware detected", severity="info", **_BASE
+        )
+        assert "quality_warnings" not in result
+
+    def test_update_finding_rechecks_title(
+        self, case_db: CaseDB, audit_log: AuditLog, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.delenv("MULDER_FINDING_CHECKS", raising=False)
+        fid = _call_submit_finding(
+            case_db, audit_log, title="No malware detected", severity="info", **_BASE
+        )["finding_id"]
+        fixed = _call_update_finding(
+            case_db, audit_log, finding_id=fid, title="[NEGATIVE] No malware detected"
+        )
+        assert "quality_warnings" not in fixed
