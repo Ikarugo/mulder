@@ -42,7 +42,8 @@ def _invoke_investigate_with_error(error: Exception) -> Result:
     ):
         result = runner.invoke(
             cli,
-            ["investigate", "/evidence", "test-case"],
+            # Path.exists is patched to True, so the case looks existing: --resume.
+            ["investigate", "/evidence", "test-case", "--resume"],
             catch_exceptions=False,
         )
 
