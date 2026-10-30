@@ -508,13 +508,16 @@ RUN echo "deb http://download.opensuse.org/repositories/security:/zeek/xUbuntu_2
 ENV PATH="/opt/zeek/bin:/opt/chainsaw:/opt/hayabusa:${PATH}"
 RUN ldconfig || true
 
-# Install Python forensic packages that require C compilation, then purge build deps
+# Install Python forensic packages that require C compilation, then purge build deps.
+# pyhindsight imports ccl_chromium_reader, which is not on PyPI: without it,
+# run_hindsight fails on import (ModuleNotFoundError).
 RUN apt-get update && apt-get install -y --no-install-recommends \
         gcc g++ make pkg-config python3.12-dev \
         zlib1g-dev libbz2-dev libssl-dev libsqlcipher-dev \
         libffi-dev libsqlite3-dev libfuse3-dev \
     && uv pip install --system --no-cache \
         volatility3 plaso mvt pysqlcipher3 pyhindsight oletools \
+        "ccl_chromium_reader @ git+https://github.com/cclgroupltd/ccl_chromium_reader" \
     && if [ "$TARGETARCH" = "arm64" ]; then \
         uv pip install --system --no-cache flare-floss; \
     fi \

@@ -45,7 +45,16 @@ def main() -> None:
     shadowed = [asset for asset in report["assets"] if asset["shadowed_by"]]
     assert not shadowed, shadowed
     assert report["exit"] == 0, report["exit"]
-    for name in ("pyewf", "pysqlcipher3.dbapi2", "volatility3", "plaso", "mvt", "oletools"):
+    for name in (
+        "pyewf",
+        "pysqlcipher3.dbapi2",
+        "volatility3",
+        "plaso",
+        "mvt",
+        "oletools",
+        # run_hindsight: pyhindsight imports ccl_chromium_reader, absent from PyPI.
+        "pyhindsight.analysis",
+    ):
         importlib.import_module(name)
     from pysqlcipher3 import dbapi2
 
