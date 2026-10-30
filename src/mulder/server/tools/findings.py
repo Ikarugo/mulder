@@ -14,6 +14,7 @@ citation coverage before allowing report generation.
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
 from datetime import datetime, timezone
@@ -93,6 +94,71 @@ def _timestamp_gap(title: str, severity: str, event_time_start: str | None) -> s
         f"the title with '{_NEGATIVE_PREFIX}' if it records a hypothesis you "
         "ruled out. Do not fabricate a timestamp."
     )
+
+
+# Advisory title checks. Weaker models tend to file source inventories
+# ("Prefetch, Amcache and SRUM analysis") or ruled-out checks ("No backdoor
+# detected") as findings, which then lead the report and its timeline.
+# MULDER_FINDING_CHECKS=off silences them; nothing is ever rejected.
+FINDING_CHECKS_ENV = "MULDER_FINDING_CHECKS"
+_TITLE_MAX_CHARS = 110
+_SOURCE_NAME_LIMIT = 3
+_SOURCE_NAME_RE = re.compile(
+    r"\b(?:prefetch|amcache|shimcache|appcompatcache|srum|bam|userassist|hayabusa|"
+    r"chainsaw|evtx|event ?logs?|\$?mft|usn(?: ?journal)?|lnk|jump ?lists?|shellbags?|"
+    r"registry|cryptneturlcache|browser history|recycle ?bin|scheduled tasks|"
+    r"timeline|plaso|yara|sigma)\b",
+    re.IGNORECASE,
+)
+_BENIGN_TITLE_RE = re.compile(
+    r"\b(?:no (?:evidence|sign|indication|trace)s? of|no \w+(?: \w+)? (?:was |were )?"
+    r"(?:detected|found|identified|observed)|not (?:detected|found|observed|malicious)|"
+    r"benign|false positives?|(?:is|are|was|were|appears?) legitimate|ruled out|"
+    r"nothing suspicious)\b",
+    re.IGNORECASE,
+)
+
+
+def _finding_checks_enabled() -> bool:
+    return os.environ.get(FINDING_CHECKS_ENV, "").strip().lower() not in (
+        "off",
+        "0",
+        "false",
+        "no",
+    )
+
+
+def _quality_warnings(title: str) -> list[str]:
+    """Return advisory notes when a title does not read as an attacker action.
+
+    The finding is always stored; the notes ask the analyst to rephrase it
+    with update_finding, or to remove it where delete_finding is available.
+    """
+    if not _finding_checks_enabled():
+        return []
+    warnings: list[str] = []
+    negative = title.startswith(_NEGATIVE_PREFIX)
+    if len(title) > _TITLE_MAX_CHARS:
+        warnings.append(
+            f"Title is {len(title)} characters. Keep it under {_TITLE_MAX_CHARS}: "
+            "name the action and its target (who did what, to what); move the "
+            "detail to the description."
+        )
+    names = {m.group(0).lower() for m in _SOURCE_NAME_RE.finditer(title)}
+    if len(names) >= _SOURCE_NAME_LIMIT:
+        warnings.append(
+            f"Title names {len(names)} data sources or tools ({', '.join(sorted(names))}). "
+            "A finding states what happened on the system, not which artifacts "
+            "were reviewed; cite the artifacts in 'sources' and the description."
+        )
+    if not negative and _BENIGN_TITLE_RE.search(title):
+        warnings.append(
+            "Title reads as a ruled-out or benign check. If it records a hypothesis "
+            f"you disproved, prefix the title with '{_NEGATIVE_PREFIX}' and use "
+            "severity 'info'; if it is only context, remove it and cover it in "
+            "the narrative instead."
+        )
+    return warnings
 
 
 def _evaluate_finalize_gates(
@@ -272,6 +338,11 @@ def submit_finding(
     event_time_start before finalize_report will run; the response says
     so in timestamp_warnings when it is missing.
 
+    A finding is an attacker action or significant event, titled briefly.
+    quality_warnings in the response flag titles that list data sources or
+    read as ruled-out checks; the finding is still stored, rephrase it with
+    update_finding.
+
     Returns finding_id on acceptance. Severity must be
     critical/high/medium/low/info. Confidence must be "confirmed"
     (corroborated by 2+ sources) or "inference".
@@ -355,6 +426,9 @@ def submit_finding(
         result["hint"] = thin_evidence_warning
     if ts_warnings:
         result["timestamp_warnings"] = ts_warnings
+    quality = _quality_warnings(finding.title)
+    if quality:
+        result["quality_warnings"] = quality
 
     elapsed = (time.monotonic() - t0) * 1000
     ctx.audit.log_tool_call(
@@ -484,6 +558,9 @@ def update_finding(
         gap = _timestamp_gap(updated.title, updated.severity, updated.event_time_start)
         if gap:
             ts_warnings.append(gap)
+        quality = _quality_warnings(updated.title)
+        if quality:
+            result["quality_warnings"] = quality
     if ts_warnings:
         result["timestamp_warnings"] = ts_warnings
     return result

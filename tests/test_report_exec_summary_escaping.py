@@ -156,3 +156,14 @@ def test_safe_is_what_makes_the_difference_under_this_policy() -> None:
 
     assert plain == "&lt;script&gt;alert(&#34;xss&#34;)&lt;/script&gt;"
     assert marked == _XSS
+
+
+def test_info_findings_do_not_set_the_attack_timeline() -> None:
+    """A benign info finding must not become the 'earliest activity'."""
+    context = _finding("Environment baseline", severity="info")
+    context.event_time_start = "2025-01-01T08:00:00Z"
+    attack = _finding("Payload executed", severity="high")
+    attack.event_time_start = "2025-01-05T09:30:00Z"
+    html = _summary(timeline_findings=[context, attack])
+    assert "earliest activity was <em>Payload executed</em>" in html
+    assert "2025-01-01" not in html

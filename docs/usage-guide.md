@@ -641,6 +641,10 @@ mulder investigate /evidence my-case \
 
 See the [LiteLLM documentation](https://docs.litellm.ai/docs/proxy/configs) for config file format details.
 
+### Finding Title Checks
+
+Some models file source inventories ("Prefetch, Amcache and SRUM analysis") or ruled-out checks ("No backdoor detected") as findings. `submit_finding` and `update_finding` return `quality_warnings` for titles that are over 110 characters, name three or more data sources, or read as benign without the `[NEGATIVE]` prefix. The finding is always stored; the analyst is asked to rephrase it. Set `MULDER_FINDING_CHECKS=off` (for a container, `-e MULDER_FINDING_CHECKS=off`) to silence these warnings.
+
 ## Case Briefing
 
 You can provide investigation context by placing a `MULDER.md` file in the root of your evidence directory. This is optional but recommended when you have background knowledge about the case.
