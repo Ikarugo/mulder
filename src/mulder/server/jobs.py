@@ -102,6 +102,52 @@ def validate_tool_args(fn: Callable[..., Any], args: dict[str, Any]) -> str | No
     return "; ".join(problems) + "; accepted: " + ", ".join(accepted)
 
 
+#: Names models use interchangeably for the one argument of a tool that says
+#: what to read. Tools differ (``image_path``, ``evtx_path``, ``target_path``,
+#: ``evidence_path``...), and a model that guesses another member of the family
+#: is otherwise refused and spends a round trip correcting it.
+_ALIAS_FAMILIES: tuple[frozenset[str], ...] = (
+    frozenset(
+        {
+            "image_path",
+            "evidence_path",
+            "evtx_path",
+            "target_path",
+            "path",
+            "evtx_dir",
+            "file_path",
+        }
+    ),
+    frozenset({"filename", "evtx_name", "file_name", "evtx_file"}),
+)
+
+
+def apply_param_aliases(fn: Callable[..., Any], args: dict[str, Any]) -> dict[str, Any]:
+    """Return *args* with a misnamed path or file argument renamed to the one *fn* takes.
+
+    A key is renamed only when it is unambiguous: *fn* does not accept it,
+    it belongs to an alias family, *fn* accepts exactly one member of that
+    family, and that member is not already given. Anything else is left for
+    :func:`validate_tool_args` to report.
+    """
+    params = inspect.signature(fn).parameters
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values()):
+        return args
+    renamed = dict(args)
+    for family in _ALIAS_FAMILIES:
+        given = [k for k in renamed if k in family and k not in params]
+        targets = [n for n in params if n in family]
+        if len(given) == 1 and len(targets) == 1 and targets[0] not in renamed:
+            renamed[targets[0]] = renamed.pop(given[0])
+            logger.info(
+                "Renamed argument %r to %r for %s",
+                given[0],
+                targets[0],
+                getattr(fn, "__name__", fn),
+            )
+    return renamed
+
+
 def fill_case_id(
     fn: Callable[..., Any], args: dict[str, Any], case_id: str | None
 ) -> dict[str, Any]:

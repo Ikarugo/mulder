@@ -382,13 +382,13 @@ class TestBatchRejectsBadArgs:
         ):
             result = start_extraction_batch(
                 [
-                    {"tool": "typed_tool", "args": {"image_path": "/bad"}},
+                    {"tool": "typed_tool", "args": {"pattern": "/bad"}},
                     {"tool": "typed_tool", "args": {"target_path": "/good"}},
                 ]
             )
         assert result["status"] == "submitted"
         assert [t["tool"] for t in result["tasks_submitted"]] == ["typed_tool"]
-        assert result["tasks_rejected"][0]["args"] == {"image_path": "/bad"}
+        assert result["tasks_rejected"][0]["args"] == {"pattern": "/bad"}
         assert "accepted: target_path" in result["tasks_rejected"][0]["error"]
         assert "tasks_rejected" in result["hint"]
         assert store.wait_for_batch(result["batch_id"], timeout=5.0)
@@ -436,12 +436,12 @@ class TestRunParallelRejectsBadArgs:
             result = anyio.run(
                 app.run_parallel,
                 [
-                    {"tool": "typed_tool", "args": {"image_path": "/bad"}},
+                    {"tool": "typed_tool", "args": {"pattern": "/bad"}},
                     {"tool": "typed_tool", "args": {"target_path": "/good"}},
                 ],
             )
         results = [r["result"] for r in result["parallel_results"]]
-        assert "unexpected parameter(s) 'image_path'" in results[0]["error"]
+        assert "unexpected parameter(s) 'pattern'" in results[0]["error"]
         assert results[1]["status"] == "ok"
         assert calls == [{"target_path": "/good"}]
 
@@ -587,3 +587,47 @@ class TestRunParallelFillsCaseId:
         results, calls = self._run([{"tool": "case_tool", "args": {"image_path": "/a"}}], None)
         assert "missing required parameter(s) 'case_id'" in results[0]["error"]
         assert calls == []
+
+
+class TestParamAliases:
+    """A misnamed path or file argument is renamed when the intent is unambiguous."""
+
+    @staticmethod
+    def _evtx(evtx_path: str, force: bool = False) -> None: ...
+
+    @staticmethod
+    def _yara(target_path: str, rules: str | None = None) -> None: ...
+
+    @staticmethod
+    def _index_evtx(filename: str, image_path: str | None = None) -> None: ...
+
+    @staticmethod
+    def _two_paths(image_path: str, evtx_path: str) -> None: ...
+
+    def test_image_path_becomes_the_tools_path(self) -> None:
+        from mulder.server.jobs import apply_param_aliases, validate_tool_args
+
+        args = apply_param_aliases(self._evtx, {"image_path": "/triage/WS01/C"})
+        assert args == {"evtx_path": "/triage/WS01/C"}
+        assert validate_tool_args(self._evtx, args) is None
+        assert apply_param_aliases(self._yara, {"path": "/x"}) == {"target_path": "/x"}
+
+    def test_file_name_family(self) -> None:
+        from mulder.server.jobs import apply_param_aliases
+
+        args = apply_param_aliases(self._index_evtx, {"evtx_name": "System.evtx"})
+        assert args == {"filename": "System.evtx"}
+
+    def test_ambiguous_or_already_given_is_left_alone(self) -> None:
+        from mulder.server.jobs import apply_param_aliases
+
+        # The tool takes two members of the family: no guess.
+        assert apply_param_aliases(self._two_paths, {"path": "/x"}) == {"path": "/x"}
+        # The right name is already there: the stray one is reported, not merged.
+        given = {"evtx_path": "/a", "image_path": "/b"}
+        assert apply_param_aliases(self._evtx, given) == given
+        # Two stray members: no guess.
+        two = {"image_path": "/a", "path": "/b"}
+        assert apply_param_aliases(self._yara, two) == two
+        # Unrelated names are untouched.
+        assert apply_param_aliases(self._evtx, {"plugins": []}) == {"plugins": []}

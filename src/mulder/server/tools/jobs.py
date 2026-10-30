@@ -20,7 +20,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from mulder.server.app import get_ctx, has_ctx, mcp
-from mulder.server.jobs import fill_case_id, validate_tool_args
+from mulder.server.jobs import apply_param_aliases, fill_case_id, validate_tool_args
 from mulder.server.tool_access import Role, tool_access
 
 if TYPE_CHECKING:
@@ -99,7 +99,8 @@ def start_extraction_batch(tasks: list[dict[str, Any]]) -> dict[str, Any]:
 
     for task in tasks:
         tool_name = task["tool"]
-        args = fill_case_id(_tool_dispatch_sync[tool_name], task.get("args", {}), open_case_id)
+        args = apply_param_aliases(_tool_dispatch_sync[tool_name], task.get("args", {}))
+        args = fill_case_id(_tool_dispatch_sync[tool_name], args, open_case_id)
         task = {**task, "args": args}
         problem = validate_tool_args(_tool_dispatch_sync[tool_name], args)
         if problem is not None:
