@@ -257,9 +257,10 @@ _ASSETS: tuple[Asset, ...] = (
     ),
     Asset(
         key="eztools",
-        version="net9",
+        version="net10",
         kind="eztools",
-        urls={ANY_ARCH: "https://download.ericzimmermanstools.com/net9"},
+        # The vendor retired net9/ in October 2026; net/ serves the .NET 10 builds.
+        urls={ANY_ARCH: "https://download.ericzimmermanstools.com/net"},
         dest=("zimmermantools",),
         sentinel=("PECmd.dll",),
         # The vendor URL carries no version at all, so there is nothing stable
