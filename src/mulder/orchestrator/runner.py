@@ -208,6 +208,7 @@ class Orchestrator:
             config_path=self._proxy_config,
             thinking=not self._session._no_thinking,
             overrides={m: self.model_config.override_for(m) for m in proxy_models},
+            log_path=self._db_dir / "litellm.log",
         )
         self._proxy.start()
         self._using_proxy = True

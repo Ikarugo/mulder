@@ -51,6 +51,24 @@ PROXY_REASONING_MAX_OUTPUT_TOKENS: int = 32768
 
 _OVERRIDE_FIELDS: tuple[str, ...] = ("context_window", "max_output_tokens", "reasoning")
 
+#: Set to a true value to start LiteLLM with ``--detailed_debug``, which
+#: writes every request it forwards (prompts, evidence excerpts, the
+#: ``reasoning_effort`` sent) to the proxy log. For diagnosis only: the log
+#: then holds case data. LiteLLM masks provider keys in it.
+DEBUG_ENV_VAR: str = "MULDER_LITELLM_DEBUG"
+
+#: Lines of the proxy log quoted in the error when the proxy fails to start.
+_LOG_TAIL_LINES: int = 20
+
+
+def _log_tail(path: Path, lines: int = _LOG_TAIL_LINES) -> str:
+    """The last *lines* lines of *path*, or ``""`` when it cannot be read."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return ""
+    return "\n".join(text.splitlines()[-lines:])
+
 
 @dataclass
 class ModelOverride:
@@ -400,6 +418,7 @@ class ProxyManager:
         config_path: str | None = None,
         thinking: bool = True,
         overrides: dict[str, ModelOverride] | None = None,
+        log_path: Path | None = None,
     ) -> None:
         """Initialize the proxy manager.
 
@@ -414,6 +433,9 @@ class ProxyManager:
                 (``--no-thinking``) serves every model without it.
             overrides: User limits per public model name; they beat
                 whatever LiteLLM reports.
+            log_path: File the proxy's stdout and stderr are appended to.
+                Without it the output is discarded, and a provider error
+                (certificate, DNS, unknown model) leaves no trace.
         """
         import os
 
@@ -424,6 +446,8 @@ class ProxyManager:
         self._overrides = overrides or {}
         self._process: subprocess.Popen[bytes] | None = None
         self._temp_config: Path | None = None
+        self._log_path = log_path
+        self._log_file: Any = None
         #: Effective limits per public model name; filled by :meth:`start`.
         self.settings: dict[str, ModelSettings] = {}
 
@@ -507,6 +531,9 @@ class ProxyManager:
             "--num_workers",
             "1",
         ]
+        debug = os.environ.get(DEBUG_ENV_VAR, "").strip().lower() in ("1", "true", "yes", "on")
+        if debug:
+            cmd.append("--detailed_debug")
 
         logger.info(
             "Starting LiteLLM proxy on port %d for models: %s",
@@ -516,19 +543,44 @@ class ProxyManager:
 
         proxy_env = os.environ.copy()
 
+        output: Any = subprocess.DEVNULL
+        if self._log_path is not None:
+            try:
+                self._log_path.parent.mkdir(parents=True, exist_ok=True)
+                self._log_file = open(self._log_path, "ab")  # noqa: SIM115 - closed in stop()
+                stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
+                self._log_file.write(
+                    f"\n===== {stamp} LiteLLM proxy for {self._models}"
+                    f"{' (detailed debug: requests are logged)' if debug else ''}\n".encode()
+                )
+                self._log_file.flush()
+                output = self._log_file
+                logger.info("LiteLLM proxy output: %s", self._log_path)
+            except OSError as exc:
+                logger.warning("Cannot write the LiteLLM log %s: %s", self._log_path, exc)
+        if debug:
+            logger.warning(
+                "%s is set: the LiteLLM log records every request, evidence excerpts included",
+                DEBUG_ENV_VAR,
+            )
+
         self._process = subprocess.Popen(
             cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT if output is not subprocess.DEVNULL else subprocess.DEVNULL,
             env=proxy_env,
         )
 
         if not _wait_for_health(self._port):
             self.stop()
-            raise RuntimeError(
+            message = (
                 f"LiteLLM proxy failed to start within {_HEALTH_CHECK_TIMEOUT}s. "
                 f"Models: {self._models}"
             )
+            if self._log_path is not None:
+                tail = _log_tail(self._log_path)
+                message += f"\nLiteLLM output ({self._log_path}):\n{tail or '(empty)'}"
+            raise RuntimeError(message)
 
         logger.info("LiteLLM proxy is healthy on port %d", self._port)
 
@@ -549,6 +601,10 @@ class ProxyManager:
                 self._process.wait(timeout=3)
             self._process = None
             logger.info("LiteLLM proxy stopped")
+
+        if self._log_file is not None:
+            self._log_file.close()
+            self._log_file = None
 
         if self._temp_config and self._temp_config.exists():
             self._temp_config.unlink()

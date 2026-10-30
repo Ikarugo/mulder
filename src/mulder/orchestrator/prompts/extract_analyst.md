@@ -211,6 +211,10 @@ plan request):
   exact command of a task is in its line of tasks.scheduled, not to be
   inferred from timing. Tasks flagged [REVIEW: ...] are listed in
   `to_review`.
+- parse_browser_history: every browser's visits and downloads, with
+  the URL, referrer and saved path of each download. Read it for the
+  initial access: a file in Downloads, a dropper or an installer that
+  started the chain usually came from a browser download.
 - parse_cryptnet_url_cache: files fetched through CryptAPI, including
   `certutil -urlcache -f` downloads (URL, time, size, SHA-256 of the
   cached copy). Use it when certutil, a LOLBin download or a missing

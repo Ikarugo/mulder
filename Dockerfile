@@ -117,13 +117,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 RUN curl -fsSL https://dot.net/v1/dotnet-install.sh -o /tmp/dotnet-install.sh \
     && chmod +x /tmp/dotnet-install.sh \
-    && /tmp/dotnet-install.sh --channel 9.0 --runtime dotnet \
+    && /tmp/dotnet-install.sh --channel 10.0 --runtime dotnet \
         --install-dir /opt/dotnet \
     && rm /tmp/dotnet-install.sh
 
 RUN mkdir -p /opt/zimmermantools && cd /opt/zimmermantools \
     && for tool in AmcacheParser AppCompatCacheParser EvtxECmd JLECmd LECmd MFTECmd PECmd RBCmd RECmd SBECmd SrumECmd; do \
-        wget -q "https://download.ericzimmermanstools.com/net9/${tool}.zip" \
+        wget -q "https://download.ericzimmermanstools.com/net/${tool}.zip" \
             -O "/tmp/${tool}.zip" \
         && unzip -qo "/tmp/${tool}.zip" -d /opt/zimmermantools \
         && rm "/tmp/${tool}.zip"; \
